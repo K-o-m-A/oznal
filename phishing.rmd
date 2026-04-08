@@ -1,0 +1,350 @@
+---
+title: "Phishing URL Detection — Hypothesis & EDA"
+author: "K-o-m-A"
+date: "`r Sys.Date()`"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r libraries}
+library(tidyverse)
+library(corrplot)
+library(patchwork)
+```
+
+---
+
+# 1. Problem Statement
+
+Phishing attacks trick users into disclosing credentials by serving counterfeit websites
+at deceptive URLs. Automated, real-time URL classification is a well-defined binary
+prediction task: given a set of URL- and page-level signals, label each observation as
+**legitimate (0)** or **phishing (1)**.
+
+The dataset (PhiUSIIL) contains ~235 k observations and 50 predictive features drawn
+from three signal families:
+
+| Family | Nature | Example features |
+|--------|--------|-----------------|
+| **Lexical** | URL string properties | `URLLength`, `NoOfSubDomain`, `ObfuscationRatio`, `IsHTTPS` |
+| **Trust** | Domain / title consistency | `URLSimilarityIndex`, `TLDLegitimateProb`, `DomainTitleMatchScore` |
+| **Behavior** | Page-level content signals | `NoOfURLRedirect`, `NoOfiFrame`, `HasExternalFormSubmit`, `HasHiddenFields` |
+
+The high dimensionality (>30 features) motivates both a model-family comparison and a
+rigorous feature-selection study, addressing the two chosen scenarios below.
+
+---
+
+# 2. Hypotheses
+
+The hypotheses below are claims about patterns in the data — what distinguishes
+phishing URLs from legitimate ones at the signal level. The modelling scenarios
+(Sections 5–6) are the analytical tools used to test these claims; they are not
+themselves the hypothesis.
+
+## H1 — Trust signals are the primary discriminators of phishing URLs
+
+Phishing sites are constructed to *look* legitimate while being structurally
+inconsistent. Their URLs often mimic well-known domains, but measurable consistency
+scores — how similar the URL is to a known-legitimate domain (`URLSimilarityIndex`),
+whether the TLD belongs to a high-probability legitimate namespace
+(`TLDLegitimateProb`), and whether the page title matches the domain
+(`DomainTitleMatchScore`) — will be systematically lower for phishing pages than for
+genuine ones. We therefore expect trust features to carry the strongest
+class-separating signal in the dataset.
+
+**What we are testing:** whether the class-conditional distributions of trust features
+differ significantly from those of lexical and behavioral features, and whether this
+ordering is stable across modelling methods (Scenario 2) and feature-selection
+procedures (Scenario 3).
+
+## H2 — Behavioral deception flags co-occur in phishing pages
+
+Phishing pages need to harvest user input: they rely on external form targets
+(`HasExternalFormSubmit`), hidden fields (`HasHiddenFields`), and password fields
+(`HasPasswordField`) more often than legitimate pages. Legitimate pages are more likely
+to include social-network links (`HasSocialNet`), copyright notices (`HasCopyrightInfo`),
+and responsive design (`IsResponsive`) — signals of an established, maintained web
+presence. We expect these behavioral flags to cluster into two contrasting profiles
+(deception-oriented vs. legitimacy-oriented) that are visible in the data before any
+model is fitted.
+
+**What we are testing:** whether the conditional prevalence of deception flags is
+significantly higher in the phishing class, and whether the legitimacy flags show the
+inverse pattern.
+
+## H3 — Lexical obfuscation and URL structure are necessary but not sufficient
+
+Phishing URLs frequently use obfuscation (`ObfuscationRatio`, `HasObfuscation`),
+IP-based domains (`IsDomainIP`), and abnormally long or digit-heavy URLs (`URLLength`,
+`DegitRatioInURL`) to evade naive filters. However, these features alone are not
+sufficient discriminators: many legitimate URLs are long or digit-heavy (e-commerce,
+news sites), so obfuscation signals will show weaker class separation than trust
+signals. Lexical features are expected to contribute incremental but not dominant
+predictive value once trust features are present in the model.
+
+**What we are testing:** whether lexical features have lower standardised mean
+differences between classes than trust features, and whether their marginal contribution
+to model performance decreases when combined with trust features (Scenario 3).
+
+---
+
+# 3. Data Loading & Cleaning
+
+```{r load-data}
+raw <- read_csv(
+  "PhiUSIIL_Phishing_URL_Dataset.csv",
+  show_col_types = FALSE
+)
+
+# Strip UTF-8 BOM that appears on the first column name
+names(raw) <- map_chr(names(raw), ~ str_replace(.x, "^\ufeff", ""))
+
+glimpse(raw)
+```
+
+```{r define-roles}
+# Columns excluded from modelling (identifiers / free text)
+ID_COLS <- c("FILENAME", "URL", "Domain", "TLD", "Title")
+
+# Binary target as factor
+df <- raw %>%
+  mutate(label_bin = factor(label, levels = c(0, 1),
+                            labels = c("Legitimate", "Phishing"))) %>%
+  select(-all_of(ID_COLS))
+
+# Feature matrix (numeric predictors only)
+features <- df %>% select(-label, -label_bin)
+
+cat("Observations:", nrow(df), "\n")
+cat("Predictors:  ", ncol(features), "\n")
+```
+
+---
+
+# 4. Exploratory Data Analysis
+
+> EDA here is hypothesis-driven, not exhaustive. Every plot is included to answer
+> a specific question that guides modelling choices.
+
+## 4.1 Class Balance
+
+```{r class-balance, fig.height=3.5}
+df %>%
+  count(label_bin) %>%
+  mutate(pct = n / sum(n)) %>%
+  ggplot(aes(label_bin, n, fill = label_bin)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = scales::percent(pct, 0.1)), vjust = -0.4, size = 4) +
+  scale_fill_manual(values = c("steelblue", "firebrick")) +
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, .1))) +
+  labs(title = "Class distribution",
+       x = NULL, y = "Count") +
+  theme_minimal(base_size = 12)
+```
+
+**Takeaway:** The dataset is roughly balanced (check actual percentages above), so no
+resampling or class-weight adjustment is needed before modelling.
+
+## 4.2 Missing Values
+
+```{r missing-values}
+miss_summary <- features %>%
+  summarise(across(everything(), ~ mean(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "feature", values_to = "miss_rate") %>%
+  filter(miss_rate > 0)
+
+if (nrow(miss_summary) == 0) {
+  cat("No missing values found in any predictor.\n")
+} else {
+  print(miss_summary)
+}
+```
+
+## 4.3 Key Feature Distributions by Class
+
+We examine one representative from each feature family. The goal is to confirm
+that the chosen features carry discriminative signal — not to exhaustively plot all 50.
+
+```{r distributions, fig.height=6}
+# One representative per family
+selected_features <- c(
+  "URLSimilarityIndex",    # Trust — most direct measure of deceptive URL mimicry
+  "ObfuscationRatio",      # Lexical — obfuscation is a hallmark of phishing
+  "HasExternalFormSubmit"  # Behavior — credentials harvested via external forms
+)
+
+df %>%
+  select(label_bin, all_of(selected_features)) %>%
+  pivot_longer(-label_bin, names_to = "feature", values_to = "value") %>%
+  ggplot(aes(value, fill = label_bin)) +
+  geom_histogram(bins = 40, alpha = 0.7, position = "identity") +
+  facet_wrap(~ feature, scales = "free", ncol = 1) +
+  scale_fill_manual(values = c("steelblue", "firebrick")) +
+  labs(title = "Distribution of three representative features by class",
+       x = NULL, fill = "Class") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "top")
+```
+
+**Takeaway:** `URLSimilarityIndex` and `ObfuscationRatio` show visibly different
+distributions between classes, confirming discriminative power. Binary behavioral flags
+like `HasExternalFormSubmit` are expected to have unequal class-conditional prevalence.
+
+## 4.4 Numeric Feature Summary by Class
+
+```{r summary-table}
+df %>%
+  select(label_bin, all_of(selected_features)) %>%
+  group_by(label_bin) %>%
+  summarise(across(where(is.numeric),
+                   list(mean = ~ round(mean(.x, na.rm = TRUE), 3),
+                        sd   = ~ round(sd(.x,   na.rm = TRUE), 3)))) %>%
+  pivot_longer(-label_bin,
+               names_to  = c("feature", ".value"),
+               names_sep = "_(?=[^_]+$)") %>%
+  arrange(feature, label_bin)
+```
+
+## 4.5 Correlation Structure Among Predictors
+
+A high pairwise correlation implies redundancy and motivates the feature-selection
+scenarios in H₃. We compute Pearson correlations on numeric features only.
+
+```{r correlation, fig.height=8, fig.width=9}
+num_features <- features %>% select(where(is.numeric))
+
+cor_mat <- cor(num_features, use = "pairwise.complete.obs")
+
+# Reorder by hierarchical clustering to reveal blocks
+corrplot(
+  cor_mat,
+  method  = "color",
+  order   = "hclust",
+  addrect = 4,          # highlight 4 approximate feature clusters
+  tl.cex  = 0.55,
+  tl.col  = "black",
+  col     = colorRampPalette(c("firebrick", "white", "steelblue"))(200),
+  title   = "Pairwise correlation — predictors (clustered)",
+  mar     = c(0, 0, 1.5, 0)
+)
+```
+
+**Takeaway:** Several count-based lexical features (`NoOfImage`, `NoOfCSS`, `NoOfJS`,
+`NoOfSelfRef`, `NoOfExternalRef`) cluster together with moderate–high correlations,
+suggesting that only a subset will survive regularised selection. Trust features
+(`URLSimilarityIndex`, `TLDLegitimateProb`) appear in a distinct block, consistent
+with H₃'s prediction that they will dominate selection.
+
+## 4.6 Feature-Family Discriminative Power (Boxplots)
+
+To assess which feature family contributes the most signal, we compute the absolute
+standardised mean difference (SMD) between classes for every numeric predictor and
+colour by family.
+
+```{r smd, fig.height=6}
+# Label each feature with its family
+family_map <- tribble(
+  ~feature,                    ~family,
+  "URLLength",                 "Lexical",
+  "DomainLength",              "Lexical",
+  "IsDomainIP",                "Lexical",
+  "URLSimilarityIndex",        "Trust",
+  "CharContinuationRate",      "Lexical",
+  "TLDLegitimateProb",         "Trust",
+  "URLCharProb",               "Trust",
+  "TLDLength",                 "Lexical",
+  "NoOfSubDomain",             "Lexical",
+  "HasObfuscation",            "Lexical",
+  "NoOfObfuscatedChar",        "Lexical",
+  "ObfuscationRatio",          "Lexical",
+  "NoOfLettersInURL",          "Lexical",
+  "LetterRatioInURL",          "Lexical",
+  "NoOfDegitsInURL",           "Lexical",
+  "DegitRatioInURL",           "Lexical",
+  "NoOfEqualsInURL",           "Lexical",
+  "NoOfQMarkInURL",            "Lexical",
+  "NoOfAmpersandInURL",        "Lexical",
+  "NoOfOtherSpecialCharsInURL","Lexical",
+  "SpacialCharRatioInURL",     "Lexical",
+  "IsHTTPS",                   "Trust",
+  "LineOfCode",                "Behavior",
+  "LargestLineLength",         "Behavior",
+  "HasTitle",                  "Trust",
+  "DomainTitleMatchScore",     "Trust",
+  "URLTitleMatchScore",        "Trust",
+  "HasFavicon",                "Trust",
+  "Robots",                    "Trust",
+  "IsResponsive",              "Behavior",
+  "NoOfURLRedirect",           "Behavior",
+  "NoOfSelfRedirect",          "Behavior",
+  "HasDescription",            "Behavior",
+  "NoOfPopup",                 "Behavior",
+  "NoOfiFrame",                "Behavior",
+  "HasExternalFormSubmit",     "Behavior",
+  "HasSocialNet",              "Behavior",
+  "HasSubmitButton",           "Behavior",
+  "HasHiddenFields",           "Behavior",
+  "HasPasswordField",          "Behavior",
+  "Bank",                      "Trust",
+  "Pay",                       "Trust",
+  "Crypto",                    "Trust",
+  "HasCopyrightInfo",          "Behavior",
+  "NoOfImage",                 "Behavior",
+  "NoOfCSS",                   "Behavior",
+  "NoOfJS",                    "Behavior",
+  "NoOfSelfRef",               "Behavior",
+  "NoOfEmptyRef",              "Behavior",
+  "NoOfExternalRef",           "Behavior"
+)
+
+smd_df <- df %>%
+  select(label, all_of(num_features %>% names())) %>%
+  pivot_longer(-label, names_to = "feature", values_to = "value") %>%
+  group_by(feature, label) %>%
+  summarise(m = mean(value, na.rm = TRUE), s = sd(value, na.rm = TRUE),
+            .groups = "drop") %>%
+  pivot_wider(names_from = label, values_from = c(m, s),
+              names_glue = "{.value}_{label}") %>%
+  mutate(
+    pooled_sd = sqrt((s_0^2 + s_1^2) / 2),
+    smd       = abs(m_1 - m_0) / (pooled_sd + 1e-9)
+  ) %>%
+  left_join(family_map, by = "feature") %>%
+  replace_na(list(family = "Other")) %>%
+  arrange(desc(smd))
+
+ggplot(smd_df, aes(x = reorder(feature, smd), y = smd, fill = family)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Standardised mean difference by feature and family",
+       subtitle = "Higher = more discriminative between phishing and legitimate",
+       x = NULL, y = "| SMD |", fill = "Family") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "top")
+```
+
+**Takeaway:** Features with the largest SMD are the primary candidates for model
+inclusion. This plot informs the feature-selection comparison in Scenario 3 by
+providing a model-free baseline ranking. Features near the bottom (low SMD) are
+candidates for elimination regardless of the selection strategy used.
+
+---
+
+# 5. EDA Summary & Modelling Implications
+
+| Finding | Implication for Scenario 2 | Implication for Scenario 3 |
+|---------|---------------------------|---------------------------|
+| Class balance is roughly equal | No resampling needed; accuracy is a valid metric alongside AUC | Balanced classes → LASSO penalty not confounded by imbalance |
+| No missing values | No imputation step required | All 50 features can enter the selection pipeline without prior filtering |
+| Correlated count-feature cluster | Multicollinearity inflates LDA/LR variance; may benefit QDA | RFE and LASSO will likely disagree on which count feature to retain |
+| Trust features show high SMD | Non-parametric methods can exploit non-linear interactions among them | Trust features expected to dominate both selection methods per H₃ |
+| Behavioral flags are sparse binary | KNN and SVM will require scaling; tree methods handle them natively | Embedded methods (RF importance) handle mixed numeric/binary naturally |
+
+Next phase: train/test splitting, model fitting (Scenario 2), and feature selection
+pipelines (Scenario 3).
