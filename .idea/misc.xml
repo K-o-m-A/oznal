@@ -10,8 +10,14 @@
         <entry key="file://$PROJECT_DIR$/phishing.rmd">
           <value>
             <RMarkdownRenderProfile>
+              <option name="lastOutput" value="$PROJECT_DIR$/phishing.nb.html" />
               <option name="outputDirectoryUrl" value="file://$PROJECT_DIR$" />
             </RMarkdownRenderProfile>
+          </value>
+        </entry>
+        <entry key="mock:///phishing (snapshot).rmd">
+          <value>
+            <RMarkdownRenderProfile />
           </value>
         </entry>
       </map>
