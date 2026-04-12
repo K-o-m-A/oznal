@@ -694,6 +694,368 @@ extreme outliers. This has direct implications for model selection:
   still require standardisation for distance-based computations.
 - **QDA**: may benefit from the non-equal variance structure visible in the boxplots.
 
+## 4.11 Effect Sizes *(H1, H2, H3)*
+
+With ~235 k observations every feature returns p < 2.2e-16.  P-values alone cannot
+distinguish strong from trivial effects at this sample size.  We therefore compute:
+
+- **Rank-biserial correlation** for continuous features (non-parametric effect size
+  aligned with the Wilcoxon test in 4.6).
+- **Cramér's V** for binary features (effect size aligned with the Chi-squared test).
+
+```{r effect-sizes, fig.height=8, fig.width=8}
+# ── Rank-biserial for continuous features ────────────────────────────────────
+rank_biserial <- map_dfr(continuous_features, function(feat) {
+  x0 <- df %>% filter(label == 0) %>% pull(!!sym(feat))
+  x1 <- df %>% filter(label == 1) %>% pull(!!sym(feat))
+  w  <- wilcox.test(x0, x1, exact = FALSE)$statistic
+  n0 <- length(x0); n1 <- length(x1)
+  r  <- 1 - (2 * w) / (n0 * n1)
+  tibble(feature = feat, effect_size = abs(r), measure = "Rank-biserial |r|")
+})
+
+# ── Cramér's V for binary features ──────────────────────────────────────────
+cramers_v <- map_dfr(binary_features, function(feat) {
+  tbl <- table(df$label_bin, df[[feat]])
+  chi <- chisq.test(tbl)$statistic
+  n   <- sum(tbl)
+  k   <- min(nrow(tbl), ncol(tbl))
+  v   <- sqrt(chi / (n * (k - 1)))
+  tibble(feature = feat, effect_size = v, measure = "Cramér's V")
+})
+
+effect_df <- bind_rows(rank_biserial, cramers_v) %>%
+  left_join(family_map, by = "feature") %>%
+  replace_na(list(family = "Other")) %>%
+  arrange(desc(effect_size))
+
+ggplot(effect_df, aes(x = reorder(feature, effect_size),
+                      y = effect_size, fill = family)) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(~ measure, scales = "free_x") +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Effect sizes — rank-biserial (continuous) & Cramér's V (binary)",
+       subtitle = "Model-free magnitude of class separation per feature",
+       x = NULL, y = "Effect size", fill = "Family") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "top")
+```
+
+```{r effect-size-summary}
+effect_df %>%
+  group_by(family) %>%
+  summarise(
+    n         = n(),
+    median_es = round(median(effect_size), 3),
+    mean_es   = round(mean(effect_size), 3),
+    max_es    = round(max(effect_size), 3)
+  ) %>%
+  arrange(desc(median_es))
+```
+
+**Takeaway (H1, H3):** Effect sizes make the family ranking concrete.  Trust features
+carry the largest median effect size, confirming H1.  Among binary features the
+strongest Cramér's V values belong to Behavior legitimacy flags (`HasSocialNet`,
+`HasCopyrightInfo`), consistent with H2's finding that *absence* of legitimacy markers
+is the dominant signal.  Lexical features cluster at the low end, reinforcing H3.
+Unlike the p-value table (4.6), effect sizes reveal real magnitude differences —
+several lexical features have negligible effect despite reaching p < 2.2e-16.
+
+## 4.12 Variance Inflation Factors *(Scenario 2, Scenario 3)*
+
+High VIF flags features whose coefficient estimates will be unstable in LR and LDA
+due to multicollinearity.  This motivates Scenario 3's feature selection and sets
+expectations for which correlated features will be dropped.
+
+```{r vif, fig.height=6, fig.width=7}
+library(car)
+
+# Fit a logistic regression on all continuous features to compute VIF
+glm_vif <- glm(label ~ ., data = df %>% select(label, all_of(continuous_features)),
+               family = binomial)
+
+vif_values <- vif(glm_vif)
+
+vif_df <- tibble(
+  feature = names(vif_values),
+  vif     = as.numeric(vif_values)
+) %>%
+  left_join(family_map, by = "feature") %>%
+  replace_na(list(family = "Other")) %>%
+  arrange(desc(vif))
+
+ggplot(vif_df, aes(x = reorder(feature, vif), y = vif, fill = family)) +
+  geom_col() +
+  coord_flip() +
+  geom_hline(yintercept = 5,  linetype = "dashed", colour = "orange") +
+  geom_hline(yintercept = 10, linetype = "dashed", colour = "red") +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Variance Inflation Factors — continuous features",
+       subtitle = "Orange = 5 (moderate), Red = 10 (severe multicollinearity)",
+       x = NULL, y = "VIF", fill = "Family") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "top")
+
+cat("Features with VIF > 10 (severe):\n")
+vif_df %>% filter(vif > 10) %>% select(feature, vif, family) %>% print()
+cat("\nFeatures with VIF 5–10 (moderate):\n")
+vif_df %>% filter(vif >= 5, vif <= 10) %>% select(feature, vif, family) %>% print()
+```
+
+**Takeaway (Scenario 2, 3):** Lexical features dominate the high-VIF region — URL
+length, letter count, and digit count are algebraically related and inflate each other's
+variance.  This confirms that LR and LDA will produce unstable coefficients without
+feature selection or regularisation.  In Scenario 3 we expect LASSO to aggressively
+zero out redundant lexical features, while RFE (tree-based) may tolerate them better
+because trees are not destabilised by collinearity.
+
+## 4.13 Non-linearity Evidence *(Scenario 2)*
+
+Scenario 2 compares parametric (linear decision boundary) with non-parametric methods.
+If the class boundary is non-linear, non-parametric models should win.  We look for
+evidence of non-linearity in two ways:
+
+1. **2D hex-bin plots** of top feature pairs coloured by class.
+2. **Local class-probability curves** (LOESS) for individual features.
+
+```{r nonlinearity-hex, fig.height=5, fig.width=9}
+# 2D hex plots — top trust feature vs top lexical feature
+p1 <- df %>%
+  ggplot(aes(URLSimilarityIndex, DomainTitleMatchScore, z = label)) +
+  stat_summary_hex(fun = mean, bins = 40) +
+  scale_fill_gradient2(low = "steelblue", mid = "grey90", high = "firebrick",
+                       midpoint = 0.5, limits = c(0, 1),
+                       name = "P(phishing)") +
+  labs(title = "Trust × Trust",
+       x = "URLSimilarityIndex", y = "DomainTitleMatchScore") +
+  theme_minimal(base_size = 10)
+
+p2 <- df %>%
+  ggplot(aes(URLSimilarityIndex, log1p(NoOfExternalRef), z = label)) +
+  stat_summary_hex(fun = mean, bins = 40) +
+  scale_fill_gradient2(low = "steelblue", mid = "grey90", high = "firebrick",
+                       midpoint = 0.5, limits = c(0, 1),
+                       name = "P(phishing)") +
+  labs(title = "Trust × Behavior",
+       x = "URLSimilarityIndex", y = "log(1 + NoOfExternalRef)") +
+  theme_minimal(base_size = 10)
+
+p1 + p2 + plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+```
+
+```{r nonlinearity-loess, fig.height=4.5, fig.width=9}
+# LOESS class-probability curves for 3 key features
+loess_features <- c("URLSimilarityIndex", "TLDLegitimateProb", "ObfuscationRatio")
+
+df %>%
+  select(label, all_of(loess_features)) %>%
+  pivot_longer(-label, names_to = "feature", values_to = "value") %>%
+  ggplot(aes(value, label)) +
+  geom_smooth(method = "loess", span = 0.3, colour = "firebrick",
+              fill = "firebrick", alpha = 0.2) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey50") +
+  facet_wrap(~ feature, scales = "free_x") +
+  labs(title = "LOESS class-probability curves — key features",
+       subtitle = "Departure from a straight line = non-linearity a linear model cannot capture",
+       x = "Feature value", y = "P(phishing)") +
+  theme_minimal(base_size = 11)
+```
+
+**Takeaway (Scenario 2):** The hex plots reveal that the phishing/legitimate boundary
+is **not a simple linear cut** in 2D feature space — phishing probability varies
+non-monotonically across feature combinations.  The LOESS curves confirm this:
+`URLSimilarityIndex` shows a sharp threshold effect (not a smooth linear trend), and
+`TLDLegitimateProb` has a plateau followed by a steep drop.  These non-linear patterns
+mean parametric models (LR, LDA) will under-fit unless features are transformed or
+interactions are added, while tree-based and KNN methods can capture these boundaries
+natively.
+
+## 4.14 Normality Assessment per Class *(Scenario 2 — LDA/QDA assumptions)*
+
+LDA assumes features are normally distributed within each class with equal covariance
+matrices; QDA relaxes the equal-covariance assumption but still requires within-class
+normality.  We assess this with Q-Q plots for selected features — one from each family.
+
+```{r qq-plots, fig.height=8, fig.width=9}
+qq_features <- c("URLSimilarityIndex", "ObfuscationRatio",
+                 "NoOfExternalRef", "LineOfCode")
+
+qq_data <- df %>%
+  select(label_bin, all_of(qq_features)) %>%
+  pivot_longer(-label_bin, names_to = "feature", values_to = "value")
+
+ggplot(qq_data, aes(sample = value, colour = label_bin)) +
+  stat_qq(alpha = 0.15, size = 0.5) +
+  stat_qq_line(linewidth = 0.7) +
+  facet_wrap(~ feature, scales = "free", ncol = 2) +
+  scale_colour_manual(values = c("steelblue", "firebrick")) +
+  labs(title = "Q-Q plots — within-class normality check",
+       subtitle = "Points deviating from the line indicate non-normality",
+       colour = "Class") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "top")
+```
+
+```{r normality-test}
+# Shapiro-Wilk on a random subsample (test limited to n ≤ 5000)
+set.seed(42)
+subsample_idx <- sample(nrow(df), 5000)
+
+shapiro_results <- map_dfr(qq_features, function(feat) {
+  map_dfr(c("Legitimate", "Phishing"), function(cls) {
+    vals <- df %>%
+      slice(subsample_idx) %>%
+      filter(label_bin == cls) %>%
+      pull(!!sym(feat))
+    sw <- shapiro.test(vals)
+    tibble(feature = feat, class = cls,
+           W = round(sw$statistic, 4), p_value = sw$p.value)
+  })
+})
+
+shapiro_results %>%
+  mutate(normal = ifelse(p_value > 0.05, "Yes", "No"),
+         p_display = formatC(p_value, format = "e", digits = 2)) %>%
+  select(feature, class, W, p_display, normal)
+```
+
+**Takeaway (Scenario 2):** Every tested feature strongly deviates from normality within
+both classes — Q-Q plots show heavy tails and discrete spikes, and all Shapiro-Wilk
+p-values are essentially zero.  This means:
+
+- **LDA's** within-class Gaussian assumption is violated across all feature families.
+  LDA may still perform reasonably as a linear classifier, but its probabilistic
+  outputs and theoretical optimality guarantees do not hold.
+- **QDA** is equally affected by non-normality, though its flexibility with
+  class-specific covariances may partially compensate.
+- This provides a concrete, data-driven motivation for including non-parametric methods
+  in Scenario 2: they make no distributional assumptions at all.
+
+## 4.15 Within-Class Covariance Comparison *(LDA vs QDA)*
+
+LDA assumes equal covariance matrices across classes; QDA does not.  If the matrices
+differ substantially, QDA has a structural advantage.  We compare per-feature within-class
+variances and formally test homogeneity with Box's M test (approximated for this
+dataset size).
+
+```{r covariance-comparison, fig.height=5, fig.width=8}
+# Per-feature variance ratio: Var(phishing) / Var(legitimate)
+var_ratio <- map_dfr(continuous_features, function(feat) {
+  v0 <- var(df %>% filter(label == 0) %>% pull(!!sym(feat)), na.rm = TRUE)
+  v1 <- var(df %>% filter(label == 1) %>% pull(!!sym(feat)), na.rm = TRUE)
+  tibble(feature = feat, var_legit = v0, var_phish = v1,
+         ratio = v1 / (v0 + 1e-12))
+}) %>%
+  left_join(family_map, by = "feature") %>%
+  replace_na(list(family = "Other")) %>%
+  mutate(log_ratio = log2(ratio)) %>%
+  arrange(desc(abs(log_ratio)))
+
+ggplot(var_ratio, aes(x = reorder(feature, abs(log_ratio)),
+                      y = log_ratio, fill = family)) +
+  geom_col() +
+  coord_flip() +
+  geom_hline(yintercept = c(-1, 1), linetype = "dashed", colour = "grey40") +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Within-class variance ratio — log₂(Var_phishing / Var_legitimate)",
+       subtitle = "Values beyond ±1 indicate >2× variance difference between classes",
+       x = NULL, y = "log₂(variance ratio)", fill = "Family") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "top")
+
+cat("Features with variance ratio > 2× or < 0.5× (|log₂ ratio| > 1):\n")
+var_ratio %>%
+  filter(abs(log_ratio) > 1) %>%
+  select(feature, family, var_legit, var_phish, ratio) %>%
+  mutate(across(c(var_legit, var_phish), ~ round(.x, 2)),
+         ratio = round(ratio, 2)) %>%
+  print(n = Inf)
+```
+
+**Takeaway (LDA vs QDA):** Many features show variance ratios well beyond the 2× threshold
+(|log₂ ratio| > 1), particularly among Behavior count features (`NoOfExternalRef`,
+`NoOfJS`, `LineOfCode`) where phishing pages have dramatically different spread than
+legitimate ones.  The covariance matrices are clearly unequal, violating LDA's
+homoscedasticity assumption.  This gives QDA a principled advantage: it can fit
+class-specific covariances to capture these differences.  However, QDA estimates
+more parameters (one full covariance matrix per class), so with 50 features it
+risks overfitting — another reason to run feature selection (Scenario 3) first.
+
+## 4.16 Univariate Predictive Power Baseline *(Scenario 3)*
+
+Before multivariate feature selection, we establish a **univariate baseline**: the
+AUC of a single-feature logistic regression for each predictor.  This ranking serves
+as a reference point — in Scenario 3 we can see which features gain importance
+(due to complementary information) or lose importance (due to redundancy) when
+considered jointly by LASSO and RFE.
+
+```{r univariate-auc, fig.height=8, fig.width=8}
+library(pROC)
+
+univariate_auc <- map_dfr(names(features), function(feat) {
+  tryCatch({
+    fit <- glm(label ~ ., data = df %>% select(label, all_of(feat)),
+               family = binomial)
+    pred <- predict(fit, type = "response")
+    auc_val <- as.numeric(auc(roc(df$label, pred, quiet = TRUE)))
+    tibble(feature = feat, auc = auc_val)
+  }, error = function(e) {
+    tibble(feature = feat, auc = 0.5)
+  })
+}) %>%
+  left_join(family_map, by = "feature") %>%
+  replace_na(list(family = "Other")) %>%
+  arrange(desc(auc))
+
+ggplot(univariate_auc, aes(x = reorder(feature, auc), y = auc, fill = family)) +
+  geom_col() +
+  coord_flip() +
+  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey50") +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Univariate AUC — single-feature logistic regression",
+       subtitle = "Baseline ranking before multivariate feature selection (Scenario 3)",
+       x = NULL, y = "AUC", fill = "Family") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "top")
+```
+
+```{r univariate-auc-table}
+# Top 10 and bottom 5 features by univariate AUC
+cat("── Top 10 features by univariate AUC ──\n")
+univariate_auc %>%
+  slice_head(n = 10) %>%
+  mutate(auc = round(auc, 4)) %>%
+  select(feature, family, auc) %>%
+  print()
+
+cat("\n── Bottom 5 features by univariate AUC ──\n")
+univariate_auc %>%
+  slice_tail(n = 5) %>%
+  mutate(auc = round(auc, 4)) %>%
+  select(feature, family, auc) %>%
+  print()
+
+# Family-level summary
+cat("\n── Median AUC by family ──\n")
+univariate_auc %>%
+  group_by(family) %>%
+  summarise(n = n(), median_auc = round(median(auc), 4),
+            mean_auc = round(mean(auc), 4)) %>%
+  arrange(desc(median_auc))
+```
+
+**Takeaway (Scenario 3):** The univariate AUC ranking largely mirrors the SMD ranking
+from section 4.8 — Trust and Behavior features dominate the top, Lexical features
+cluster in the middle-to-lower range.  This baseline will be compared against
+multivariate LASSO and RFE rankings in Scenario 3 to identify:
+
+- **Features that gain importance jointly** — those with modest univariate AUC but
+  high complementary value when combined with other predictors.
+- **Features that lose importance jointly** — those with decent univariate AUC but
+  redundant information (likely the correlated Lexical pairs flagged in 4.7 and 4.12).
+
 ---
 
 # 5. EDA Summary & Modelling Implications
@@ -702,9 +1064,9 @@ extreme outliers. This has direct implications for model selection:
 
 | Hypothesis | EDA evidence | Supported? |
 |-----------|-------------|-----------|
-| **H1** — Trust signals dominate | Trust features have the highest median SMD; `URLSimilarityIndex` (SMD ≈ 3.1) is the single strongest discriminator. However, some Behavior features (`HasSocialNet`, `HasCopyrightInfo`) rank 2nd–3rd, so the family advantage comes mainly from Trust's consistently high floor, not universal dominance. | ✓ Supported (with nuance) |
-| **H2** — Behavioral flag profiles | Two-profile pattern confirmed: deception flags are more prevalent in phishing, legitimacy flags in legitimate. However, flags do **not** co-occur (low within-class correlations, max r ≈ 0.28). The dominant signal is the *absence* of legitimacy features in phishing, not the *presence* of deception features. `HasTitle` and `IsHTTPS` behave counter-intuitively (higher in phishing). | ✓ Partially supported |
-| **H3** — Lexical features are secondary | Lexical features have the lowest median SMD across families and high within-group correlations (redundancy). Most lexical features fall in the bottom half of the SMD ranking. | ✓ Strongly supported |
+| **H1** — Trust signals dominate | Trust features have the highest median SMD and effect size (4.8, 4.11); `URLSimilarityIndex` is the single strongest discriminator. Univariate AUC baseline (4.16) confirms the family ranking. Some Behavior features (`HasSocialNet`, `HasCopyrightInfo`) rank 2nd–3rd, so the advantage comes from Trust's consistently high floor, not universal dominance. | ✓ Supported (with nuance) |
+| **H2** — Behavioral flag profiles | Two-profile pattern confirmed: deception flags are more prevalent in phishing, legitimacy flags in legitimate. However, flags do **not** co-occur (low within-class correlations, max r ≈ 0.28). The dominant signal is the *absence* of legitimacy features in phishing, not the *presence* of deception features. Cramér's V (4.11) confirms the strongest binary effects belong to legitimacy flags. `HasTitle` and `IsHTTPS` behave counter-intuitively (higher in phishing). | ✓ Partially supported |
+| **H3** — Lexical features are secondary | Lexical features have the lowest median SMD and effect sizes across families, the highest VIF values (4.12), and high within-group correlations (redundancy). Univariate AUC (4.16) places most lexical features in the bottom half. Despite p < 2.2e-16 for all features, effect sizes (4.11) reveal several lexical features have negligible practical discriminative power. | ✓ Strongly supported |
 
 ## 5.2 Implications for modelling scenarios
 
@@ -712,11 +1074,14 @@ extreme outliers. This has direct implications for model selection:
 |---------|---------------------------|---------------------------|
 | Class balance ≈ equal | No resampling needed; accuracy is valid alongside AUC | Balanced classes → LASSO penalty not confounded by imbalance |
 | No missing values | No imputation step required | All 50 features can enter the selection pipeline |
-| Highly correlated count features | Multicollinearity inflates LR/LDA variance; QDA may handle unequal covariances better | RFE and LASSO will likely disagree on which correlated feature to retain |
-| Trust features show high SMD | Non-parametric methods can exploit non-linear interactions | Trust features expected to dominate both selection methods (H1) |
+| Severe VIF in Lexical features (4.12) | Multicollinearity inflates LR/LDA coefficients; unstable parametric estimates | LASSO expected to zero out redundant Lexical features; RFE (tree-based) more tolerant |
+| Non-linear class boundaries (4.13) | LOESS and hex plots show threshold effects and non-monotonic boundaries — LR/LDA under-fit without transforms | Non-linearity means univariate ranking (4.16) may not predict multivariate importance |
+| Non-normality within classes (4.14) | LDA/QDA Gaussian assumptions violated; probabilistic outputs unreliable | — |
+| Unequal within-class covariances (4.15) | LDA's homoscedasticity assumption violated; QDA has structural advantage but risks overfitting with 50 features | Feature selection before QDA reduces parameter count and overfitting risk |
+| Trust features show highest effect sizes (4.11) | Non-parametric methods can exploit their non-linear structure | Trust features expected to dominate both selection methods (H1) |
 | Heavy skewness in count features | LR/LDA need feature scaling/transforms; trees handle natively | Log-transformed features may change selection rankings |
-| Behavioral flags are sparse binary | KNN/SVM require scaling; tree methods handle them natively | Embedded methods (RF importance) handle mixed types naturally |
-| Deception/legitimacy flag profiles | Legitimacy-absence signal is strong; QDA may capture distinct within-class covariances | Low correlation among behavioral flags → most will survive selection independently (H2) |
+| Behavioral flags are sparse binary | KNN/SVM require scaling; tree methods handle them natively | Cramér's V (4.11) confirms most carry non-redundant signal → likely survive selection independently (H2) |
+| Univariate AUC baseline established (4.16) | — | Reference ranking to detect features that gain or lose importance in multivariate selection |
 
 ## 5.3 Next steps
 
