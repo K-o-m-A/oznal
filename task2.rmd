@@ -1,0 +1,587 @@
+---
+title: "Scenario 2 — Parametric vs. Non-parametric Classification"
+author: "K-o-m-A"
+date: "`r Sys.Date()`"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(MASS)
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(class)
+library(e1071)
+library(randomForest)
+library(pROC)
+```
+
+---
+
+# 1. Data Loading & Preparation
+
+We reload the dataset and apply the same cleaning as in the EDA notebook.
+
+```{r load-data}
+raw <- read_csv(
+  "PhiUSIIL_Phishing_URL_Dataset.csv",
+  show_col_types = FALSE
+)
+names(raw) <- map_chr(names(raw), ~ str_replace(.x, "^\ufeff", ""))
+
+ID_COLS <- c("FILENAME", "URL", "Domain", "TLD", "Title")
+
+df <- raw %>%
+  mutate(label_bin = factor(label, levels = c(0, 1),
+                            labels = c("Legitimate", "Phishing"))) %>%
+  select(-all_of(ID_COLS))
+
+feature_names <- setdiff(names(df), c("label", "label_bin"))
+cat("Observations:", nrow(df), "| Predictors:", length(feature_names), "\n")
+
+# Feature-family mapping (from EDA) — used to test hypotheses via model outputs
+family_map <- tribble(
+  ~feature,                    ~family,
+  "URLLength",                 "Lexical",
+  "DomainLength",              "Lexical",
+  "IsDomainIP",                "Lexical",
+  "URLSimilarityIndex",        "Trust",
+  "CharContinuationRate",      "Lexical",
+  "TLDLegitimateProb",         "Trust",
+  "URLCharProb",               "Trust",
+  "TLDLength",                 "Lexical",
+  "NoOfSubDomain",             "Lexical",
+  "HasObfuscation",            "Lexical",
+  "NoOfObfuscatedChar",        "Lexical",
+  "ObfuscationRatio",          "Lexical",
+  "NoOfLettersInURL",          "Lexical",
+  "LetterRatioInURL",          "Lexical",
+  "NoOfDegitsInURL",           "Lexical",
+  "DegitRatioInURL",           "Lexical",
+  "NoOfEqualsInURL",           "Lexical",
+  "NoOfQMarkInURL",            "Lexical",
+  "NoOfAmpersandInURL",        "Lexical",
+  "NoOfOtherSpecialCharsInURL","Lexical",
+  "SpacialCharRatioInURL",     "Lexical",
+  "IsHTTPS",                   "Trust",
+  "LineOfCode",                "Behavior",
+  "LargestLineLength",         "Behavior",
+  "HasTitle",                  "Trust",
+  "DomainTitleMatchScore",     "Trust",
+  "URLTitleMatchScore",        "Trust",
+  "HasFavicon",                "Trust",
+  "Robots",                    "Trust",
+  "IsResponsive",              "Behavior",
+  "NoOfURLRedirect",           "Behavior",
+  "NoOfSelfRedirect",          "Behavior",
+  "HasDescription",            "Behavior",
+  "NoOfPopup",                 "Behavior",
+  "NoOfiFrame",                "Behavior",
+  "HasExternalFormSubmit",     "Behavior",
+  "HasSocialNet",              "Behavior",
+  "HasSubmitButton",           "Behavior",
+  "HasHiddenFields",           "Behavior",
+  "HasPasswordField",          "Behavior",
+  "Bank",                      "Trust",
+  "Pay",                       "Trust",
+  "Crypto",                    "Trust",
+  "HasCopyrightInfo",          "Behavior",
+  "NoOfImage",                 "Behavior",
+  "NoOfCSS",                   "Behavior",
+  "NoOfJS",                    "Behavior",
+  "NoOfSelfRef",               "Behavior",
+  "NoOfEmptyRef",              "Behavior",
+  "NoOfExternalRef",           "Behavior"
+)
+```
+
+## 1.1 Train/Test Split
+
+Stratified 80/20 split. The test set is held out until final evaluation — all
+model tuning uses cross-validation on the training set only.
+
+```{r train-test-split}
+set.seed(42)
+train_idx <- createDataPartition(df$label, p = 0.8, list = FALSE)
+train_df  <- df[train_idx, ]
+test_df   <- df[-train_idx, ]
+
+cat("Training set:", nrow(train_df), "obs\n")
+cat("Test set:    ", nrow(test_df), "obs\n")
+cat("Train class balance:\n")
+prop.table(table(train_df$label_bin))
+```
+
+## 1.2 Preprocessing
+
+EDA showed heavy skewness in count features and severe multicollinearity.
+We apply `log(1+x)` to skewed count features (|skewness| > 2), then centre
+and scale all predictors.
+
+```{r preprocessing}
+# Compute skewness to identify features needing log-transform
+skewness_fn <- function(x) {
+  x <- x[!is.na(x)]; n <- length(x); m <- mean(x); s <- sd(x)
+  (n / ((n-1)*(n-2))) * sum(((x - m) / s)^3)
+}
+
+skew_vals <- map_dbl(feature_names, ~ skewness_fn(train_df[[.x]]))
+skewed_feats <- feature_names[abs(skew_vals) > 2]
+cat("Log-transforming", length(skewed_feats), "skewed features:\n")
+cat(str_wrap(paste(skewed_feats, collapse = ", "), width = 80), "\n")
+
+# Apply log1p
+log_transform <- function(data, feats) {
+  data %>% mutate(across(all_of(feats), log1p))
+}
+train_df <- log_transform(train_df, skewed_feats)
+test_df  <- log_transform(test_df, skewed_feats)
+
+# Centre and scale using training set parameters
+preProcValues <- preProcess(train_df[, feature_names], method = c("center", "scale"))
+train_scaled <- predict(preProcValues, train_df)
+test_scaled  <- predict(preProcValues, test_df)
+
+# Prepare matrices
+X_train <- train_scaled[, feature_names]
+y_train <- train_scaled$label_bin
+X_test  <- test_scaled[, feature_names]
+y_test  <- test_scaled$label_bin
+```
+
+---
+
+# 2. Model Comparison
+
+We compare three parametric models (Logistic Regression, LDA, QDA) against three
+non-parametric models (Random Forest, KNN, SVM) using 10-fold stratified
+cross-validation, optimising for AUC.
+
+## 2.1 Cross-Validation Setup
+
+```{r cv-setup}
+ctrl <- trainControl(
+  method          = "cv",
+  number          = 10,
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+```
+
+## 2.2 Parametric Models
+
+### Logistic Regression
+
+Logistic regression models the log-odds of phishing as a linear function of the
+features. It is the baseline parametric classifier — fully interpretable through
+coefficients, but assumes a linear decision boundary and is sensitive to
+multicollinearity (which EDA flagged, especially in Lexical features).
+
+```{r model-lr, message=FALSE, warning=FALSE}
+set.seed(42)
+fit_lr <- train(
+  x = X_train, y = y_train,
+  method    = "glm",
+  family    = "binomial",
+  metric    = "ROC",
+  trControl = ctrl
+)
+cat("LR CV AUC:", round(max(fit_lr$results$ROC), 4), "\n")
+```
+
+### Linear Discriminant Analysis (LDA)
+
+LDA assumes each class has a multivariate normal distribution with a shared covariance
+matrix. It finds the linear combination of features that maximises class separation.
+Compared to LR, LDA explicitly models the class-conditional distributions, which can
+be an advantage when the normality assumption approximately holds but a disadvantage
+with the skewed features we observed.
+
+```{r model-lda, message=FALSE, warning=FALSE}
+set.seed(42)
+fit_lda <- train(
+  x = X_train, y = y_train,
+  method    = "lda",
+  metric    = "ROC",
+  trControl = ctrl
+)
+cat("LDA CV AUC:", round(max(fit_lda$results$ROC), 4), "\n")
+```
+
+### Quadratic Discriminant Analysis (QDA)
+
+QDA relaxes LDA's shared-covariance assumption — each class gets its own covariance
+matrix, allowing quadratic (curved) decision boundaries. This is relevant here because
+EDA showed unequal class spreads in several features. The cost is more parameters to
+estimate, which increases variance.
+
+QDA requires invertible per-class covariance matrices. With severe multicollinearity
+in our features (VIF > 2000 for some Lexical pairs), we remove highly correlated
+features (|r| > 0.7) before fitting to ensure numerical stability.
+
+```{r model-qda, message=FALSE, warning=FALSE}
+cor_train <- cor(X_train)
+high_cor  <- findCorrelation(cor_train, cutoff = 0.7)
+cat("Removing", length(high_cor), "correlated features for QDA:\n")
+cat(names(X_train)[high_cor], sep = ", ")
+cat("\n")
+
+X_train_qda <- X_train[, -high_cor]
+X_test_qda  <- X_test[, -high_cor]
+cat("QDA will use", ncol(X_train_qda), "features\n")
+
+set.seed(42)
+fit_qda <- train(
+  x = X_train_qda, y = y_train,
+  method    = "qda",
+  metric    = "ROC",
+  trControl = ctrl
+)
+cat("QDA CV AUC:", round(max(fit_qda$results$ROC), 4), "\n")
+```
+
+## 2.3 Non-parametric Models
+
+### Random Forest
+
+Random Forest builds an ensemble of decision trees on bootstrap samples with random
+feature subsets at each split. It handles non-linear relationships and interactions
+natively, is robust to outliers and multicollinearity, and provides built-in variable
+importance. The main tuning parameter is `mtry` — the number of features considered
+at each split.
+
+```{r model-rf, message=FALSE, warning=FALSE}
+set.seed(42)
+fit_rf <- train(
+  x = X_train, y = y_train,
+  method    = "rf",
+  metric    = "ROC",
+  trControl = ctrl,
+  tuneGrid  = expand.grid(mtry = c(5, 7, 10, 15)),
+  ntree     = 500
+)
+cat("RF best mtry:", fit_rf$bestTune$mtry, "\n")
+cat("RF CV AUC:   ", round(max(fit_rf$results$ROC), 4), "\n")
+```
+
+### K-Nearest Neighbours (KNN)
+
+KNN classifies each observation by majority vote of its k nearest neighbours in
+feature space. It makes no distributional assumptions but is sensitive to the
+curse of dimensionality and feature scaling (handled in preprocessing). We tune
+k over a range of values.
+
+```{r model-knn, message=FALSE, warning=FALSE}
+set.seed(42)
+fit_knn <- train(
+  x = X_train, y = y_train,
+  method    = "knn",
+  metric    = "ROC",
+  trControl = ctrl,
+  tuneGrid  = expand.grid(k = c(3, 5, 7, 11, 15))
+)
+cat("KNN best k:", fit_knn$bestTune$k, "\n")
+cat("KNN CV AUC:", round(max(fit_knn$results$ROC), 4), "\n")
+```
+
+### Support Vector Machine (SVM with RBF kernel)
+
+SVM finds the maximum-margin hyperplane separating classes. With the radial basis
+function (RBF) kernel, it can capture non-linear boundaries. The key tuning parameters
+are `C` (regularisation strength) and `sigma` (kernel width). SVM is effective in
+high-dimensional spaces but less interpretable than linear models.
+
+```{r model-svm, message=FALSE, warning=FALSE}
+set.seed(42)
+fit_svm <- train(
+  x = X_train, y = y_train,
+  method    = "svmRadial",
+  metric    = "ROC",
+  trControl = ctrl,
+  tuneLength = 5
+)
+cat("SVM best C:    ", fit_svm$bestTune$C, "\n")
+cat("SVM best sigma:", round(fit_svm$bestTune$sigma, 5), "\n")
+cat("SVM CV AUC:    ", round(max(fit_svm$results$ROC), 4), "\n")
+```
+
+---
+
+# 3. Cross-Validation Results
+
+```{r cv-comparison, fig.height=5, fig.width=8}
+cv_results <- resamples(list(
+  LR  = fit_lr,
+  LDA = fit_lda,
+  QDA = fit_qda,
+  RF  = fit_rf,
+  KNN = fit_knn,
+  SVM = fit_svm
+))
+
+summary(cv_results)
+```
+
+```{r cv-boxplot, fig.height=5, fig.width=8}
+bwplot(cv_results, metric = "ROC",
+       main = "10-fold CV AUC comparison — Parametric vs. Non-parametric")
+```
+
+```{r cv-dotplot, fig.height=5, fig.width=8}
+dotplot(cv_results, metric = "ROC",
+        main = "Mean CV AUC with 95% CI")
+```
+
+**Interpretation:** Models with higher median and tighter spread are preferred — they
+are both more accurate and more stable. The parametric vs. non-parametric grouping
+reveals whether the flexibility of non-parametric methods pays off on this dataset.
+
+---
+
+# 4. Test Set Evaluation
+
+We evaluate all models on the held-out test set to check for overfitting and get
+unbiased performance estimates.
+
+```{r test-evaluation}
+models <- list(
+  LR = fit_lr, LDA = fit_lda, QDA = fit_qda,
+  RF = fit_rf, KNN = fit_knn, SVM = fit_svm
+)
+
+test_results <- map_dfr(names(models), function(name) {
+  mod  <- models[[name]]
+  x_te <- if (name == "QDA") X_test_qda else X_test
+  pred <- predict(mod, x_te)
+  prob <- predict(mod, x_te, type = "prob")
+
+  cm <- confusionMatrix(pred, y_test, positive = "Phishing")
+  roc_obj <- roc(y_test, prob$Phishing, levels = c("Legitimate", "Phishing"),
+                 quiet = TRUE)
+
+  tibble(
+    Model       = name,
+    Accuracy    = round(cm$overall["Accuracy"], 4),
+    Sensitivity = round(cm$byClass["Sensitivity"], 4),
+    Specificity = round(cm$byClass["Specificity"], 4),
+    F1          = round(cm$byClass["F1"], 4),
+    AUC         = round(auc(roc_obj), 4),
+    Type        = ifelse(name %in% c("LR", "LDA", "QDA"),
+                         "Parametric", "Non-parametric")
+  )
+})
+
+test_results %>%
+  arrange(desc(AUC)) %>%
+  print()
+```
+
+```{r test-roc, fig.height=6, fig.width=7}
+roc_list <- map(names(models), function(name) {
+  x_te <- if (name == "QDA") X_test_qda else X_test
+  prob <- predict(models[[name]], x_te, type = "prob")
+  roc(y_test, prob$Phishing, levels = c("Legitimate", "Phishing"), quiet = TRUE)
+})
+names(roc_list) <- names(models)
+
+model_cols <- c(
+  LR = "#1f77b4", LDA = "#4a90d9", QDA = "#7ec8e3",
+  RF = "#d62728", KNN = "#e57373", SVM = "#ff9896"
+)
+
+plot(roc_list[[1]], col = model_cols[1], lwd = 2,
+     main = "ROC Curves — Test Set")
+for (i in 2:length(roc_list)) {
+  lines(roc_list[[i]], col = model_cols[i], lwd = 2)
+}
+legend("bottomright",
+       legend = paste0(names(roc_list), " (AUC=",
+                       sapply(roc_list, function(r) round(auc(r), 3)), ")"),
+       col = model_cols, lwd = 2, cex = 0.8)
+```
+
+---
+
+# 5. Hypothesis Verification Through Models
+
+EDA formulated three hypotheses about which feature families drive phishing detection.
+Here we test whether these findings hold *inside the models* — not just in raw
+descriptive statistics — by extracting feature importance from LR (parametric)
+and RF (non-parametric) and comparing them by family.
+
+## 5.1 Feature Importance: LR Coefficients vs. RF Importance
+
+```{r feature-importance, fig.height=8, fig.width=10}
+# LR: absolute standardised coefficients
+lr_coefs <- coef(fit_lr$finalModel)[-1]  # drop intercept
+lr_imp <- tibble(
+  feature    = names(lr_coefs),
+  importance = abs(as.numeric(lr_coefs))
+) %>%
+  mutate(importance = importance / max(importance)) %>%
+  left_join(family_map, by = "feature") %>%
+  replace_na(list(family = "Other")) %>%
+  mutate(model = "LR (|coef|, normalised)")
+
+# RF: variable importance (MeanDecreaseGini)
+rf_imp_raw <- varImp(fit_rf)$importance
+rf_imp <- tibble(
+  feature    = rownames(rf_imp_raw),
+  importance = rf_imp_raw$Overall / max(rf_imp_raw$Overall)
+) %>%
+  left_join(family_map, by = "feature") %>%
+  replace_na(list(family = "Other")) %>%
+  mutate(model = "RF (Gini, normalised)")
+
+# Combined plot
+bind_rows(lr_imp, rf_imp) %>%
+  ggplot(aes(x = reorder(feature, importance), y = importance, fill = family)) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(~ model, scales = "free_x") +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Feature importance — parametric (LR) vs. non-parametric (RF)",
+       subtitle = "Coloured by family to test H1 (Trust dominates) and H3 (Lexical is weakest)",
+       x = NULL, y = "Normalised importance", fill = "Family") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "top")
+```
+
+## 5.2 Family-Level Importance Comparison
+
+```{r family-importance, fig.height=4, fig.width=8}
+family_imp <- bind_rows(lr_imp, rf_imp) %>%
+  group_by(model, family) %>%
+  summarise(
+    median_imp = median(importance),
+    mean_imp   = mean(importance),
+    max_imp    = max(importance),
+    n          = n(),
+    .groups    = "drop"
+  )
+
+ggplot(family_imp, aes(family, median_imp, fill = family)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ model) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Median feature importance by family",
+       subtitle = "H1: Trust > others | H3: Lexical is weakest",
+       x = NULL, y = "Median normalised importance") +
+  theme_minimal(base_size = 12)
+
+family_imp %>%
+  select(model, family, n, median_imp, mean_imp, max_imp) %>%
+  mutate(across(where(is.numeric) & !n, ~ round(.x, 3))) %>%
+  arrange(model, desc(median_imp)) %>%
+  print()
+```
+
+## 5.3 Hypothesis Conclusions from Models
+
+```{r hypothesis-conclusions}
+# Top 10 features per model
+cat("=== Top 10 features — LR ===\n")
+lr_imp %>% arrange(desc(importance)) %>% slice_head(n = 10) %>%
+  select(feature, family, importance) %>%
+  mutate(importance = round(importance, 3)) %>% print()
+
+cat("\n=== Top 10 features — RF ===\n")
+rf_imp %>% arrange(desc(importance)) %>% slice_head(n = 10) %>%
+  select(feature, family, importance) %>%
+  mutate(importance = round(importance, 3)) %>% print()
+```
+
+**H1 — Trust signals are primary discriminators:**
+We verify whether Trust features consistently rank highest in importance across both
+the parametric (LR) and non-parametric (RF) model. If `URLSimilarityIndex` and
+`DomainTitleMatchScore` appear in the top features of both models, H1 is confirmed
+not just descriptively (EDA) but also *inside the fitted models*.
+
+**H2 — Behavioral flag profiles:**
+We check whether legitimacy-mimicry flags (`HasSocialNet`, `HasCopyrightInfo`,
+`HasDescription`) rank higher than deception flags (`HasExternalFormSubmit`,
+`HasHiddenFields`) in both LR and RF — confirming that the two-mechanism structure
+identified in EDA translates into actual model signal.
+
+**H3 — Lexical features are secondary:**
+If the Lexical family has the lowest median importance in both models, H3 is confirmed:
+lexical features contribute but are not the primary drivers once Trust and Behavioral
+features are present.
+
+---
+
+# 6. Explainability & Reproducibility (Scenario 2 requirement)
+
+```{r explainability-table}
+explain_df <- tribble(
+  ~Model, ~Type, ~Explainability, ~Reproducibility,
+  "LR",  "Parametric",
+    "High — coefficients directly quantify feature effects on log-odds; sign and magnitude are interpretable",
+    "Perfect — deterministic optimisation, same result every run",
+  "LDA", "Parametric",
+    "High — discriminant coefficients show which features drive class separation; linear boundary is easy to visualise",
+    "Perfect — closed-form solution, fully deterministic",
+  "QDA", "Parametric",
+    "Medium — class-specific covariances make interpretation harder than LDA; quadratic boundary is less intuitive",
+    "Perfect — closed-form solution, fully deterministic",
+  "RF",  "Non-parametric",
+    "Medium — variable importance ranks features but individual predictions require methods like SHAP; ensemble of 500 trees is not directly readable",
+    "Seed-dependent — bootstrap sampling and random feature selection introduce stochasticity; fixed seed ensures reproducibility",
+  "KNN", "Non-parametric",
+    "Low — predictions depend on local neighbourhood; no global model or feature ranking; hard to explain why a specific URL was flagged",
+    "Perfect — deterministic given the same data and k; no randomness in the algorithm",
+  "SVM", "Non-parametric",
+    "Low — RBF kernel maps features to high-dimensional space; support vectors identify the boundary but individual feature contributions are opaque",
+    "Seed-dependent — caret's tuning uses resampling; the SVM optimisation itself is deterministic for fixed hyperparameters"
+)
+
+explain_df %>%
+  select(Model, Type, Explainability, Reproducibility) %>%
+  knitr::kable(format = "pipe",
+               caption = "Explainability and reproducibility comparison")
+```
+
+**Discussion:**
+
+Parametric models offer a clear advantage in **explainability**: LR coefficients and
+LDA discriminant loadings directly map features to predictions, which matters for
+phishing detection where domain analysts need to understand *why* a URL was flagged.
+All parametric models are also **perfectly reproducible** — they use deterministic,
+closed-form or convex optimisation.
+
+Non-parametric models trade interpretability for flexibility. RF captures non-linear
+effects and interactions, and its variable importance provides some global insight,
+but individual predictions are harder to explain. KNN offers no global model at all.
+SVM with RBF kernel is similarly opaque. RF's reproducibility depends on the random
+seed; KNN and SVM (with fixed hyperparameters) are deterministic.
+
+The choice depends on the use case: if the system must justify its decisions
+(e.g. to a security team), parametric models are preferable. If raw predictive
+accuracy is the priority, non-parametric models may be worth the interpretability cost.
+
+---
+
+# 7. Summary
+
+```{r scenario2-summary}
+best_param <- test_results %>%
+  filter(Type == "Parametric") %>%
+  slice_max(AUC, n = 1)
+
+best_nonparam <- test_results %>%
+  filter(Type == "Non-parametric") %>%
+  slice_max(AUC, n = 1)
+
+cat("Best parametric:     ", best_param$Model,
+    "(AUC =", best_param$AUC, ")\n")
+cat("Best non-parametric: ", best_nonparam$Model,
+    "(AUC =", best_nonparam$AUC, ")\n")
+cat("AUC difference:      ",
+    round(best_nonparam$AUC - best_param$AUC, 4), "\n")
+```
