@@ -292,12 +292,11 @@ df %>%
 ```
 
 **Takeaway (H1):** Trust features (`URLSimilarityIndex`, `DomainTitleMatchScore`)
-show the clearest class separation — already visible confirmation of H1.  Notably,
+show the clearest class separation — visible confirmation of H1.  Notably,
 `URLSimilarityIndex` is *higher* for phishing: phishing URLs deliberately mimic
-legitimate domains, pushing this score up.  Lexical ratio features (`ObfuscationRatio`,
-`DegitRatioInURL`) show substantial class overlap, previewing H3's finding that they are
-informative but not sufficient alone.  Behavioral count features require log-transformation
-to reveal any separation, with implications for parametric modelling (Scenario 2).
+legitimate domains.  Lexical ratio features show substantial class overlap, previewing
+H3.  Behavioral count features require log-transformation to reveal separation, with
+implications for parametric modelling (Scenario 2).
 
 ### 4.2.2 Discriminative Power by Family
 
@@ -375,65 +374,7 @@ smd_family %>%
 
 However, the **individual feature ranking** tells a more nuanced story.  `URLSimilarityIndex` (Trust) sits at #1, but positions #2–5 are all Behavior features — `HasSocialNet`, `HasCopyrightInfo`, `HasDescription`, `HasSubmitButton` — each outperforming the second-best Trust feature (`DomainTitleMatchScore`).  Trust wins the median comparison because its features cluster tightly around 1.0, whereas Behavior has high within-family variance: a handful of legitimacy flags are very strong while many deception flags are weak, lowering the family median.
 
-**A more precise conclusion:** Trust is the most *consistent* family, but it does not monopolise the top discriminators.  The highest-SMD individual features are a mix of Trust and Behavior.  H1 should be interpreted as "Trust features are reliably useful across the board" rather than "Trust features dominate the top of the ranking."  Lexical features remain the weakest family in both the median and individual-feature comparisons, confirming H3.
-
-### 4.2.3 Effect Sizes — Continuous Features
-
-P-values saturate at this sample size.  **Rank-biserial correlation** provides a
-non-parametric, model-free effect size quantifying the practical magnitude of
-separation per continuous feature.
-
-```{r rank-biserial, fig.height=6, fig.width=7}
-rank_biserial <- map_dfr(continuous_features, function(feat) {
-  x0 <- df %>% filter(label == 0) %>% pull(!!sym(feat))
-  x1 <- df %>% filter(label == 1) %>% pull(!!sym(feat))
-  w  <- wilcox.test(x0, x1, exact = FALSE)$statistic
-  n0 <- length(x0); n1 <- length(x1)
-  r  <- 1 - (2 * w) / (as.numeric(n0) * as.numeric(n1))
-  tibble(feature = feat, effect_size = abs(r))
-})
-
-rb_df <- rank_biserial %>%
-  left_join(family_map, by = "feature") %>%
-  replace_na(list(family = "Other")) %>%
-  arrange(desc(effect_size))
-
-ggplot(rb_df, aes(x = reorder(feature, effect_size), y = effect_size, fill = family)) +
-  geom_col() +
-  coord_flip() +
-  scale_fill_brewer(palette = "Set2") +
-  labs(title = "Rank-biserial correlation — continuous features",
-       subtitle = "Model-free magnitude of class separation",
-       x = NULL, y = "Rank-biserial |r|", fill = "Family") +
-  theme_minimal(base_size = 10) +
-  theme(legend.position = "top")
-```
-
-```{r rank-biserial-summary}
-rb_df %>%
-  group_by(family) %>%
-  summarise(
-    n         = n(),
-    median_es = round(median(effect_size), 3),
-    mean_es   = round(mean(effect_size), 3),
-    max_es    = round(max(effect_size), 3)
-  ) %>%
-  arrange(desc(median_es))
-```
-
-**Takeaway (H1, H2):** `URLSimilarityIndex` (Trust) achieves the single highest
-rank-biserial correlation (~0.99), but **Behavioral count features dominate as a family**
-(median |r| = 0.928 vs. Trust 0.541 vs. Lexical 0.340): features like `LineOfCode` and
-`NoOfExternalRef` are near-zero in legitimate pages but very large in phishing pages,
-producing near-perfect rank separation.  Within Trust, `URLSimilarityIndex` is an outlier
-— other Trust features (`TLDLegitimateProb`, `URLCharProb`) fall considerably lower.
-This differs from the SMD ranking in 4.2.2 (where Trust median SMD = 1.005 > Behavior
-0.595): SMD measures mean-level differences, while rank-biserial captures the full
-distributional shift, making it more sensitive to the extreme right-skew of count
-features.  Crucially, Lexical features remain last in both rankings — consistently
-supporting H3.  H1 (Trust > Lexical) holds for SMD; H2 (Behavior flags are strong
-discriminators) receives additional confirmation here.
-
+**A more precise conclusion:** Trust is the most *consistent* family, but it does not monopolise the top discriminators.  The highest-SMD individual features are a mix of Trust and Behavior.  H1 should be interpreted as "Trust features are reliably useful across the board" rather than "Trust features dominate the top of the ranking."  Lexical features remain the weakest family, confirming H3.
 
 ## 4.3 H2 — Behavioral Flags form Contrasting Profiles
 
@@ -478,81 +419,7 @@ prevalence_df %>%
 
 **Takeaway (H2):** Confirmed.  Phishing pages show higher prevalence for nearly every binary feature — both deception-oriented and legitimacy-mimicry flags lean phishing, as H2 predicts.  The legitimacy-mimicry group drives the largest absolute gaps: `HasSocialNet` (~85% phishing vs. ~5% legitimate), `HasCopyrightInfo`, `HasDescription`, and `IsResponsive` all have far higher prevalence in phishing, consistent with the hypothesis that phishing sites actively inject these signals to appear trustworthy.  `IsHTTPS` (~100% phishing) and `HasTitle` (~100% phishing) confirm that free TLS certificates and deliberate title mimicry are now standard practice.  Deception flags (`HasExternalFormSubmit`, `HasHiddenFields`, `HasPasswordField`) also lean phishing but with low absolute prevalence, producing smaller absolute differences — matching the predicted two-mechanism structure.
 
-### 4.3.2 Behavioral Flag Co-occurrence
-
-H2 predicts that deception-oriented and legitimacy-oriented flags form two contrasting
-profiles.  We examine whether these flags also co-occur within phishing pages by
-computing the correlation matrix among behavioral binary features, conditioned on the
-phishing class.
-
-```{r h2-cooccurrence, fig.height=5.5, fig.width=6}
-# Deception-oriented flags
-deception_flags <- c("HasExternalFormSubmit", "HasHiddenFields",
-                     "HasPasswordField", "NoOfPopup", "NoOfiFrame")
-
-# Legitimacy-oriented flags (HasTitle excluded — it is more prevalent in phishing)
-legit_flags <- c("HasSocialNet", "HasCopyrightInfo", "IsResponsive",
-                 "HasFavicon", "HasDescription")
-
-h2_features <- c(deception_flags, legit_flags)
-h2_available <- intersect(h2_features, names(features))
-
-# Correlation among H2 features within phishing class
-cor_phish <- df %>%
-  filter(label == 1) %>%
-  select(all_of(h2_available)) %>%
-  cor(use = "pairwise.complete.obs")
-
-corrplot(
-  cor_phish,
-  method  = "color",
-  type    = "upper",
-  addCoef.col = "black",
-  number.cex  = 0.65,
-  tl.cex  = 0.7,
-  tl.col  = "black",
-  col     = colorRampPalette(c("firebrick", "white", "steelblue"))(200),
-  title   = "Correlation among behavioral flags (phishing pages only)",
-  mar     = c(0, 0, 1.5, 0)
-)
-```
-
-```{r h2-profile-comparison, fig.height=4.5, fig.width=7}
-# Proportion with at least one occurrence per class (handles both binary and count features)
-h2_prevalence <- df %>%
-  select(label_bin, all_of(h2_available)) %>%
-  pivot_longer(-label_bin, names_to = "feature", values_to = "value") %>%
-  group_by(label_bin, feature) %>%
-  summarise(prevalence = mean(value > 0, na.rm = TRUE), .groups = "drop") %>%
-  mutate(
-    profile = case_when(
-      feature %in% deception_flags ~ "Deception",
-      feature %in% legit_flags     ~ "Legitimacy",
-      TRUE                         ~ "Other"
-    )
-  )
-
-ggplot(h2_prevalence, aes(feature, prevalence, fill = label_bin)) +
-  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
-  facet_wrap(~ profile, scales = "free_x") +
-  coord_flip() +
-  scale_fill_manual(values = c("steelblue", "firebrick")) +
-  scale_y_continuous(labels = percent_format()) +
-  labs(title = "H2: Deception vs. legitimacy flag profiles by class",
-       x = NULL, y = "Prevalence", fill = "Class") +
-  theme_minimal(base_size = 11) +
-  theme(legend.position = "top")
-```
-
-**Takeaway (H2):** Confirmed — flags contribute independently, not as a cluster.
-Pairwise correlations among behavioral flags within the phishing class are low
-(most r < 0.15, max ≈ 0.28 for `HasPasswordField`–`HasHiddenFields`), meaning phishing
-pages combine tactics selectively rather than all at once.  This holds for both
-mechanism groups: neither deception flags nor legitimacy-mimicry flags form a tight
-co-occurring block.  Each flag therefore carries non-redundant discriminative information,
-which means most behavioral features are likely to survive feature selection in Scenario 3.
-
-### 4.3.3 Effect Sizes — Binary Features
+### 4.3.2 Effect Sizes — Binary Features
 
 **Cramér's V** provides an effect size aligned with the Chi-squared test, quantifying
 the practical magnitude of association between each binary feature and class.
@@ -597,22 +464,20 @@ cv_df %>%
 
 **Takeaway (H2):** Confirmed — legitimacy-mimicry flags dominate by effect size.
 `HasSocialNet` and `HasCopyrightInfo` have the highest Cramér's V among all binary
-features, driven by the large prevalence gap between classes (phishing much higher, as
-shown in §4.3.1).  Deception flags (`HasExternalFormSubmit`, `HasPasswordField`) have
-lower Cramér's V because their absolute prevalence is low in both classes, producing a
-smaller gap despite being statistically significant (p < 2.2e-16).  This confirms the
-predicted two-mechanism structure: legitimacy-mimicry intensity is the dominant
-discriminative signal, with deception flags providing weaker but independent additional
-signal.
+features, driven by the large prevalence gap between classes.  Deception flags
+(`HasExternalFormSubmit`, `HasPasswordField`) have lower Cramér's V because their
+absolute prevalence is low in both classes.  This confirms the predicted two-mechanism
+structure: legitimacy-mimicry is the dominant discriminative signal, deception flags
+provide weaker but independent additional signal.
 
 
 ## 4.4 H3 — Lexical Features are Necessary but Not Sufficient
 
 H3 predicts that lexical and URL-structure features carry discriminative signal but are
 weaker than trust features and suffer from inter-feature redundancy.  The density plots
-in 4.2.1 and the SMD/effect-size results in 4.2.2–4.2.3 already show the Trust > Lexical
-ranking; here we quantify *why* lexical features are secondary through correlation
-structure and variance inflation.
+in 4.2.1 and the SMD results in 4.2.2 already show the Trust > Lexical ranking; here we
+quantify *why* lexical features are secondary through correlation structure and variance
+inflation.
 
 ### 4.4.1 Correlation Structure Among Lexical Predictors
 
@@ -760,33 +625,13 @@ cat("These are:\n")
 skew_df %>% filter(abs_skew > 2) %>% select(feature, skewness, family) %>% print()
 ```
 
-```{r boxplots-skewed, fig.height=5, fig.width=8}
-# Boxplots for the most skewed features — log(1+x) scale for readability
-top_skewed <- skew_df %>% slice_head(n = 6) %>% pull(feature)
-
-df %>%
-  select(label_bin, all_of(top_skewed)) %>%
-  pivot_longer(-label_bin, names_to = "feature", values_to = "value") %>%
-  mutate(value = log1p(value)) %>%
-  ggplot(aes(label_bin, value, fill = label_bin)) +
-  geom_boxplot(outlier.alpha = 0.1, outlier.size = 0.5) +
-  facet_wrap(~ feature, scales = "free_y", ncol = 3) +
-  scale_fill_manual(values = c("steelblue", "firebrick")) +
-  labs(title = "Boxplots of most skewed features — log(1+x) scale",
-       subtitle = "Log transform compresses outliers; class differences now visible",
-       x = NULL, y = "log(1 + value)") +
-  theme_minimal(base_size = 10) +
-  theme(legend.position = "none")
-```
-
 **Takeaway (Scenario 2):** Several count-based features are heavily right-skewed with
 extreme outliers. This has direct implications for model selection:
 
-- **Parametric models** (LR, LDA): will require feature scaling and potentially
-  log-transforms of skewed features to satisfy distributional assumptions.
+- **Parametric models** (LR, LDA): will require feature scaling and log-transforms
+  of skewed features to satisfy distributional assumptions.
 - **Non-parametric models** (trees, KNN, SVM): are robust to skewness but KNN and SVM
   still require standardisation for distance-based computations.
-- **QDA**: may benefit from class-specific variance modelling given the unequal spreads visible in the boxplots.
 
 
 
@@ -798,20 +643,19 @@ extreme outliers. This has direct implications for model selection:
 
 | Hypothesis | EDA evidence | Supported? |
 |-----------|-------------|-----------|
-| **H1** — Trust signals dominate | Trust features have the highest median SMD (4.2.2: Trust 1.005 > Behavior 0.595 > Lexical 0.336); `URLSimilarityIndex` achieves the single highest rank-biserial effect size (4.2.3). Behavioral count features dominate the rank-biserial family median (0.928 vs. Trust 0.541), but this reflects extreme count skew — by SMD, Trust consistently leads. | ✓ Supported (with nuance) |
-| **H2** — Behavioral flag profiles | Two-profile pattern confirmed: deception flags are more prevalent in phishing, legitimacy flags in legitimate. However, flags do **not** co-occur (low within-class correlations, max r ≈ 0.28). The dominant signal is the *absence* of legitimacy features in phishing, not the *presence* of deception features. Cramér's V (4.3.3) confirms the strongest binary effects belong to legitimacy flags. `HasTitle` and `IsHTTPS` behave counter-intuitively (higher in phishing). | ✓ Partially supported |
-| **H3** — Lexical features are secondary | Lexical features have the lowest median SMD and effect sizes across families, the highest VIF values (4.4.2), and high within-group correlations (redundancy, 4.4.1). Effect sizes (4.2.3) reveal several lexical features have negligible practical discriminative power despite p < 2.2e-16. | ✓ Strongly supported |
+| **H1** — Trust signals dominate | Trust features have the highest median SMD (Trust 1.005 > Behavior 0.595 > Lexical 0.336); `URLSimilarityIndex` is the single strongest discriminator. Trust wins the median but the top individual features are a mix of Trust and Behavior. | ✓ Supported (with nuance) |
+| **H2** — Behavioral flag profiles | Two-profile pattern confirmed: legitimacy-mimicry flags (`HasSocialNet`, `HasCopyrightInfo`) show the largest class gaps and highest Cramér's V. Deception flags lean phishing but with smaller absolute differences. `HasTitle` and `IsHTTPS` behave counter-intuitively (higher in phishing). | ✓ Partially supported |
+| **H3** — Lexical features are secondary | Lexical features have the lowest median SMD, the highest VIF values, and high within-group correlations (redundancy). Several have negligible practical discriminative power despite statistical significance. | ✓ Strongly supported |
 
 ## 5.2 Implications for modelling scenarios
 
-| Finding | Implication for Scenario 2 (Parametric vs. Non-parametric) | Implication for Scenario 3 (Feature Selection) |
-|---------|---------------------------|---------------------------|
-| Class balance ≈ equal | No resampling needed; accuracy is valid alongside AUC | Balanced classes → LASSO penalty not confounded by imbalance |
-| No missing values | No imputation step required | All 50 features can enter the selection pipeline |
-| Severe VIF in Lexical features (4.4.2) | Multicollinearity inflates LR/LDA coefficients; unstable parametric estimates | LASSO expected to zero out redundant Lexical features; RFE (tree-based) more tolerant |
-| Trust features have highest median SMD (4.2.2); Behavioral count features lead rank-biserial median (4.2.3) | Non-parametric methods can exploit the non-linear structure of both families | Trust features expected to dominate selection alongside top Behavior flags; Lexical features expected to be pruned (H1, H3) |
-| Heavy skewness in count features | LR/LDA need feature scaling/transforms; trees handle natively | Log-transformed features may change selection rankings |
-| Behavioral flags are sparse binary | KNN/SVM require scaling; tree methods handle them natively | Cramér's V (4.3.3) confirms most carry non-redundant signal → likely survive selection independently (H2) |
+| Finding | Scenario 2 implication | Scenario 3 implication |
+|---------|------------------------|------------------------|
+| Class balance ≈ equal | Accuracy valid alongside AUC; no resampling needed | LASSO penalty not confounded by imbalance |
+| Severe VIF in Lexical features | LR/LDA coefficients unstable without regularisation | LASSO expected to zero out redundant Lexical features |
+| Trust features highest median SMD | Non-parametric methods can exploit non-linear structure | Trust + top Behavior flags expected to dominate selection |
+| Heavy skewness in count features | LR/LDA need scaling/transforms; trees handle natively | Log-transforms may change selection rankings |
+| Behavioral flags are sparse binary | KNN/SVM require scaling; trees handle natively | Most carry non-redundant signal → likely survive selection |
 
 ## 5.3 Next steps
 
