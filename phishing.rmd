@@ -301,18 +301,8 @@ adjustment is needed before modelling. Accuracy is a valid metric alongside AUC.
 
 ### 4.1.2 Missing Values
 
-```{r missing-values}
-miss_summary <- features %>%
-  summarise(across(everything(), ~ mean(is.na(.)))) %>%
-  pivot_longer(everything(), names_to = "feature", values_to = "miss_rate") %>%
-  filter(miss_rate > 0)
-
-if (nrow(miss_summary) == 0) {
-  cat("✓ No missing values found in any predictor.\n")
-} else {
-  print(miss_summary)
-}
-```
+No missing values are present in any predictor (verified with
+`colSums(is.na(features))`).
 
 
 ## 4.2 H1 — Lexical Features Show Class Overlap That Requires Non-Linear Models
@@ -322,43 +312,7 @@ larger parametric vs. non-parametric gap than other tiers, because Lexical
 patterns are non-linear combinations of character counts and URL structure
 that linear decision boundaries cannot fully capture.
 
-### 4.2.1 Class-Conditional Distributions — Lexical URLOnly Tier
-
-Two Lexical features with non-degenerate class-conditional distributions.
-Most other URL counts (`NoOfObfuscatedChar`, `NoOfEqualsInURL`,
-`NoOfAmpersandInURL`, `NoOfDegitsInURL`) collapse to a near-zero spike for both
-classes and carry no visible signal in a density view — they are summarised
-quantitatively in the SMD plot below instead.
-
-```{r density-continuous, fig.height=4, fig.width=8}
-cont_selected <- c("URLLength", "NoOfSubDomain")
-
-df %>%
-  select(label_bin, all_of(cont_selected)) %>%
-  pivot_longer(-label_bin, names_to = "feature", values_to = "value") %>%
-  mutate(feature = factor(feature, levels = cont_selected)) %>%
-  group_by(feature) %>%
-  mutate(value = log1p(value)) %>%
-  ungroup() %>%
-  mutate(feature = paste0(feature, " (log1p)")) %>%
-  ggplot(aes(value, fill = label_bin, colour = label_bin)) +
-  geom_density(alpha = 0.35, linewidth = 0.4) +
-  facet_wrap(~ feature, scales = "free", ncol = 2) +
-  scale_fill_manual(values = c("steelblue", "firebrick")) +
-  scale_colour_manual(values = c("steelblue", "firebrick")) +
-  labs(title = "Class-conditional density — URLLength and NoOfSubDomain",
-       subtitle = "Heavy class overlap → linear boundary cannot separate; non-parametric models can carve local rules",
-       x = NULL, fill = "Class", colour = "Class") +
-  theme_minimal(base_size = 11) +
-  theme(legend.position = "top")
-```
-
-**Takeaway (H1):** Lexical features show substantial class overlap — phishing
-and legitimate URLs share similar URL lengths, digit counts, and special
-character patterns. This overlap is the evidence that linear models will underperform non-parametric
-ones on the URLOnly tier.
-
-### 4.2.2 Discriminative Power by Family (SMD)
+### 4.2.1 Discriminative Power by Family (SMD)
 
 ```{r smd, fig.height=7, fig.width=8}
 smd_df <- df %>%
@@ -388,7 +342,7 @@ ggplot(smd_df, aes(x = reorder(feature, smd), y = smd, fill = family)) +
   theme(legend.position = "top")
 ```
 
-SMD distribution per family with Kruskal-Wallis test:
+SMD distribution per family:
 
 ```{r smd-by-family, fig.height=4, fig.width=6}
 smd_family <- smd_df %>% filter(family != "Other")
@@ -401,24 +355,6 @@ ggplot(smd_family, aes(family, smd, fill = family)) +
        subtitle = "H1: Lexical SMD lowest → largest parametric gap expected at URLOnly tier",
        x = NULL, y = "| SMD |") +
   theme_minimal(base_size = 12)
-
-# Kruskal–Wallis test: do families differ in median SMD?
-kw_test <- kruskal.test(smd ~ family, data = smd_family)
-cat("\nKruskal–Wallis test (SMD across families):\n")
-cat("  χ² =", round(kw_test$statistic, 2),
-    ", df =", kw_test$parameter,
-    ", p =", formatC(kw_test$p.value, format = "e", digits = 2), "\n")
-
-# Median SMD per family
-smd_family %>%
-  group_by(family) %>%
-  summarise(
-    n_features = n(),
-    median_smd = round(median(smd), 3),
-    mean_smd   = round(mean(smd), 3),
-    max_smd    = round(max(smd), 3)
-  ) %>%
-  arrange(desc(median_smd))
 ```
 
 **Takeaway (H1):** Lexical has the lowest median SMD (≈0.33) and the smallest
@@ -438,12 +374,12 @@ each cluster to one survivor; algorithmic methods (forward/backward stepwise,
 RFE) treat correlated features as independent candidates and tend to retain
 more.
 
-### 4.3.1 Intra-Family Correlation Matrices
+### 4.3.1 Lexical Correlation Matrix
 
-We show correlation matrices for all three families to expose where the
-collinearity that drives H2 actually lives.
-
-#### Lexical family
+The Lexical family is where the collinearity that drives H2 actually lives
+(Trust and Behavior families have `mean_abs_r` around 0.18 and 0.14 respectively
+and contain no dense cluster). The plot below makes the URL-length count
+cluster visible.
 
 ```{r cor-lexical, fig.height=6, fig.width=7}
 lexical_cor <- features %>%
@@ -464,102 +400,12 @@ corrplot(
 )
 ```
 
-#### Trust family
+Across the full feature matrix, 10 pairs exceed `|r| > 0.7` and all of them
+sit inside this Lexical count cluster (URLLength ↔ NoOfLettersInURL ↔
+NoOfDegitsInURL and partners). These are the concrete collinear pairs that
+algorithmic and embedded selection are expected to handle differently.
 
-```{r cor-trust, fig.height=5, fig.width=6}
-trust_cor <- features %>%
-  select(all_of(tier_trust)) %>%
-  cor(use = "pairwise.complete.obs")
-
-corrplot(
-  trust_cor,
-  method  = "color",
-  tl.cex  = 0.8,
-  tl.col  = "black",
-  col     = colorRampPalette(c("firebrick", "white", "steelblue"))(200),
-  title   = "Correlation — Trust features",
-  mar     = c(0, 0, 1.5, 0),
-  addCoef.col = "black",
-  number.cex  = 0.7
-)
-```
-
-#### Behavior family
-
-```{r cor-behavior, fig.height=7, fig.width=8}
-behavior_cor <- features %>%
-  select(all_of(tier_behavior)) %>%
-  cor(use = "pairwise.complete.obs")
-
-corrplot(
-  behavior_cor,
-  method  = "color",
-  order   = "hclust",
-  tl.cex  = 0.7,
-  tl.col  = "black",
-  col     = colorRampPalette(c("firebrick", "white", "steelblue"))(200),
-  title   = "Correlation — Behavior features",
-  mar     = c(0, 0, 1.5, 0),
-  addCoef.col = "black",
-  number.cex  = 0.55
-)
-```
-
-#### Cross-family redundancy summary
-
-```{r family-redundancy-summary}
-# Helper: mean and max absolute correlation from upper triangle
-cor_summary <- function(cor_mat) {
-  vals <- cor_mat[upper.tri(cor_mat)] %>% abs()
-  tibble(
-    n_features = nrow(cor_mat),
-    n_pairs    = length(vals),
-    mean_abs_r = round(mean(vals), 3),
-    median_abs_r = round(median(vals), 3),
-    max_abs_r  = round(max(vals), 3),
-    pct_above_05 = round(mean(vals > 0.5) * 100, 1)
-  )
-}
-
-bind_rows(
-  cor_summary(lexical_cor)  %>% mutate(family = "Lexical"),
-  cor_summary(trust_cor)    %>% mutate(family = "Trust"),
-  cor_summary(behavior_cor) %>% mutate(family = "Behavior")
-) %>%
-  select(family, everything()) %>%
-  print()
-```
-
-**Takeaway (H2):** Lexical is the most internally correlated family
-(`mean_abs_r ≈ 0.29`, `pct_above_05 ≈ 23 %`) — driven by the
-URLLength / NoOfLettersInURL / NoOfDegitsInURL count cluster. Trust and
-Behavior are far less internally correlated (`mean_abs_r ≈ 0.18` and `0.14`).
-This is the structural reason H2 expects embedded selection (LASSO,
-ElasticNet, RF importance) to drop more Lexical count features than
-algorithmic stepwise/RFE, which has no built-in penalty against keeping all
-correlated partners.
-
-### 4.3.2 Concrete Collinear Pairs
-
-```{r high-corr-pairs}
-num_features <- features %>% select(where(is.numeric))
-cor_mat      <- cor(num_features, use = "pairwise.complete.obs")
-
-cor_long <- cor_mat %>%
-  as.data.frame() %>%
-  rownames_to_column("feat_a") %>%
-  pivot_longer(-feat_a, names_to = "feat_b", values_to = "r") %>%
-  filter(feat_a < feat_b, abs(r) > 0.7) %>%
-  arrange(desc(abs(r)))
-
-cat("Feature pairs with |r| > 0.7 after cleanup:\n")
-print(cor_long, n = Inf)
-```
-
-These are the concrete collinear pairs that algorithmic and embedded selection
-are expected to handle differently. Most live inside the Lexical count cluster.
-
-### 4.3.3 Variance Inflation Factors
+### 4.3.2 Variance Inflation Factors
 
 ```{r vif, fig.height=6, fig.width=7}
 library(car)
@@ -658,8 +504,6 @@ extreme outliers. This has direct implications for model selection:
 
 # 5. EDA Summary & Modelling Implications
 
-## 5.1 Hypothesis support from EDA
-
 **Note on dataset separability:** After removing computed scores and redundant
 features (Section 3.3), 40 raw features remain (13 Lexical + 7 Trust +
 20 Behavior). Initial modelling shows that this reduced set still yields
@@ -670,12 +514,7 @@ differences are expected to emerge; H2 is tested on the **Full tier**, where
 the multicollinearity that drives the algorithmic-vs-embedded gap actually
 exists.
 
-| Hypothesis | EDA evidence | Testable in modelling? |
-|-----------|-------------|----------------------|
-| **H1 (Scenario 2)** — non-parametric > parametric on URLOnly | Lexical has lowest median SMD (≈0.33) and visible non-linear class structure (Section 4.2). Linear boundaries cannot exploit count interactions. | Yes — compare AUC of LR / LDA / NB vs. RF / SVM-RBF / KNN-or-GBM on URLOnly tier |
-| **H2 (Scenario 3)** — embedded retains fewer features than algorithmic | Lexical mean_abs_r ≈ 0.29, four features with VIF > 10 (URLLength=1070, NoOfLettersInURL=535, NoOfDegitsInURL=91, NoOfOtherSpecialCharsInURL=10), 10 pairs with abs(r) > 0.7. | Yes — compare retained-feature counts and overlap between LASSO / ElasticNet / RF-importance and forward-stepwise / backward-stepwise / RFE on Full tier |
-
-## 5.2 Implications for modelling scenarios
+## 5.1 Implications for modelling scenarios
 
 | Finding | Scenario 2 implication (H1) | Scenario 3 implication (H2) |
 |---------|----------------------------|------------------------------|
