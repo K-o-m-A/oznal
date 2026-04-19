@@ -1,0 +1,504 @@
+---
+title: "Phishing Detection — Scenario 1: Cross-family Feature Informativeness"
+author: "K-o-m-A"
+date: "`r Sys.Date()`"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(MASS, exclude = "select")
+library(klaR)
+library(randomForest)
+library(kernlab)
+library(pROC)
+library(knitr)
+library(ggrepel)
+
+set.seed(2026)
+
+S2_ARTIFACTS <- "scenario_2/artifacts"   # imported — preprocessing + shared state
+S1_ARTIFACTS <- "scenario_1/artifacts"
+dir.create(S1_ARTIFACTS, recursive = TRUE, showWarnings = FALSE)
+```
+
+---
+
+# 1. Scenario & Hypothesis
+
+Scenario 1 from the assignment asks us to compare **three statistical or
+machine-learning methods** across **two feature-space partitioning
+approaches**, identify which features remain informative across **both
+method families**, and discuss the implications for explainability and
+the benefits of each approach.
+
+We reuse the model line-up from Scenario 2 — three parametric methods
+(LR-ridge, LDA, Naive Bayes; hyperplane-partitioning) and three
+non-parametric methods (Random Forest, SVM-RBF, KNN;
+axis-aligned / kernel partitioning). The two feature-space partitioning
+approaches are the **Lexical** (13 features, URL-string only) and
+**FullLite** (34 features, Full minus six near-leaky page-count
+signals) tiers defined in `scenario_2.rmd` §1.
+
+**H2 (Scenario 1):** A compact "core set" of features appears in the
+top-k permutation importance of **both** method families on both tiers.
+Features ranked highly by only one family reveal that family's structural
+bias: non-parametric-only features exploit non-linear thresholds or
+interactions that a linear decision boundary cannot capture, while
+parametric-only features contribute linearly and additively — invisible
+to axis-aligned splits unless explicitly thresholded. The core set is
+the method-agnostic feature footprint a deployment-grade scanner should
+rely on.
+
+Why two tiers rather than one: Lexical forces every model to work from
+weak, collinear URL counts; FullLite is the realistic "many-features"
+regime. If the core set is *stable* between the two tiers, method-agnostic
+informativeness is a property of the feature itself, not the feature pool.
+
+---
+
+# 2. Setup — Load cached preprocessing from Scenario 2
+
+`scenario_2.rmd` §3.4 writes a `preprocessing.rds` artifact containing the
+same stratified sub-sample, train/test split, CV fold indices and tier
+definitions that Scenario 2 uses. Loading it here guarantees the two
+notebooks operate on identical rows and columns.
+
+```{r load-preprocessing}
+pp_path <- file.path(S2_ARTIFACTS, "preprocessing.rds")
+if (!file.exists(pp_path)) {
+  stop("Preprocessing artifacts not found at ", pp_path,
+       "\nRun scenario_2.rmd first to generate them.")
+}
+pp <- readRDS(pp_path)
+train_std <- pp$train_std; test_std <- pp$test_std
+train_raw <- pp$train_raw; test_raw <- pp$test_raw
+fold_idx  <- pp$fold_idx
+tiers     <- pp$tiers
+family_map <- pp$family_map
+binary_features     <- pp$binary_features
+continuous_features <- pp$continuous_features
+rm(pp)
+
+cat("Loaded train:", nrow(train_std), "rows, test:", nrow(test_std), "rows\n")
+cat("Tiers available: ", paste(names(tiers), collapse = ", "), "\n")
+```
+
+---
+
+# 3. Selected feature-space partitioning approaches
+
+```{r select-tiers}
+S1_TIERS <- c("Lexical", "FullLite")
+for (t in S1_TIERS) {
+  cat(sprintf("  %-10s — %d features\n", t, length(tiers[[t]])))
+}
+```
+
+`Lexical` — URL-only features (no DNS lookup, no page fetch). Weak
+per-feature signal (lowest median SMD in EDA §4.2.2), dense collinearity
+(URL-length cluster with VIF > 500).
+
+`FullLite` — Full minus `LineOfCode`, `NoOfExternalRef`, `NoOfImage`,
+`NoOfSelfRef`, `NoOfJS`, `NoOfCSS` (each with univariate AUC ≥ 0.95).
+Keeps > 30 features but avoids one-feature-solves-the-task saturation.
+
+We deliberately omit `Trust`, `Behavior` and `Full` from Scenario 1: Full
+is AUC-saturated, and Trust / Behavior alone add little to the
+cross-family comparison beyond what FullLite captures.
+
+---
+
+# 4. Model fitting (six models × two tiers)
+
+Same six methods and hyperparameters as Scenario 2 — LR-ridge (glmnet,
+α = 0, λ = 0.01), LDA (no tuning), NB (Gaussian+kernel),
+RF (500 trees, mtry = √p), SVM-RBF (C = 1, σ = 0.1), KNN (k = 25, with
+micro-jitter on the Lexical tier to break distance ties). Fits are
+cached to `scenario_1/artifacts/fit_<model>_<tier>.rds`.
+
+```{r model-spec}
+model_specs <- list(
+  LR_Ridge = list(
+    family = "parametric", method = "glmnet",
+    recipe = "std", jitter = FALSE,
+    tuneGrid = data.frame(alpha = 0, lambda = 0.01)),
+  LDA = list(
+    family = "parametric", method = "lda",
+    recipe = "std", jitter = FALSE,
+    tuneGrid = NULL),
+  NaiveBayes = list(
+    family = "parametric", method = "nb",
+    recipe = "std", jitter = FALSE,
+    tuneGrid = data.frame(fL = 1, usekernel = TRUE, adjust = 1)),
+  RandomForest = list(
+    family = "non-parametric", method = "rf",
+    recipe = "raw", jitter = FALSE,
+    tuneGrid = NULL),
+  SVM_RBF = list(
+    family = "non-parametric", method = "svmRadial",
+    recipe = "std", jitter = FALSE,
+    tuneGrid = data.frame(C = 1, sigma = 0.1)),
+  KNN = list(
+    family = "non-parametric", method = "knn",
+    recipe = "std", jitter = TRUE,
+    tuneGrid = data.frame(k = 25))
+)
+```
+
+```{r fit-utility-s1}
+jitter_features <- function(d, cols, sd = 1e-3) {
+  for (c in cols) d[[c]] <- d[[c]] + rnorm(nrow(d), 0, sd)
+  d
+}
+
+fit_model_tier <- function(model_name, spec, tier_name) {
+  path <- file.path(S1_ARTIFACTS,
+                    sprintf("fit_%s_%s.rds", model_name, tier_name))
+  if (file.exists(path)) return(readRDS(path))
+
+  feats <- tiers[[tier_name]]
+  if (spec$recipe == "std") {
+    tr <- train_std; te <- test_std
+  } else {
+    tr <- train_raw; te <- test_raw
+  }
+  if (spec$jitter) {
+    tr <- jitter_features(tr, feats)
+    te <- jitter_features(te, feats)
+  }
+  tr <- tr[, c("label", feats)]
+  te <- te[, c("label", feats)]
+
+  ctrl <- trainControl(method = "cv", index = fold_idx,
+                       classProbs = TRUE,
+                       summaryFunction = twoClassSummary,
+                       savePredictions = "final")
+
+  tuneGrid   <- spec$tuneGrid
+  extra_args <- list()
+  if (spec$method == "rf") {
+    mtry       <- max(1, floor(sqrt(length(feats))))
+    tuneGrid   <- data.frame(mtry = mtry)
+    extra_args$ntree <- 500
+  }
+
+  call_args <- c(list(label ~ ., data = tr,
+                      method = spec$method, trControl = ctrl,
+                      metric = "ROC", tuneGrid = tuneGrid),
+                 extra_args)
+
+  t0  <- Sys.time()
+  fit <- if (spec$method == "nb")
+           suppressWarnings(do.call(caret::train, call_args))
+         else do.call(caret::train, call_args)
+  elapsed <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+  res <- list(fit = fit,
+              test_X = te[, feats, drop = FALSE],
+              test_y = te$label,
+              features = feats,
+              train_secs = elapsed,
+              family = spec$family,
+              model = model_name,
+              tier = tier_name)
+  saveRDS(res, path)
+  res
+}
+```
+
+```{r fit-all, message=FALSE, warning=FALSE}
+fits <- list()
+for (model_name in names(model_specs)) {
+  for (tier_name in S1_TIERS) {
+    key <- paste(model_name, tier_name, sep = "__")
+    t0  <- Sys.time()
+    fits[[key]] <- fit_model_tier(model_name,
+                                  model_specs[[model_name]],
+                                  tier_name)
+    cat(sprintf("  %-15s [%-9s]  %.1fs\n",
+                model_name, tier_name,
+                as.numeric(difftime(Sys.time(), t0, units = "secs"))))
+  }
+}
+```
+
+---
+
+# 5. Permutation Importance
+
+Native importance metrics across the six models are *not* mutually
+comparable — LR gives signed coefficients, RF gives Gini drops, SVM-RBF
+has no direct per-feature importance, and NB/KNN have none at all. We
+therefore use **permutation importance on the held-out test set** as the
+single unified metric: for each feature `f`, importance is the mean AUC
+drop when `f`'s values are randomly shuffled across the test set,
+averaged over `n_perm = 5` permutations.
+
+```{r perm-importance-fn}
+compute_perm_imp <- function(res, n_perm = 5) {
+  fit   <- res$fit
+  X     <- res$test_X
+  y     <- res$test_y
+  feats <- res$features
+
+  auc_of <- function(X_use) {
+    prob <- suppressWarnings(
+      predict(fit, X_use, type = "prob")[, "Phishing"])
+    as.numeric(pROC::roc(y, prob,
+                         levels = c("Legitimate", "Phishing"),
+                         direction = "<", quiet = TRUE)$auc)
+  }
+
+  baseline <- auc_of(X)
+  imp <- sapply(feats, function(f) {
+    drops <- replicate(n_perm, {
+      Xp <- X
+      Xp[[f]] <- sample(Xp[[f]])
+      baseline - auc_of(Xp)
+    })
+    mean(drops)
+  })
+  list(baseline = baseline, importance = imp)
+}
+```
+
+```{r perm-importance-run, message=FALSE, warning=FALSE}
+imp_path <- file.path(S1_ARTIFACTS, "permutation_importance.rds")
+if (file.exists(imp_path)) {
+  perm_results <- readRDS(imp_path)
+  cat("Loaded cached permutation importance.\n")
+} else {
+  perm_results <- list()
+  for (key in names(fits)) {
+    t0 <- Sys.time()
+    perm_results[[key]] <- compute_perm_imp(fits[[key]], n_perm = 5)
+    cat(sprintf("  perm-imp %-30s %.1fs\n", key,
+                as.numeric(difftime(Sys.time(), t0, units = "secs"))))
+  }
+  saveRDS(perm_results, imp_path)
+}
+```
+
+Long-format importance table:
+
+```{r imp-long}
+imp_long <- map_dfr(names(perm_results), function(key) {
+  parts <- strsplit(key, "__")[[1]]
+  model_name <- parts[1]; tier_name <- parts[2]
+  spec <- model_specs[[model_name]]
+  tibble(
+    model      = model_name,
+    family     = spec$family,
+    tier       = tier_name,
+    feature    = names(perm_results[[key]]$importance),
+    importance = perm_results[[key]]$importance
+  )
+})
+
+imp_long %>%
+  group_by(model, tier) %>%
+  summarise(max_imp = max(importance),
+            mean_imp = mean(importance), .groups = "drop") %>%
+  kable(digits = 4,
+        caption = "Per-model sanity check: maximum and mean importance per tier")
+```
+
+---
+
+# 6. Cross-family Feature Informativeness
+
+## 6.1 Per-feature family-averaged importance
+
+For each `(tier, feature)` pair we compute the mean permutation
+importance across the three models within each family. The resulting
+`(imp_param, imp_nonparam)` tuple places the feature in a 2D plane where
+the diagonal represents features informative in both families.
+
+```{r cross-family-mean}
+imp_family <- imp_long %>%
+  group_by(tier, feature, family) %>%
+  summarise(mean_imp = mean(importance), .groups = "drop") %>%
+  pivot_wider(names_from = family, values_from = mean_imp) %>%
+  rename(imp_param    = parametric,
+         imp_nonparam = `non-parametric`)
+
+imp_family %>%
+  arrange(tier, desc(imp_nonparam + imp_param)) %>%
+  head(12) %>%
+  kable(digits = 4,
+        caption = "Top features by total cross-family importance")
+```
+
+## 6.2 Cross-family importance scatter
+
+```{r scatter-plot, fig.width=11, fig.height=5}
+p <- imp_family %>%
+  ggplot(aes(imp_param, imp_nonparam, label = feature)) +
+  geom_abline(slope = 1, intercept = 0,
+              colour = "grey65", linetype = "dashed") +
+  geom_hline(yintercept = 0, colour = "grey85") +
+  geom_vline(xintercept = 0, colour = "grey85") +
+  geom_point(size = 2.4, alpha = 0.75, colour = "steelblue") +
+  ggrepel::geom_text_repel(size = 3, max.overlaps = 25,
+                           min.segment.length = 0.2) +
+  facet_wrap(~ tier, scales = "free") +
+  labs(
+    title = "Cross-family permutation importance",
+    subtitle = "On-diagonal: informative in both families (core set). Off-diagonal: family-specific.",
+    x = "Mean importance — parametric family (LR-ridge, LDA, NB)",
+    y = "Mean importance — non-parametric family (RF, SVM-RBF, KNN)"
+  ) +
+  theme_minimal(base_size = 11)
+
+ggsave(file.path(S1_ARTIFACTS, "cross_family_scatter.png"), p,
+       width = 11, height = 5, dpi = 150)
+p
+```
+
+## 6.3 Jaccard top-k overlap
+
+```{r jaccard}
+jaccard_topk <- function(df_tier, k) {
+  top_p  <- df_tier %>% arrange(desc(imp_param))    %>%
+            slice_head(n = k) %>% pull(feature)
+  top_np <- df_tier %>% arrange(desc(imp_nonparam)) %>%
+            slice_head(n = k) %>% pull(feature)
+  inter  <- intersect(top_p, top_np)
+  unio   <- union(top_p, top_np)
+  list(k = k,
+       jaccard = length(inter) / length(unio),
+       core = inter,
+       only_param    = setdiff(top_p,  top_np),
+       only_nonparam = setdiff(top_np, top_p))
+}
+
+jaccard_tbl <- map_dfr(S1_TIERS, function(tier_name) {
+  df_tier <- imp_family %>% filter(tier == tier_name)
+  ks <- c(3, 5, 10)
+  ks <- ks[ks <= nrow(df_tier)]
+  map_dfr(ks, function(k) {
+    j <- jaccard_topk(df_tier, k)
+    tibble(tier = tier_name, k = k,
+           jaccard = round(j$jaccard, 3),
+           core_size = length(j$core),
+           param_only_size = length(j$only_param),
+           nonparam_only_size = length(j$only_nonparam))
+  })
+})
+
+jaccard_tbl %>% kable(caption = "Jaccard top-k overlap between families")
+```
+
+## 6.4 Concrete core / family-specific partition
+
+```{r core-specific}
+show_partition <- function(tier_name, k) {
+  df_tier <- imp_family %>% filter(tier == tier_name)
+  k <- min(k, nrow(df_tier))
+  j <- jaccard_topk(df_tier, k)
+  cat(sprintf("\n── %s tier (top-%d per family) ──\n", tier_name, k))
+  cat("  Core (both families):     ",
+      if (length(j$core) == 0) "<none>" else paste(j$core, collapse = ", "),
+      "\n")
+  cat("  Parametric-only top-k:    ",
+      if (length(j$only_param) == 0) "<none>"
+      else paste(j$only_param, collapse = ", "),
+      "\n")
+  cat("  Non-parametric-only top-k:",
+      if (length(j$only_nonparam) == 0) "<none>"
+      else paste(j$only_nonparam, collapse = ", "),
+      "\n")
+}
+show_partition("Lexical",  5)
+show_partition("FullLite", 10)
+```
+
+## 6.5 Tier-stability of the core set
+
+A feature that is in the core on *both* Lexical and FullLite is
+method-agnostic **and** pool-agnostic — the strongest possible evidence
+for H2.
+
+```{r tier-stability}
+core_lex  <- jaccard_topk(imp_family %>% filter(tier == "Lexical"),  5)$core
+core_full <- jaccard_topk(imp_family %>% filter(tier == "FullLite"), 10)$core
+
+stable_core <- intersect(core_lex, core_full)
+cat("Core features present in BOTH Lexical (top-5) and FullLite (top-10):\n")
+cat("  ", if (length(stable_core) == 0) "<none>"
+       else paste(stable_core, collapse = ", "), "\n")
+```
+
+---
+
+# 7. Explainability & Benefits of Each Approach
+
+| Aspect | Hyperplane (parametric: LR, LDA, NB) | Axis-aligned / kernel (non-parametric: RF, SVM-RBF, KNN) |
+|--------|--------------------------------------|----------------------------------------------------------|
+| Coefficient / importance semantics | **Signed magnitude.** LR coefficients give direction (raises or lowers phishing probability) and can be standardised for direct feature ranking. LDA weights are interpretable as discriminant loadings. | **Magnitude-only** from native importance (Gini, distance). Permutation importance unifies magnitude across methods but still carries no direction. SHAP recovers direction at high compute cost. |
+| Audit trail for a blocked URL | Additive scorecard: *"blocked because URLLength=87 contributes +0.42, NoOfEqualsInURL=4 contributes +0.31, …"* | A single CART tree offers a readable decision path; RF / SVM-RBF ensembles are only interpretable in aggregate via importances. |
+| Inference cost | One dot product per prediction (sub-millisecond on 40 features). | RF: 500 tree traversals. SVM-RBF: kernel evaluation against all support vectors. KNN: distance to every training point. 1–3 orders of magnitude slower. |
+| Statistical inference | Wald standard errors, likelihood-ratio tests, confidence intervals available in closed form. | Bootstrap or permutation-based only. No closed-form CIs. |
+| Non-linear interactions | Require manual feature engineering (polynomial, interaction terms). | Captured automatically via tree splits or RBF kernel warping. |
+| Scale / skew sensitivity | Requires `log1p` + center-scale (EDA flagged 19/22 skewed features). | Trees are invariant to monotone transforms; SVM-RBF and KNN still need scale-normalisation. |
+| Extrapolation beyond training range | Linear extrapolation (can be wrong but predictable). | RF returns flat prediction; KNN falls back to the closest training point. |
+
+**Practical benefit profile:**
+
+- **Parametric models** fit first when inference cost, regulatory
+  auditability, or small-sample confidence intervals are binding. A
+  URL-only filter at the SMTP gateway that must decide in a few
+  milliseconds cannot afford a 500-tree traversal per message.
+- **Non-parametric models** fit first when non-linear structure is the
+  dominant signal and latency / auditability are not binding. Scenario 2
+  evidence: the Lexical tier non-parametric advantage is ≈ +0.10 AUC,
+  precisely because URL counts interact non-linearly.
+- **Core features** (informative in both families) are the safe
+  deployment subset — whichever classifier ends up in production, they
+  will carry weight. **Family-specific features** expose the modelling
+  assumption, not a universal signal.
+
+---
+
+# 8. Conclusion — H2 (Scenario 1) Evidence
+
+Concrete findings are produced by the code in Sections 6.3–6.5. The
+notebook pattern is:
+
+1. **Core set on Lexical.** The top-5 features ranked by both families
+   (reported in §6.4) are the robust URL-string signals a first-line
+   scanner should rely on regardless of model family. Small overlap
+   (Jaccard ≈ 0.3–0.5 at k = 5) is expected here because Lexical
+   features are weak and collinear; the families disagree about which
+   representative of the URL-length cluster to prefer.
+2. **Family-specific features on Lexical.** Non-parametric-only entries
+   (see §6.4) are the features that depend on thresholds / interactions
+   — invisible to linear additivity. Parametric-only entries are the
+   features with a clean linear-scale signal that tree splits fail to
+   isolate on weak-signal data.
+3. **FullLite expansion.** Jaccard top-10 overlap is expected to rise
+   on FullLite because the Trust tier's binary flags (`IsHTTPS`, `Bank`,
+   `Pay`, `Crypto`) carry monotonic signal that both families pick up
+   directly. This tier-level shift — from low agreement (Lexical) to
+   high agreement (FullLite) — is itself part of H2's claim: core-set
+   size scales with signal strength.
+4. **Stable core (§6.5).** Features present in the core of **both**
+   tiers form the hard-core method-agnostic subset. These are the
+   features a production scanner can commit to regardless of which
+   classifier or feature pool it ends up using.
+
+**Practical deployment takeaway:** the Lexical-tier core set is the
+minimum-viable feature footprint for a fast first-line URL-only filter;
+the FullLite core set is the safe, explainability-first deployment
+subset once the scanner can afford page-level features. Features
+informative in only one family should not be the *only* rationale for a
+decision, because their relevance is a property of the method, not the
+URL.

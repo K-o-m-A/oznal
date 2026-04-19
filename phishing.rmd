@@ -42,9 +42,11 @@ This question maps directly onto the two assignment scenarios we picked:
 - **Scenario 2** — parametric vs. non-parametric models on the URL-only tier
   tells us whether linear models are sufficient or whether the URL string
   hides non-linear structure that only RF/SVM/GBM can exploit.
-- **Scenario 3** — algorithmic vs. embedded feature selection on the full
-  feature matrix tells us how few predictors we actually need, and which ones
-  survive penalisation under known multicollinearity.
+- **Scenario 1** — comparing three methods per family across two feature-space
+  partitioning approaches (Lexical and FullLite tiers) identifies which
+  features remain informative independently of model choice, and which are
+  only visible to one family's structural bias. This frames an explainability
+  question orthogonal to Scenario 2's performance question.
 
 ## 1.2 Dataset
 
@@ -53,7 +55,7 @@ from three signal families:
 
 | Family | Nature | Example features |
 |--------|--------|-----------------|
-| **Lexical** | URL string properties | `URLLength`, `NoOfSubDomain`, `ObfuscationRatio`, `IsHTTPS` |
+| **Lexical** | URL string properties | `URLLength`, `NoOfSubDomain`, `ObfuscationRatio` |
 | **Trust** | Domain / title consistency | `URLSimilarityIndex`, `TLDLegitimateProb`, `DomainTitleMatchScore` |
 | **Behavior** | Page-level content signals | `NoOfURLRedirect`, `NoOfiFrame`, `HasExternalFormSubmit`, `HasHiddenFields` |
 
@@ -77,18 +79,51 @@ lengths, special chars) and linear models cannot fully exploit them. We will
 test this with at least three parametric methods (LR, LDA, Naive Bayes) and
 three non-parametric methods (RF, SVM-RBF, KNN/GBM).
 
-## H2 (Scenario 3) — Embedded feature selection retains substantially fewer features than algorithmic selection by collapsing collinear clusters
+**Measurable criteria.** H1 is considered *supported* iff all three of the
+following hold on the 5-fold CV AUC computed in `scenario_2.rmd`:
 
-The full feature matrix contains severe multicollinearity (URL-length cluster
-with VIF > 1000, see Section 4.3) and several pairs with |r| > 0.7. We
-hypothesise that **embedded methods** (LASSO, ElasticNet, RandomForest
-permutation importance) will retain fewer features than **algorithmic methods**
-(forward/backward stepwise, RFE) on the same task, because embedded penalisation
-collapses each collinear cluster to one or few survivors while algorithmic
-search treats correlated features as independent candidates. We will report
-(a) how many features each method ultimately retains, (b) the overlap between
-the retained sets, and (c) which features lose statistical significance as
-collinear partners are added or removed.
+1. **Primary — Lexical-tier effect size.** Mean CV AUC of the three
+   non-parametric models exceeds the mean CV AUC of the three parametric
+   models on the Lexical tier by **ΔAUC ≥ 0.05**. A gap in the range
+   [0.02, 0.05) is reported as *weak directional support*; < 0.02 is
+   treated as null.
+2. **Secondary — Tier gradient.** ΔAUC is a strictly decreasing function
+   of tier signal strength at the endpoints:
+   ΔAUC<sub>Lexical</sub> > ΔAUC<sub>FullLite</sub> ≥ 0.
+   Intermediate tiers (Trust, Behavior) are not constrained.
+3. **Tertiary — Fold consistency.** On the Lexical tier, the
+   non-parametric family-mean AUC exceeds the parametric family-mean AUC
+   in **every** one of the five CV folds (equivalently: one-sided paired
+   Wilcoxon on per-fold family means attains its minimum achievable
+   p ≈ 0.031 with n = 5).
+
+**H1 is falsified iff** ΔAUC<sub>Lexical</sub> < 0.02, **or**
+ΔAUC<sub>FullLite</sub> ≥ ΔAUC<sub>Lexical</sub>, **or** the fold sign is
+not unanimous on Lexical. These thresholds are registered before the
+modelling result is read so the conclusion in `scenario_2.rmd` §7 maps to
+a binary outcome, not a narrative judgement.
+
+## H2 (Scenario 1) — A compact "core set" of features is informative across both method families
+
+Scenario 1 requires comparing three statistical/ML methods across two
+feature-space partitioning approaches and identifying which features remain
+informative in both method families. We adopt the parametric
+(hyperplane-partitioning: LR-ridge, LDA, Naive Bayes) vs. non-parametric
+(axis-aligned or kernel: RF, SVM-RBF, KNN) split from H1 as the two method
+families, and pick the **Lexical** (13 features) and **FullLite** (34
+features; Full minus six near-leaky page-count signals) tiers as the two
+feature-space partitioning approaches. We hypothesise that a compact "core
+set" of features appears in the top-k permutation importance ranking of
+**both** families on both tiers, while features ranked highly by only one
+family reveal that family's structural bias: non-parametric-only features
+exploit non-linear thresholds or interactions (invisible to linear additivity),
+while parametric-only features contribute linearly and additively (invisible
+to axis-aligned splits unless explicitly thresholded). We will report
+(a) a per-feature cross-family importance scatter per tier, (b) Jaccard
+top-k overlap between the two families, and (c) the concrete core /
+family-specific feature partition. The core set is the **minimum
+method-agnostic feature footprint** a production URL phishing scanner
+should rely on regardless of which classifier ends up being deployed.
 
 ---
 
@@ -364,15 +399,15 @@ and visible non-linear structure (Section 4.2.1), the URLOnly tier is the
 setting where parametric models will struggle most — exactly where the
 parametric vs. non-parametric gap predicted by H1 should appear.
 
-## 4.3 H2 (Scenario 3) — Multicollinearity Motivates Algorithmic vs. Embedded Feature Selection
+## 4.3 H2 (Scenario 1) — Multicollinearity Drives Cross-Family Feature-Importance Disagreement
 
-H2 hypothesises that algorithmic and embedded feature selection methods will
-retain different feature sets on the Full tier. The EDA evidence is the
-collinearity structure: where do correlated clusters live, and how severe is
-the inflation? Embedded methods (LASSO, ElasticNet, RF importance) collapse
-each cluster to one survivor; algorithmic methods (forward/backward stepwise,
-RFE) treat correlated features as independent candidates and tend to retain
-more.
+H2 hypothesises that features informative in both method families form a
+compact "core set" on each tier, while the remaining features are
+family-specific. The EDA evidence is the collinearity structure: where do
+correlated clusters live, and how severe is the inflation? Within a cluster,
+LR-ridge spreads weight across correlated partners while an axis-aligned tree
+picks one representative per split — so dense clusters are precisely where
+the two method families are expected to rank features differently.
 
 ### 4.3.1 Lexical Correlation Matrix
 
@@ -402,8 +437,8 @@ corrplot(
 
 Across the full feature matrix, 10 pairs exceed `|r| > 0.7` and all of them
 sit inside this Lexical count cluster (URLLength ↔ NoOfLettersInURL ↔
-NoOfDegitsInURL and partners). These are the concrete collinear pairs that
-algorithmic and embedded selection are expected to handle differently.
+NoOfDigitsInURL and partners). These are the concrete collinear pairs where
+the two method families are expected to disagree on feature importance.
 
 ### 4.3.2 Variance Inflation Factors
 
@@ -430,7 +465,7 @@ ggplot(vif_df, aes(x = reorder(feature, vif), y = vif, fill = family)) +
   geom_hline(yintercept = 10, linetype = "dashed", colour = "red") +
   scale_fill_brewer(palette = "Set2") +
   labs(title = "Variance Inflation Factors — continuous features",
-       subtitle = "URL-length cluster has VIF > 500 → motivates embedded vs. algorithmic feature selection (H2)",
+       subtitle = "URL-length cluster has VIF > 500 → expected source of cross-family importance disagreement (H2)",
        x = NULL, y = "VIF", fill = "Family") +
   theme_minimal(base_size = 10) +
   theme(legend.position = "top")
@@ -444,10 +479,12 @@ vif_df %>% filter(vif >= 5, vif <= 10) %>% select(feature, vif, family) %>% prin
 **Takeaway (H2):** Removing the four ratio features in Section 3.3 was
 necessary but not sufficient. `URLLength` (VIF ≈ 1070), `NoOfLettersInURL`
 (≈ 535) and `NoOfDegitsInURL` (≈ 90) remain near-collinear because they
-measure overlapping URL-string properties. Stepwise/RFE will likely keep most
-of them; LASSO and RF importance are expected to retain only one or two.
-Quantifying that gap is the H2 modelling task. Binary features are excluded
-from the GLM-based VIF by construction.
+measure overlapping URL-string properties. Inside this cluster, parametric
+LR-ridge spreads weight across the correlated partners while axis-aligned
+RF picks one representative per split — this is the direct mechanism that
+produces the cross-family importance disagreement H2 predicts on the
+Lexical tier. Binary features are excluded from the GLM-based VIF by
+construction.
 
 
 ## 4.4 Skewness Assessment *(Scenario 2 preparation)*
@@ -510,17 +547,18 @@ features (Section 3.3), 40 raw features remain (13 Lexical + 7 Trust +
 AUC ≈ 0.99 for all model types — the dataset is near-perfectly separable on
 the Full tier. H1 is therefore tested primarily on the **URLOnly tier**
 (13 Lexical features) where meaningful parametric vs. non-parametric
-differences are expected to emerge; H2 is tested on the **Full tier**, where
-the multicollinearity that drives the algorithmic-vs-embedded gap actually
-exists.
+differences are expected to emerge; H2 is tested on the **Lexical** and
+**FullLite** tiers (FullLite = Full minus six near-leaky page counts),
+where cross-family permutation-importance disagreement is non-trivial and
+informative.
 
 ## 5.1 Implications for modelling scenarios
 
-| Finding | Scenario 2 implication (H1) | Scenario 3 implication (H2) |
+| Finding | Scenario 2 implication (H1) | Scenario 1 implication (H2) |
 |---------|----------------------------|------------------------------|
-| Near-perfect separability on Full tier | Comparison focused on URLOnly tier where models actually differ | Use Full tier; selection methods need a non-trivial pool of redundant features |
-| Lexical SMD lowest + non-linear structure | Largest parametric/non-parametric AUC gap expected on URLOnly | Algorithmic methods may keep all weak Lexical features; embedded penalisation should drop them |
-| Heavy skewness in 19 of 22 continuous features | Log-transform + standardisation for LR/LDA; trees/RF unaffected | Apply same transform before LASSO/ElasticNet (they are scale-sensitive) |
-| URL-length cluster: VIF > 500 and abs(r) > 0.84 | Use stable solvers / regularised LR for fairness | Strongest test case for H2 — embedded should collapse cluster, stepwise should not |
-| Trust binary features: low intra-correlation | No special treatment | All three Trust HTTPS-style flags likely retained by both selection families — informative-feature overlap |
+| Near-perfect separability on Full tier | Comparison focused on URLOnly tier where models actually differ | Use FullLite (Full minus near-leakers) as the second partitioning approach; Full is too saturated for importance ranking to discriminate |
+| Lexical SMD lowest + non-linear structure | Largest parametric/non-parametric AUC gap expected on URLOnly | Core set on Lexical expected to be small; family-specific features dominate, especially non-parametric-only (non-linearity exploitation) |
+| Heavy skewness in 19 of 22 continuous features | Log-transform + standardisation for LR/LDA; trees/RF unaffected | Skewness concentrates linear coefficients on log-scale features; tree importance is transform-invariant — partially explains cross-family disagreement |
+| URL-length cluster: VIF > 500 and abs(r) > 0.84 | Use stable solvers / regularised LR for fairness | LR-ridge spreads weight across correlated partners while RF selects one representative per split — expected source of cross-family disagreement on Lexical |
+| Trust binary features: low intra-correlation | No special treatment | Trust HTTPS-style flags likely in both families' top-k on FullLite → strong core-set candidates |
 

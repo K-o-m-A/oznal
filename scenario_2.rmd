@@ -255,7 +255,31 @@ cat(length(continuous_features), "continuous,",
     length(binary_features), "binary features.\n")
 ```
 
-## 3.4 Per-tier fit utility
+## 3.4 Cache preprocessing for downstream scenarios
+
+`scenario_1.rmd` reuses the identical train/test split, CV fold indices
+and feature tiers. Writing them to a single `.rds` file here means
+Scenario 1 does not have to re-run any upstream code and is guaranteed
+to see the same rows this notebook saw.
+
+```{r cache-preprocessing}
+saveRDS(
+  list(
+    train_std = train_std, test_std = test_std,
+    train_raw = train_raw, test_raw = test_raw,
+    fold_idx  = fold_idx,
+    tiers     = tiers,
+    family_map = family_map,
+    binary_features     = binary_features,
+    continuous_features = continuous_features
+  ),
+  file.path(ARTIFACTS, "preprocessing.rds")
+)
+cat("Preprocessing cached to ",
+    file.path(ARTIFACTS, "preprocessing.rds"), "\n", sep = "")
+```
+
+## 3.5 Per-tier fit utility
 
 Fitting the same model on four tiers is four nearly identical pieces of
 code, so we wrap the logic once. The function subsets the data to a tier's
@@ -630,6 +654,72 @@ The rightmost two panels (FullLite, Full) pin every model at AUC ≈ 1,
 though FullLite — with six near-leaky Behavior counts removed — retains
 slightly more spread than Full and is the fairer "many-features" tier
 for judging the family contrast.
+
+## 6.4 H1 verdict against the pre-registered criteria
+
+`phishing.rmd` §2 pins three measurable criteria for H1. We evaluate
+each one directly from the per-fold AUC table and report pass / fail
+rather than relying on narrative inspection.
+
+```{r h1-verdict}
+fold_family <- auc_long %>%
+  group_by(tier, fold, family) %>%
+  summarise(auc = mean(auc), .groups = "drop") %>%
+  pivot_wider(names_from = family, values_from = auc) %>%
+  mutate(diff = `non-parametric` - parametric)
+
+diff_lexical  <- fold_family %>% filter(tier == "Lexical")  %>% pull(diff)
+diff_fulllite <- fold_family %>% filter(tier == "FullLite") %>% pull(diff)
+
+delta_lex       <- mean(diff_lexical)
+delta_fulllite  <- mean(diff_fulllite)
+fold_unanimous  <- all(diff_lexical > 0)
+wilcox_lex_p    <- wilcox.test(diff_lexical, alternative = "greater")$p.value
+
+c1_pass <- delta_lex >= 0.05
+c1_weak <- delta_lex >= 0.02 && delta_lex < 0.05
+c2_pass <- (delta_lex > delta_fulllite) && (delta_fulllite >= 0)
+c3_pass <- fold_unanimous
+
+verdict <- tibble(
+  Criterion = c(
+    "1. Primary — ΔAUC_Lexical ≥ 0.05",
+    "2. Secondary — ΔAUC_Lexical > ΔAUC_FullLite ≥ 0",
+    "3. Tertiary — Fold sign unanimous on Lexical (p = 0.031)"
+  ),
+  Realised = c(
+    sprintf("ΔAUC_Lexical = %.4f", delta_lex),
+    sprintf("ΔAUC_Lexical = %.4f vs ΔAUC_FullLite = %.4f",
+            delta_lex, delta_fulllite),
+    sprintf("%d / 5 folds non-param > param (Wilcoxon p = %.3f)",
+            sum(diff_lexical > 0), wilcox_lex_p)
+  ),
+  Status = c(
+    if (c1_pass) "PASS" else if (c1_weak) "WEAK" else "FAIL",
+    if (c2_pass) "PASS" else "FAIL",
+    if (c3_pass) "PASS" else "FAIL"
+  )
+)
+kable(verdict)
+
+falsified <-
+  (delta_lex < 0.02) ||
+  (delta_fulllite >= delta_lex) ||
+  (!fold_unanimous)
+
+supported <- c1_pass && c2_pass && c3_pass
+
+cat(sprintf(
+  "\nOverall H1 verdict: %s\n",
+  if (supported) "SUPPORTED (all three criteria pass)"
+  else if (falsified) "FALSIFIED (see falsification rule in EDA §2)"
+  else "PARTIAL (some criteria weak but none triggers falsification)"
+))
+```
+
+This chunk closes the hypothesis loop: the criteria are set in the EDA,
+the numbers come from Scenario 2's shared folds, and the verdict is
+machine-produced rather than argued in prose.
 
 ---
 
