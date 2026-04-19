@@ -599,28 +599,33 @@ effect size.
 
 ## 6.3 CV AUC by model × tier
 
-```{r plot-auc, fig.width=11, fig.height=5, message=FALSE}
-p <- auc_long %>%
-  mutate(tier  = factor(tier, levels = c("Lexical", "Trust",
-                                         "Behavior", "FullLite", "Full")),
-         model = fct_reorder(model, auc, median)) %>%
-  ggplot(aes(model, auc, colour = family)) +
-  geom_boxplot(outlier.shape = NA, width = 0.6, fill = NA) +
-  geom_jitter(width = 0.08, height = 0, size = 1.6, alpha = 0.6) +
-  facet_wrap(~ tier, nrow = 1) +
-  scale_colour_manual(values = c(parametric = "steelblue",
-                                 `non-parametric` = "firebrick")) +
-  labs(
-    title    = "Scenario 2 — CV AUC by model across five feature tiers",
-    subtitle = "Each dot is one CV fold; shared folds across models",
-    x = NULL, y = "ROC AUC (5-fold CV)"
-  ) +
-  coord_flip() +
-  theme_minimal(base_size = 11)
+```{r plot-auc, fig.width=10, fig.height=14, message=FALSE}
+plot_list <- map(c("Lexical", "Trust", "Behavior", "FullLite", "Full"), function(t) {
+  auc_long %>%
+    filter(tier == t) %>%
+    mutate(family = factor(family, levels = c("parametric", "non-parametric")),
+           model  = fct_reorder(model, auc, median)) %>%
+    ggplot(aes(model, auc, fill = family)) +
+    geom_boxplot(outlier.shape = NA, width = 0.6, alpha = 0.5) +
+    geom_jitter(aes(colour = family),
+                width = 0.12, height = 0, size = 1.6, alpha = 0.8,
+                show.legend = FALSE) +
+    coord_flip() +
+    scale_fill_manual(values   = c(parametric = "steelblue",
+                                   `non-parametric` = "firebrick")) +
+    scale_colour_manual(values = c(parametric = "steelblue",
+                                   `non-parametric` = "firebrick")) +
+    labs(title = t, x = NULL, y = "ROC AUC (5-fold CV)") +
+    theme_minimal(base_size = 11) +
+    theme(legend.position = if (t == "Lexical") "top" else "none")
+})
 
-ggsave(file.path(ARTIFACTS, "scenario2_auc_by_tier.png"), p,
-       width = 11, height = 5, dpi = 150)
-p
+library(patchwork)
+wrap_plots(plot_list, ncol = 1) +
+  plot_annotation(
+    title    = "Scenario 2 -- CV AUC by model across feature tiers",
+    subtitle = "Each dot is one CV fold (shared across models)"
+  )
 ```
 
 The Lexical panel (leftmost) shows the widest spread and the clearest
