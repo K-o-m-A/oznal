@@ -22,87 +22,84 @@ library(scales)
 
 ## 1.1 Real-world scenario
 
-A user clicks a link in an email, chat, or search result. The browser, a mail
-gateway, or a corporate proxy needs to decide **before the page loads** whether
-the destination is a phishing site. The cheapest signal available at that
-moment is the URL string itself — no DNS lookup, no HTML fetch, no rendering.
-If this string-only decision is good enough, the system can block or warn the
-user without paying any network cost; if it is not, the system has to fall
-back to slower page-level analysis.
+A user clicks a link in an email, chat, or search result. The browser or a
+corporate proxy has to decide **before the page loads** whether the link is
+phishing. The cheapest signal at that moment is the URL string itself — no
+DNS lookup, no HTML fetch, no rendering. If a URL-only check is good enough,
+we can block the link for free. If it isn't, we have to fall back to a
+slower page-level check.
 
-The question this project tries to answer is therefore concrete:
-**how much of the phishing signal is already in the URL, and what is the
-minimal feature footprint needed to detect it reliably?** Demonstrating that a
-URL-only model is competitive justifies a fast first-line filter; showing
-where it breaks justifies the (more expensive) trust- and behavior-level
-checks that follow.
+The question we want to answer is simple:
+**how much phishing signal is already in the URL, and how few features do
+we really need?** If a URL-only model works well, we can run it as a fast
+first-line filter. Where it fails, the slower trust- and behavior-level
+checks take over.
 
-This question maps directly onto the two assignment scenarios we picked:
+This lines up with our two chosen scenarios:
 
-- **Scenario 2** — parametric vs. non-parametric models on the URL-only tier
-  tells us whether linear models are sufficient or whether the URL string
-  hides non-linear structure that only RF/SVM/GBM can exploit.
+- **Scenario 2** — parametric vs. non-parametric models on the URL-only
+  tier. Tells us whether a linear model is enough, or whether the URL hides
+  non-linear patterns that only RF/SVM/GBM can pick up.
 - **Scenario 3** — algorithmic vs. embedded feature selection on the full
-  feature matrix tells us how few predictors we actually need, and which ones
-  survive penalisation under known multicollinearity.
+  feature matrix. Tells us how few features we really need, and which ones
+  survive penalisation when features are correlated.
 
 ## 1.2 Dataset
 
-The dataset (PhiUSIIL) contains ~235 k observations and 50 predictive features drawn
-from three signal families:
+The PhiUSIIL dataset has ~235 k rows and 50 predictor features. We split
+them into three families by how expensive they are to compute:
 
-| Family | Nature | Example features |
-|--------|--------|-----------------|
-| **Lexical** | URL string properties | `URLLength`, `NoOfSubDomain`, `NoOfObfuscatedChar`, `CharContinuationRate` |
+| Family | What it captures | Example features |
+|--------|------------------|-----------------|
+| **Lexical** | Properties of the URL string | `URLLength`, `NoOfSubDomain`, `NoOfObfuscatedChar`, `CharContinuationRate` |
 | **Trust** | Domain / title consistency | `IsHTTPS`, `HasTitle`, `HasFavicon`, `Bank`, `Pay`, `Crypto` |
 | **Behavior** | Page-level content signals | `NoOfURLRedirect`, `NoOfiFrame`, `HasExternalFormSubmit`, `HasHiddenFields` |
 
-The Lexical family corresponds to the URL-only first-line scenario above; Trust
-and Behavior require progressively more network/page information and serve as
-the strong-baseline comparison.
+Lexical is the URL-only first-line case. Trust and Behavior need more
+network / page work, and serve as a strong baseline to compare against.
 
 ---
 
 # 2. Hypotheses
 
-## H1 (Scenario 2) — On the URL-string-only tier, non-parametric models extract significantly more signal than parametric models
+## H1 (Scenario 2) — On the URL-only tier, non-parametric models pick up meaningfully more signal than parametric ones
 
-Phishing URLs leave lexical traces in the URL string itself — unusual subdomain
-depth, digit-heavy paths, obfuscated characters — that do not require downloading
-the target page. We expect a model trained exclusively on Lexical features (URL
-string, no DNS lookup, no HTML parse) to achieve meaningful AUC, but with a
-larger parametric vs. non-parametric gap than any other feature tier. This gap
-arises because lexical patterns interact non-additively (combinations of
-character counts, lengths and special chars) and linear decision boundaries
-cannot fully exploit them. We test this with three parametric methods (LR,
-LDA, Naive Bayes) and three non-parametric methods (RF, SVM-RBF, KNN).
+Phishing URLs usually leave lexical traces: odd subdomain depth, paths full
+of digits, obfuscated characters. None of this needs the page to be
+downloaded. We expect a model trained only on Lexical features (URL string,
+no DNS, no HTML) to still reach a reasonable AUC — but with a **bigger**
+parametric vs. non-parametric gap than any other tier. The reason: lexical
+patterns interact in non-additive ways (lengths × digit counts × special
+chars), and a linear decision boundary can't fully use those interactions.
+We compare three parametric methods (LR, LDA, Naive Bayes) against three
+non-parametric ones (RF, SVM-RBF, KNN).
 
-**Quantitative success criteria.** To avoid a vague "significantly more" claim,
-H1 is operationalised against the 5-fold CV protocol used in `scenario_2.rmd`:
+**Concrete success criteria.** To keep the claim precise, H1 is tested
+against the 5-fold CV protocol from `scenario_2.rmd`:
 
 | # | Criterion | Threshold |
 |---|-----------|-----------|
-| C1 | Mean CV AUC gap between the best non-parametric and the best parametric model on the **Lexical (URLOnly) tier** | **ΔAUC ≥ 0.02** |
+| C1 | Mean CV AUC gap between the best non-parametric and best parametric model on the **Lexical (URLOnly) tier** | **ΔAUC ≥ 0.02** |
 | C2 | Paired Wilcoxon signed-rank test on the 5 per-fold AUCs of those two models | **p < 0.05** |
-| C3 | Gradient check across tiers: the gap on Lexical is **strictly larger** than the gap on the Full tier (where AUC ≈ 0.99 saturates and the gap should collapse to ≤ 0.005). | gap(Lexical) > gap(Full) |
+| C3 | Gradient across tiers: the Lexical gap is **strictly larger** than the Full-tier gap (Full saturates at AUC ≈ 0.99 and the gap should drop to ≤ 0.005). | gap(Lexical) > gap(Full) |
 
-H1 is **supported** only if C1 *and* C2 hold; C3 strengthens the claim from a
-single-tier statement into the gradient *"the non-parametric advantage shrinks
-as the feature tier becomes stronger."* H1 is **rejected** if either C1 or C2
-fails on the Lexical tier.
+H1 is **supported** only if C1 **and** C2 hold. C3 turns the claim from
+"non-parametric wins on one tier" into the stronger statement *"the
+non-parametric advantage shrinks as the feature tier gets stronger."* H1 is
+**rejected** if either C1 or C2 fails on Lexical.
 
-## H2 (Scenario 3) — Embedded feature selection retains substantially fewer features than algorithmic selection by collapsing collinear clusters
+## H2 (Scenario 3) — Embedded feature selection keeps clearly fewer features than algorithmic selection, because it collapses correlated clusters
 
-The full feature matrix contains severe multicollinearity (URL-length cluster
+The full feature matrix has severe multicollinearity (a URL-length cluster
 with VIF > 1000, see Section 4.3) and several pairs with |r| > 0.7. We
-hypothesise that **embedded methods** (LASSO, ElasticNet, RandomForest
-permutation importance) will retain fewer features than **algorithmic methods**
-(forward/backward stepwise, RFE) on the same task, because embedded penalisation
-collapses each collinear cluster to one or few survivors while algorithmic
-search treats correlated features as independent candidates. We will report
-(a) how many features each method ultimately retains, (b) the overlap between
-the retained sets, and (c) which features lose statistical significance as
-collinear partners are added or removed.
+expect **embedded methods** (LASSO, ElasticNet, Random Forest permutation
+importance) to keep fewer features than **algorithmic methods**
+(forward/backward stepwise, RFE). The reason: embedded penalisation pulls
+each correlated cluster down to one or two survivors, while stepwise search
+treats correlated features as independent candidates. We will report (a)
+how many features each method keeps, (b) how much the kept sets overlap,
+and (c) which features stop being statistically significant when their
+correlated partners are added or removed.
 
 ---
 
@@ -210,16 +207,16 @@ family_map <- tribble(
 
 ## 3.3 Feature Exclusion
 
-Before EDA we remove three categories of features that would bias or
-trivialise downstream modeling. All decisions are based on feature
-semantics.
+Before the EDA we drop three groups of features that would bias the
+analysis or trivialise the modelling. All three decisions are based on
+what the feature actually means.
 
 ### Category 1 — Computed probability / similarity scores
 
-These features are not raw URL measurements. They are outputs of
-prior models or expert-designed scoring functions that already encode
-phishing-detection logic. Including them would mean classifying the
-outputs of another classifier, not the URL itself.
+These are not raw URL measurements. They are outputs of other models or
+expert-written scoring functions that already encode phishing-detection
+logic. Keeping them would mean we are classifying another classifier's
+output, not the URL itself.
 
 ```{r exclude-scores}
 SCORES <- c(
@@ -234,8 +231,8 @@ cat("Computed scores to remove:", paste(SCORES, collapse = ", "), "\n")
 
 ### Category 2 — Redundant binary indicator
 
-`HasObfuscation` is defined as `(NoOfObfuscatedChar > 0)`. It carries
-no information beyond the count feature already in the dataset.
+`HasObfuscation` is literally `(NoOfObfuscatedChar > 0)`. It holds no
+information that the count feature doesn't already carry.
 
 ```{r exclude-binary}
 REDUNDANT_BINARY <- "HasObfuscation"
@@ -244,9 +241,9 @@ cat("Redundant binary to remove:", REDUNDANT_BINARY, "\n")
 
 ### Category 3 — Redundant ratio features
 
-Each ratio below equals `count / URLLength`, where both the count and
-`URLLength` are already present. Keeping both introduces perfect linear
-dependence without adding signal.
+Each ratio below equals `count / URLLength`, and both the count and
+`URLLength` are already in the dataset. Keeping the ratio gives us a
+perfect linear dependence — and no extra signal.
 
 ```{r exclude-ratios}
 RATIOS <- c(
@@ -286,8 +283,9 @@ continuous_features <- setdiff(names(features), binary_features)
 
 ## 3.4 Feature Tiers Used in Modelling
 
-To test H1 we define three nested feature tiers; modelling code consumes them
-directly from this notebook so the tier definitions stay consistent.
+To test H1 we define three nested feature tiers. The modelling notebook
+reads these tier definitions directly from here, so both notebooks stay
+in sync.
 
 ```{r feature-tiers}
 tier_lexical  <- family_map %>% filter(family == "Lexical")  %>% pull(feature)
@@ -324,8 +322,8 @@ df %>%
   theme_minimal(base_size = 12)
 ```
 
-**Takeaway:** The dataset is roughly balanced, so no resampling or class-weight
-adjustment is needed before modelling. Accuracy is a valid metric alongside AUC.
+**Takeaway:** The dataset is roughly balanced, so we don't need resampling
+or class-weighting. Accuracy works as a secondary metric next to AUC.
 
 ### 4.1.2 Missing Values
 
@@ -333,24 +331,24 @@ No missing values are present in any predictor (verified with
 `colSums(is.na(features))`).
 
 
-## 4.2 H1 — Lexical Features Show Class Overlap That Requires Non-Linear Models
+## 4.2 H1 — Lexical features overlap between classes, so we'll need non-linear models
 
-H1 predicts that a URL-string-only detector (Lexical features) will show a
-larger parametric vs. non-parametric gap than other tiers. We do not test
-non-linearity directly here; instead we show that **per-feature
-discriminative power on Lexical is the lowest among the three families**.
-A weak per-feature signal forces a classifier to combine many features at
-once.
+H1 claims that a URL-only detector (Lexical features) will show a bigger
+parametric vs. non-parametric gap than any other tier. We don't test
+non-linearity directly in the EDA. Instead we show that **per-feature
+discriminative power is lowest in the Lexical family**. When no single
+feature tells the classes apart, the model has to combine several features
+at once — and that's where non-linear models have an edge.
 
 ### 4.2.1 Discriminative Power by Family
 
-We measure per-feature discriminative power separately for the two feature
-types, because the standardised mean difference (SMD) is only meaningful
-for continuous variables. For binary features the "pooled SD" reduces to a
-function of the marginal proportion and SMD becomes hard to compare across
-features; we use **Cramer's V** instead, which is the standard effect-size
-measure for a 2×2 contingency table and lies on the same 0–1 scale as a
-correlation magnitude.
+We measure discriminative power separately for continuous and binary
+features. The standardised mean difference (SMD) only makes sense for
+continuous features. For binary features the "pooled SD" collapses to a
+function of the class proportion, so SMD stops being comparable across
+features. For those we use **Cramér's V** instead — the standard
+effect-size measure for a 2×2 contingency table, on the same 0–1 scale
+as |correlation|.
 
 ```{r discriminative-power, fig.height=7, fig.width=8}
 # --- Continuous features: standardised mean difference ----------------------
@@ -401,8 +399,8 @@ ggplot(discrim_df, aes(x = reorder(feature, effect), y = effect, fill = family))
   theme(legend.position = "top")
 ```
 
-Distribution of effect size per family (combined view, restricted to continuous
-features so SMD values are directly comparable):
+Effect-size distribution per family (continuous features only, so the SMD
+values are directly comparable):
 
 ```{r smd-by-family, fig.height=4, fig.width=6}
 smd_family <- discrim_df %>%
@@ -419,27 +417,27 @@ ggplot(smd_family, aes(family, effect, fill = family)) +
 ```
 
 **Takeaway (H1):** Among the continuous features, Lexical has the lowest
-median |SMD| and the smallest spread, while Trust and Behavior carry stronger
-per-feature signal. With weak per-feature evidence and visible non-linear
-structure, the URLOnly tier is the setting where parametric models will
-struggle most — exactly where the parametric vs. non-parametric gap predicted by H1 should appear.
+median |SMD| and the smallest spread. Trust and Behavior carry more
+per-feature signal. Weak per-feature evidence plus visible non-linear
+structure is exactly the setting where parametric models struggle most —
+and where the parametric vs. non-parametric gap predicted by H1 should
+show up.
 
-## 4.3 H2 (Scenario 3) — Multicollinearity Motivates Algorithmic vs. Embedded Feature Selection
+## 4.3 H2 (Scenario 3) — Multicollinearity is what makes algorithmic vs. embedded selection differ
 
-H2 hypothesises that algorithmic and embedded feature selection methods will
-retain different feature sets on the Full tier. The EDA evidence is the
-collinearity structure: where do correlated clusters live, and how severe is
+H2 says that algorithmic and embedded feature selection methods will keep
+different feature sets on the Full tier. The EDA evidence is the
+correlation structure: where are the correlated clusters, and how bad is
 the inflation? Embedded methods (LASSO, ElasticNet, RF importance) collapse
-each cluster to one survivor; algorithmic methods (forward/backward stepwise,
-RFE) treat correlated features as independent candidates and tend to retain
-more.
+each cluster down to one survivor. Algorithmic methods (stepwise, RFE)
+treat correlated features as independent candidates and tend to keep more
+of them.
 
 ### 4.3.1 Lexical Correlation Matrix
 
-The Lexical family is where the collinearity that drives H2 actually lives
-(Trust and Behavior families have `mean_abs_r` around 0.18 and 0.14 respectively
-and contain no dense cluster). The plot below makes the URL-length count
-cluster visible.
+The collinearity that drives H2 lives inside the Lexical family. Trust and
+Behavior have `mean_abs_r` around 0.18 and 0.14 and no dense cluster. The
+plot below makes the URL-length count cluster visible.
 
 ```{r cor-lexical, fig.height=6, fig.width=7}
 lexical_cor <- features %>%
@@ -460,10 +458,10 @@ lexical_cor <- features %>%
 )
 ```
 
-Across the full feature matrix, 10 pairs exceed `|r| > 0.7` and all of them
-sit inside this Lexical count cluster (URLLength ↔ NoOfLettersInURL ↔
-NoOfDegitsInURL and partners). These are the concrete collinear pairs that
-algorithmic and embedded selection are expected to handle differently.
+Across the full feature matrix, 10 pairs pass `|r| > 0.7` — and all of
+them sit inside this Lexical count cluster (URLLength ↔ NoOfLettersInURL
+↔ NoOfDegitsInURL and friends). These are the correlated pairs we expect
+algorithmic and embedded selection to handle differently.
 
 ### 4.3.2 Variance Inflation Factors
 
@@ -502,15 +500,14 @@ vif_df %>%
   kable(caption = "Variance Inflation Factors - continuous features (lm-based, target-free).")
 ```
 
-**Takeaway (H2):** Removing the four ratio features in Section 3.3 was
-necessary but not sufficient. `URLLength`, `NoOfLettersInURL` and
-`NoOfDegitsInURL` remain near-collinear because they measure overlapping
-URL-string properties. Stepwise/RFE will likely keep most of them; LASSO and
-RF importance are expected to retain only one or two. Quantifying that gap is
-the H2 modelling task. Binary features are excluded from the VIF computation
-by construction (linear regression of a 0/1 indicator on the rest is not
-informative for collinearity diagnostics in the same scale as continuous
-predictors).
+**Takeaway (H2):** Dropping the four ratio features in Section 3.3 was
+necessary but not enough. `URLLength`, `NoOfLettersInURL` and
+`NoOfDegitsInURL` stay near-collinear because they measure overlapping
+properties of the same URL string. Stepwise/RFE will likely keep most of
+them; LASSO and RF importance should keep only one or two. Measuring that
+difference is the H2 task. Binary features are left out of the VIF
+calculation by design — regressing a 0/1 indicator on continuous
+predictors is not comparable on the same scale.
 
 
 ## 4.4 Skewness Assessment *(Scenario 2 preparation)*
@@ -553,13 +550,13 @@ cat("These are:\n")
 skew_df %>% filter(abs_skew > 2) %>% select(feature, skewness, family) %>% print()
 ```
 
-**Takeaway (Scenario 2):** Several count-based features are heavily right-skewed with
-extreme outliers. This has direct implications for model selection:
+**Takeaway (Scenario 2):** Several count features are heavily right-skewed
+with long outlier tails. This shapes our modelling choices:
 
-- **Parametric models** (LR, LDA): will require feature scaling and log-transforms
-  of skewed features to satisfy distributional assumptions.
-- **Non-parametric models** (trees, KNN, SVM): are robust to skewness but KNN and SVM
-  still require standardisation for distance-based computations.
+- **Parametric models** (LR, LDA): need scaling and a log-transform on
+  skewed features to make the distributional assumption hold.
+- **Non-parametric models** (trees, KNN, SVM): robust to skew, but KNN and
+  SVM still need standardisation because they use distances.
 
 
 
@@ -567,15 +564,14 @@ extreme outliers. This has direct implications for model selection:
 
 # 5. EDA Summary & Modelling Implications
 
-**Note on dataset separability:** After removing computed scores and redundant
-features (Section 3.3), 40 raw features remain (13 Lexical + 7 Trust +
-20 Behavior). Initial modelling shows that this reduced set still yields
-AUC ≈ 0.99 for all model types — the dataset is near-perfectly separable on
-the Full tier. H1 is therefore tested primarily on the **URLOnly tier**
-(13 Lexical features) where meaningful parametric vs. non-parametric
-differences are expected to emerge; H2 is tested on the **Full tier**, where
-the multicollinearity that drives the algorithmic-vs-embedded gap actually
-exists.
+**A note on separability:** After the Section 3.3 exclusions, 40 features
+remain (13 Lexical + 7 Trust + 20 Behavior). Even on this reduced set,
+every model type already reaches AUC ≈ 0.99 on the Full tier — the task
+is near-perfectly separable once all three families are present. So we
+test H1 mainly on the **URLOnly tier** (13 Lexical features), where the
+parametric vs. non-parametric contrast has room to show. H2 is tested on
+the **Full tier**, where the multicollinearity that drives the
+algorithmic-vs-embedded gap actually lives.
 
 ## 5.1 Implications for modelling scenarios
 
