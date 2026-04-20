@@ -54,46 +54,42 @@ them into three families by how expensive they are to compute:
 
 # 2. Hypotheses
 
-## H1 (Scenario 2) — On the URL-only tier, non-parametric models pick up meaningfully more signal than parametric ones
+## H1 (Scenario 2) — The gap between parametric and non-parametric model families is tier-dependent
 
 Phishing URLs usually leave lexical traces: odd subdomain depth, paths full
 of digits, obfuscated characters. None of this needs the page to be
-downloaded. We expect a model trained only on Lexical features (URL string,
-no DNS, no HTML) to still reach a reasonable AUC — but with a **bigger**
-parametric vs. non-parametric gap than any other tier. The reason: lexical
-patterns interact in non-additive ways (lengths × digit counts × special
-chars), and a linear decision boundary can't fully use those interactions.
-We compare three parametric methods (LR, LDA, Naive Bayes) against three
-non-parametric ones (RF, SVM-RBF, KNN).
+downloaded. We expect a model trained only on Lexical features to still reach a reasonable AUC, but the **size of the
+gap** between parametric and non-parametric model families should change
+with the family.
 
-**Concrete success criteria.** To keep the claim precise, H1 is tested
-against the 5-fold CV protocol from `scenario_2.rmd`:
+We compare three parametric methods (LR, LDA, Naive Bayes)
+against three non-parametric ones (RF, SVM-RBF, KNN).
 
 | # | Criterion | Threshold |
 |---|-----------|-----------|
 | C1 | Mean CV AUC gap between the best non-parametric and best parametric model on the **Lexical (URLOnly) tier** | **ΔAUC ≥ 0.02** |
 | C2 | Paired Wilcoxon signed-rank test on the 5 per-fold AUCs of those two models | **p < 0.05** |
-| C3 | Gradient across tiers: the Lexical gap is **strictly larger** than the Full-tier gap (Full saturates at AUC ≈ 0.99 and the gap should drop to ≤ 0.005). | gap(Lexical) > gap(Full) |
+| C3 | Gradient across tiers: the Lexical gap is **strictly larger** than the FullLite-tier gap . | gap(Lexical) > gap(FullLite) |
 
 H1 is **supported** only if C1 **and** C2 hold. C3 turns the claim from
-"non-parametric wins on one tier" into the stronger statement *"the
-non-parametric advantage shrinks as the feature tier gets stronger."* H1 is
-**rejected** if either C1 or C2 fails on Lexical.
+"the two families differ on one tier" into the stronger statement *"the
+difference between families shrinks as the feature tier gets stronger."*
+H1 is **rejected** if either C1 or C2 fails on Lexical.
 
-## H2 (Scenario 5) — The cost of dimensionality reduction is not the same on every tier
+Note:
+The FullLite tier is the scenario_2 replacement for a naive "Full" tier: six Behavior
+near-leakers (`LineOfCode`, `NoOfJS`, `NoOfCSS`, `NoOfImage`,
+`NoOfSelfRef`, `NoOfExternalRef`, each with univariate AUC > 0.95) are
+stripped because they push Full to AUC ≈ 1.0 and hide every contrast H1
+is trying to measure.
 
-Every feature tier can be compressed into a few new axes via PCA
+## H2 (Scenario 5) — The cost of dimensionality reduction is not the same on every family
+
+Every feature family can be compressed into a few new axes via PCA
 (unsupervised) or LDA projection (supervised). We claim the cost of that
-compression is not uniform across tiers: on the URL-only (Lexical) tier it
-is high, because the phishing signal lives in interactions between
-features and a linear projection loses those interactions; on Behavior and
-FullLite it approaches zero, because the signal is additive enough that
-any sufficiently-large PC basis carries it. This is the same interaction
-structure that forced us to reach for non-parametric models in H1 — on
-Lexical it blocks linear compression the same way it blocks linear
-classification.
+compression is not uniform across families.
 
-**Concrete success criteria** (tested in `scenario_5.rmd`):
+On the URL-only (Lexical) tier it is high, because the phishing signal lives in interactions between features and a linear projection loses those interactions; on Behavior and FullLite it approaches zero, because the signal is additive enough that any sufficiently-large PC basis carries it.
 
 | # | Criterion | Threshold |
 |---|-----------|-----------|
@@ -282,7 +278,7 @@ family_map %>% count(family) %>% print()
 ```
 
 ```{r feature-types, include=FALSE}
-# Silent type split used by downstream VIF/skewness chunks
+# Type split used by downstream VIF/skewness chunks
 binary_features <- names(features)[map_lgl(features, ~ all(na.omit(.x) %in% c(0, 1)))]
 continuous_features <- setdiff(names(features), binary_features)
 ```
@@ -291,7 +287,10 @@ continuous_features <- setdiff(names(features), binary_features)
 
 To test H1 we define three nested feature tiers. The modelling notebook
 reads these tier definitions directly from here, so both notebooks stay
-in sync.
+in sync. The `tier_full` built here (40 features) is the EDA baseline
+used by §4.5's PCA diagnostics; the scenario_2 modelling notebook
+replaces it with **FullLite** (34 features) by stripping six Behavior
+near-leakers — see §5 for the reasoning.
 
 ```{r feature-tiers}
 tier_lexical  <- family_map %>% filter(family == "Lexical")  %>% pull(feature)
@@ -333,18 +332,14 @@ or class-weighting. Accuracy works as a secondary metric next to AUC.
 
 ### 4.1.2 Missing Values
 
-No missing values are present in any predictor (verified with
-`colSums(is.na(features))`).
+No missing values are present in any predictor (verified with `colSums(is.na(features))`).
 
-
-## 4.2 H1 — Lexical features overlap between classes, so we'll need non-linear models
+## 4.2 H1 preparation
 
 H1 claims that a URL-only detector (Lexical features) will show a bigger
 parametric vs. non-parametric gap than any other tier. We don't test
 non-linearity directly in the EDA. Instead we show that **per-feature
-discriminative power is lowest in the Lexical family**. When no single
-feature tells the classes apart, the model has to combine several features
-at once — and that's where non-linear models have an edge.
+discriminative power is lowest in the Lexical family**.
 
 ### 4.2.1 Discriminative Power by Family
 
@@ -405,8 +400,7 @@ ggplot(discrim_df, aes(x = reorder(feature, effect), y = effect, fill = family))
   theme(legend.position = "top")
 ```
 
-Effect-size distribution per family (continuous features only, so the SMD
-values are directly comparable):
+Effect-size distribution per family (continuous features only):
 
 ```{r smd-by-family, fig.height=4, fig.width=6}
 smd_family <- discrim_df %>%
@@ -416,34 +410,21 @@ ggplot(smd_family, aes(family, effect, fill = family)) +
   geom_boxplot(alpha = 0.7, show.legend = FALSE) +
   geom_jitter(width = 0.15, alpha = 0.5, size = 2) +
   scale_fill_brewer(palette = "Set2") +
-  labs(title = "SMD distribution by family (continuous features only)",
-       subtitle = "H1: Lexical SMD lowest -> largest parametric gap expected at URLOnly tier",
+  labs(title = "SMD distribution by family (continuous features only)"
        x = NULL, y = "| SMD |") +
   theme_minimal(base_size = 12)
 ```
 
 **Takeaway (H1):** Among the continuous features, Lexical has the lowest
 median |SMD| and the smallest spread. Trust and Behavior carry more
-per-feature signal. Weak per-feature evidence plus visible non-linear
-structure is exactly the setting where parametric models struggle most —
-and where the parametric vs. non-parametric gap predicted by H1 should
-show up.
+per-feature signal. This supports H1's claim that the URL-only tier has less signal in individual features and relies more on feature combinations.
 
-## 4.3 H2 preparation — How low-rank each tier already is
+## 4.3 H2 preparation
 
 H2 says the cost of linear dimensionality reduction differs sharply across
-tiers. Before we run the actual projections in `scenario_5.rmd`, a quick
-look at multicollinearity tells us how much redundant dimensionality each
-tier has to start with: if a tier is already low-rank, PCA will find a
-compact basis easily — but that only measures variance, not class
-separation, so the signal may still be lost. §4.5 checks the class side
-next.
+families. A quicklook at multicollinearity tells us how much redundant dimensionality each family has to start with. If a family is already low-rank in variance, aggressive compression is cheap. If it has many independent directions of variance, compression is more expensive. The question is whether the class signal lives in those dominant variance directions or orthogonal to them.
 
 ### 4.3.1 Lexical Correlation Matrix
-
-The collinearity that drives H2 lives inside the Lexical family. Trust and
-Behavior have `mean_abs_r` around 0.18 and 0.14 and no dense cluster. The
-plot below makes the URL-length count cluster visible.
 
 ```{r cor-lexical, fig.height=6, fig.width=7}
 lexical_cor <- features %>%
@@ -466,11 +447,7 @@ lexical_cor <- features %>%
 
 Across the full feature matrix, 10 pairs pass `|r| > 0.7` — and all of
 them sit inside this Lexical count cluster (URLLength ↔ NoOfLettersInURL
-↔ NoOfDegitsInURL and friends). A tight cluster like this means the
-Lexical feature matrix has fewer than 13 independent directions of
-variance: PCA will collapse the cluster into one dominant component. The
-open question is whether the class signal lines up with that dominant
-component or sits orthogonal to it — §4.5 tests exactly that.
+↔ NoOfDegitsInURL and friends).
 
 ### 4.3.2 Variance Inflation Factors
 
@@ -514,10 +491,7 @@ stay near-collinear because they measure overlapping properties of the
 same URL string. For H2 this means Lexical has far fewer independent
 directions of variance than it has features — PCA will compress it
 aggressively. The open question is whether the class signal lives in
-those dominant variance directions or orthogonal to them; §4.5 answers
-it. Binary features are left out of the VIF calculation by design —
-regressing a 0/1 indicator on continuous predictors is not comparable on
-the same scale.
+those dominant variance directions or orthogonal to them.
 
 
 ## 4.4 Skewness Assessment *(Scenario 2 preparation)*
@@ -574,18 +548,12 @@ with long outlier tails. This shapes our modelling choices:
 §4.3 showed that Lexical has fewer independent directions of variance
 than it has features. That alone only tells us about variance — not
 whether any of those directions carry the *class* signal. For H2 the
-crucial question is whether the top few PCs of each tier line up with
+crucial question is whether the top few PCs of each family line up with
 phishing vs. legitimate separation. If they don't, any low-dimensional
 projection will drop detection accuracy. Two PCA-based diagnostics answer
 that: a scree plot (how many PCs each tier needs to capture most of its
 variance) and the univariate AUC of each leading PC (how much class
 signal sits along that direction).
-
-`scenario_5.rmd` tests H2 on the scenario_2 tier set (with six Behavior
-near-leakers stripped, i.e. FullLite = 34 features). Here we use the
-native EDA tiers (Full = 40) to stay consistent with §4.2 and §4.3 — the
-direction of the finding is the same either way, and stripping the
-near-leakers only makes the Lexical/Full gap smaller, never larger.
 
 ### 4.5.1 Scree plot per tier
 
@@ -685,20 +653,23 @@ cheap on Behavior and Full, expensive on Lexical.
 
 # 5. EDA Summary & Modelling Implications
 
-**A note on separability:** After the Section 3.3 exclusions, 40 features
-remain (13 Lexical + 7 Trust + 20 Behavior). Even on this reduced set,
-every model type already reaches AUC ≈ 0.99 on the Full tier — the task
-is near-perfectly separable once all three families are present. So we
-test H1 mainly on the **URLOnly tier** (13 Lexical features), where the
-parametric vs. non-parametric contrast has room to show. H2 is tested
-across tiers, contrasting URL-only against Behavior/FullLite, because the
-cost of compression is what differs between them.
+**A note on separability.** After the Section 3.3 exclusions, 40 features
+remain (13 Lexical + 7 Trust + 20 Behavior). On this reduced set the task
+is near-perfectly separable once Behavior is present — six Behavior
+counts have univariate AUC > 0.95 on their own, so a naive Full tier
+saturates at AUC ≈ 1.0 and the parametric vs. non-parametric contrast
+disappears. For H1 we therefore use the scenario_2 tier layout: Lexical
+(13), Trust (7), Behavior with the six near-leakers stripped (14), and
+**FullLite** (34) = Lexical + Trust + reduced Behavior. H1 is tested
+primarily on the **URLOnly tier**, where the family contrast has the most
+room to show, and the tier gradient (C3) is measured against **FullLite**,
+not Full. H2 is tested across the same tiers, because the cost of
+compression is what differs between them.
 
 ## 5.1 Implications for modelling scenarios
 
 | Finding | Scenario 2 implication (H1) | Scenario 5 implication (H2) |
 |---------|----------------------------|------------------------------|
-| Near-perfect separability on Full tier | Comparison focused on URLOnly tier where models actually differ | Behavior/FullLite has many directions that each carry class signal — compression into a handful of components should be cheap |
 | Lexical SMD lowest + features must be combined | Largest parametric/non-parametric AUC gap expected on URLOnly | On Lexical the signal lives in feature combinations, so a linear projection to 3 PCs is expected to drop AUC sharply |
 | Heavy skewness in 19 of 22 continuous features | Log-transform + standardisation for LR/LDA; trees/RF unaffected | Apply the same log+standardise transform before PCA/LDA projection (both are scale-sensitive) |
 | URL-length cluster: VIF > 1000 and abs(r) > 0.84 | Use stable solvers / regularised LR for fairness | Lexical is low-rank in variance but the class signal is smeared across PCs — the strongest case for "compression is expensive here" |
