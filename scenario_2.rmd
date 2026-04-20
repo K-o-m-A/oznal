@@ -768,10 +768,6 @@ essentially resolved by then.
 
 # 7. Conclusion — H1 gradient
 
-H1 in the EDA was a single-tier claim about URL-only detection. The
-four-tier comparison lets us make the stronger, more informative
-version:
-
 1. **Non-parametric > parametric when the feature tier is weak.** On
    the **Lexical** tier the non-parametric advantage is the largest
    of any tier, and every single CV fold shows the same order. This is

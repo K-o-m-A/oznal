@@ -229,7 +229,7 @@ drobnej úprave notebooku.
 **Parametre:** `alpha = 0`, `lambda = 0.01` (cez `glmnet`).
 
 #### Prečo ridge a nie obyčajná LR?
-EDA §4.3 ukázala VIF > 500 v Lexical klastri (URLLength ↔ NoOfLetters
+EDA §4.3 ukázala VIF > 1000 v Lexical klastri (URLLength ↔ NoOfLetters
 ↔ NoOfDegits). Neregularizovaná LR je tam **numericky nestabilná**:
 - Hessián matice v Newton-Raphson iterácii je takmer singulárny.
 - Koeficienty oscilujú medzi foldami, niekedy menia znamienko.
@@ -914,7 +914,7 @@ tam, kde je signál slabý a nelineárny"**. Náš experiment to dokazuje.
 ## 9. Cheatsheet pre otázky komisie
 
 **Q: Prečo ste nepoužili obyčajnú logit regresiu bez penalizácie?**
-A: Kvôli VIF > 500 v Lexical klastri (`URLLength`, `NoOfLettersInURL`,
+A: Kvôli VIF > 1000 v Lexical klastri (`URLLength`, `NoOfLettersInURL`,
 `NoOfDegitsInURL`). Neregularizovaná LR vydáva numericky nestabilné
 koeficienty (oscilujú medzi foldami, niekedy menia znamienko). Ridge
 stabilizuje bez toho, aby robil feature selection.

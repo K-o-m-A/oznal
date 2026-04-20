@@ -1,22 +1,8 @@
 # Príprava na obhajobu — `phishing.rmd` (EDA a hypotézy)
 
-Tento dokument je učebnou pomôckou k notebooku `phishing.rmd`. Prechádza
-notebookom po sekciách a pre každý krok vysvetľuje **čo sa robí**,
-**prečo sa to robí** a **čo má obhajujúci strážiť** pri otázkach komisie.
-
-Pre pohodlie čitateľa sú všetky **odborné pojmy** (AUC, ROC, VIF, SMD,
-Cramérove V, CV, Wilcoxon, ...) vysvetlené v sekcii **0. Slovník pojmov**
-na začiatku. Odkazy na pojmy v ďalších sekciách ukazujú späť do slovníka.
-
 ---
 
 ## 0. Slovník pojmov — čo všetky skratky znamenajú
-
-### EDA (Exploratory Data Analysis — prieskumná analýza dát)
-Fáza pred modelovaním, v ktorej sa pozrieme na surové dáta: distribúcie,
-chýbajúce hodnoty, korelácie, outliery. Cieľom NIE je trénovať model,
-ale porozumieť štruktúre dát tak, aby sme vedeli správne zvoliť
-preprocessing a typ modelu.
 
 ### AUC (Area Under the ROC Curve — plocha pod ROC krivkou)
 **Najdôležitejšia metrika v tomto projekte.**
@@ -476,38 +462,4 @@ nemodeluje časový drift phishing kit autorov. V produkčnom nasadení by
 bol potrebný kontinuálny retraining. Toto je limitácia, ktorú
 priznávame.
 
----
 
-## 7. Návrhy ďalšej práce
-
-### Rozšírenia dát a príznakov
-1. **Word-piece / character n-gram embeddingy URL** — jemný Lexical
-   signál, ktorý náš ručne vytvorený count-set iba hrubo aproximuje.
-2. **Doménovo podložené feature engineering** — napr. Levenshteinova
-   vzdialenosť URL od top-1000 brandových domén
-   (apple.com → aple.com). Pozor: toto nepatrí do Lexical (vyžaduje
-   externý lookup), ale do Trust.
-3. **Časové trendy** — phishing kit autori sa prispôsobujú. Retraining,
-   detekcia driftu, sliding-window validation.
-
-### Rozšírenia modelovania
-4. **Character-level CNN / Transformer** nad surovým URL textom.
-   Eliminoval by potrebu ručne navrhnutých count príznakov.
-5. **Adversariálne testovanie** — simulovať homoglyph útok (cyrilic `а`
-   namiesto latin `a`), URL encoding, subdomain padding. Merať pokles
-   AUC nášho filtra.
-6. **Kalibrácia pravdepodobností** (Platt scaling, isotonic regression).
-   AUC hovorí o ordinálnom skóre, ale pre threshold-based rozhodovanie
-   v produkcii potrebujeme dobre kalibrované P(phishing).
-7. **Multi-class extension** — okrem Legitimate/Phishing rozlíšiť typ
-   phishing kampaňe (bank, crypto, social). Phishing rodina je v
-   datasete označiteľná pomocou `Bank`, `Pay`, `Crypto` flagov.
-
-### Rozšírenia metodiky
-8. **Repeated k-fold CV** (napr. 5×5 = 25 foldov) — odstráni podlahu
-   p-hodnoty 1/32 a umožní jemnejšie rozlíšenie efektov medzi úrovňami.
-9. **Nested CV** pre hyperparameter tuning — externá slučka na odhad
-   výkonu, vnútorná na voľbu parametrov. Metodologicky správnejšie, ale
-   výpočtovo drahšie.
-10. **BCa bootstrap** pre 95 % intervaly spoľahlivosti AUC, nielen
-    mean ± SD.
