@@ -307,6 +307,7 @@ fit_one_tier <- function(tier_features, data_train, data_test,
        test_auc = test_auc,
        test_acc = unname(cm$overall["Accuracy"]),
        test_f1  = unname(cm$byClass["F1"]),
+       test_prec = unname(cm$byClass["Precision"]),
        test_sens = unname(cm$byClass["Sensitivity"]),
        test_spec = unname(cm$byClass["Specificity"]),
        train_secs = elapsed)
@@ -321,7 +322,7 @@ run_or_load <- function(name, fn) {
   if (file.exists(path)) {
     cached <- readRDS(path)
     tiers_ok   <- setequal(names(cached$by_tier), names(tiers))
-    schema_ok  <- all(c("train_auc", "train_acc") %in%
+    schema_ok  <- all(c("train_auc", "train_acc", "test_prec") %in%
                       names(cached$by_tier[[1]]))
     fp_ok      <- isTRUE(cached$tiers_fp == fp)
     if (tiers_ok && schema_ok && fp_ok) return(cached)
@@ -334,14 +335,10 @@ run_or_load <- function(name, fn) {
   res
 }
 
-derive_precision <- function(sens, spec)
-  sens / (sens + (1 - spec))
-
 print_tier_summary <- function(res) {
   tbl <- map_dfr(names(res$by_tier), function(tier) {
     r <- res$by_tier[[tier]]
     gap <- r$train_auc - r$test_auc
-    prec <- derive_precision(r$test_sens, r$test_spec)
     tibble(
       Tier        = tier,
       `Train AUC` = sprintf("%.4f", r$train_auc),
@@ -351,7 +348,7 @@ print_tier_summary <- function(res) {
       `Gap`       = sprintf("%+.4f", gap),
       Accuracy    = sprintf("%.4f", r$test_acc),
       F1          = sprintf("%.4f", r$test_f1),
-      Prec        = sprintf("%.4f", prec),
+      Prec        = sprintf("%.4f", r$test_prec),
       Sens        = sprintf("%.4f", r$test_sens),
       Spec        = sprintf("%.4f", r$test_spec),
       `Train (s)` = sprintf("%.1f", r$train_secs)
@@ -360,7 +357,7 @@ print_tier_summary <- function(res) {
   knitr::kable(
     tbl,
     align   = "lrrrrrrrrrr",
-    caption = sprintf("%s — %s  (Gap = Train AUC − Test AUC; > 0.01 hints at overfit; Prec derived from Sens/Spec on balanced test set)",
+    caption = sprintf("%s — %s  (Gap = Train AUC − Test AUC; > 0.01 hints at overfit; Prec read from caret::confusionMatrix)",
                       res$model, res$family)
   )
 }
@@ -626,7 +623,7 @@ test_tbl <- map_dfr(all_results, function(r) {
            test_auc = t$test_auc, test_acc = t$test_acc,
            test_f1  = t$test_f1,  test_sens = t$test_sens,
            test_spec = t$test_spec,
-           test_prec = derive_precision(t$test_sens, t$test_spec),
+           test_prec = t$test_prec,
            train_secs = t$train_secs)
   })
 })
@@ -695,9 +692,8 @@ caught" is bad enough that users stop trusting
 the proxy and start asking for bypass rules, at which point the whole
 URL-only line of defence is gone.
 
-Precision is derived analytically from Sensitivity and Specificity
-using the test-set class balance (≈ 50/50 after stratified splitting):
-$\text{Prec} = \frac{\text{Sens}}{\text{Sens} + (1 - \text{Spec})}$.
+Precision is read directly from the held-out confusion matrix
+(`caret::confusionMatrix(...)$byClass["Precision"]`, i.e. $TP/(TP+FP)$).
 
 ```{r quality-table}
 quality_tbl <- test_tbl %>%

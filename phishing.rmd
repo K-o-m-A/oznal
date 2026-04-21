@@ -33,7 +33,7 @@ The question we want to answer is simple:
 **how much phishing signal is already in the URL?** If a URL-only model works well, we can run it as a fast
 first-line filter. Where it fails, the slower trust- and behavior-level checks have to take over.
 
-Explored scenarios for hypothesis driven modelling: 2,5
+Explored scenarios for hypothesis driven modeling: 2,5
 
 ## 1.2 Dataset
 
@@ -114,7 +114,7 @@ names(raw) <- map_chr(names(raw), ~ str_replace(.x, "^\ufeff", ""))
 ```
 
 ```{r define-roles}
-# Columns excluded from modelling (identifiers / free text)
+# Columns excluded from modeling (identifiers / free text)
 ID_COLS <- c("FILENAME", "URL", "Domain", "TLD", "Title")
 
 # Binary target as factor
@@ -207,7 +207,7 @@ family_map <- tribble(
 ## 3.3 Feature Exclusion
 
 Before the EDA we drop three groups of features that would bias the
-analysis or trivialise the modelling. All three decisions are based on
+analysis or trivialise the modeling. All three decisions are based on
 what the feature actually means.
 
 ### Category 1 — Computed probability / similarity scores
@@ -279,12 +279,12 @@ binary_features <- names(features)[map_lgl(features, ~ all(na.omit(.x) %in% c(0,
 continuous_features <- setdiff(names(features), binary_features)
 ```
 
-## 3.4 Feature Tiers Used in Modelling
+## 3.4 Feature Tiers Used in Modeling
 
-To test H1 we define three nested feature tiers. The modelling notebook
+To test H1 we define three nested feature tiers. The modeling notebook
 reads these tier definitions directly from here, so both notebooks stay
 in sync. The `tier_full` built here (40 features) is the EDA baseline
-used by §4.5's PCA diagnostics; the scenario_2 modelling notebook
+used by §4.5's PCA diagnostics; the scenario_2 modeling notebook
 replaces it with **FullLite** (34 features) by stripping six Behavior
 near-leakers — see §5 for the reasoning.
 
@@ -531,7 +531,7 @@ skew_df %>% filter(abs_skew > 2) %>% select(feature, skewness, family) %>% print
 ```
 
 **Takeaway (Scenario 2):** Several count features are heavily right-skewed
-with long outlier tails. This shapes our modelling choices:
+with long outlier tails. This shapes our modeling choices:
 
 - **Parametric models** (LR, LDA): need scaling and a log-transform on
   skewed features to make the distributional assumption hold.
@@ -647,7 +647,7 @@ cheap on Behavior and Full, expensive on Lexical.
 
 ---
 
-# 5. EDA Summary & Modelling Implications
+# 5. EDA Summary & Modeling Implications
 
 **A note on separability.** After the Section 3.3 exclusions, 40 features
 remain (13 Lexical + 7 Trust + 20 Behavior). On this reduced set the task
@@ -664,7 +664,7 @@ room to show, and the family gradient (C3) is measured against **FullLite**,
 not Full. H2 is tested across the same families, because the cost of
 compression is what differs between them.
 
-## 5.1 Implications for modelling scenarios
+## 5.1 Implications for modeling scenarios
 
 | Finding | Scenario 2 implication (H1) | Scenario 5 implication (H2) |
 |---------|----------------------------|------------------------------|

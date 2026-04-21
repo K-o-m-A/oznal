@@ -2,19 +2,59 @@
 
 ---
 
+## Úvod pre čitateľa bez strojového učenia
+
+**O čom projekt je, ľudskou rečou.** Keď vám niekto pošle link, váš
+firemný bezpečnostný filter (proxy) sa musí v zlomku sekundy rozhodnúť,
+či stránku otvoriť alebo zablokovať. Najrýchlejšie vie pozrieť iba
+samotnú adresu URL — bez toho, aby stránku stiahol. Otázka práce znie:
+**stačí na rozoznanie phishingu pozrieť len text URL, alebo treba
+aj obsah stránky?**
+
+**Čo je hypotéza a prečo ich testujeme dve.**
+- **H1 (Scenario 2)** skúma, *ktorý typ modelu* si poradí lepšie na
+  slabom signáli (len URL). Modely delíme na „parametrické" (jednoduchší
+  tvar, napr. regresia) a „neparametrické" (flexibilnejšie, napr. les
+  rozhodovacích stromov). Tušíme, že keď je signál slabý, zložitejšie
+  modely dokážu vyťažiť viac.
+- **H2 (Scenario 5)** skúma, *ako drahé je zjednodušenie dát* (PCA =
+  stlačenie mnohých stĺpcov do pár hlavných „smerov"). Keď je signál
+  skrytý v kombináciách príznakov, stlačenie ho pokazí; keď je signál
+  priamočiary, stlačenie je lacné.
+
+**Čo je EDA a prečo je prvá.** *Exploratory Data Analysis* = pozriem sa
+na dáta **predtým**, ako trénujem model. Spočítam základné štatistiky,
+nakreslím grafy, pozriem koreláciu. Zmyslom je rozhodnúť, čo z dát má
+zmysel do modelu dať, čo treba transformovať, a či hypotézy, ktoré chcem
+testovať, majú vôbec v dátach základ. Bez EDA je modelovanie hádanie
+naslepo.
+
+---
+
 ## 0. Slovník pojmov — čo všetky skratky znamenajú
 
 ### AUC (Area Under the ROC Curve — plocha pod ROC krivkou)
 **Najdôležitejšia metrika v tomto projekte.**
-- **Binárny klasifikátor** vracia pre každý príklad pravdepodobnosť
-  P(phishing). Aby sme spravili tvrdé rozhodnutie, potrebujeme **prah**
-  (napr. predikuj "phishing", ak P > 0.5).
+
+*Ľudskou rečou:* náhodne ťahám jednu phishing a jednu legitimate URL.
+AUC hovorí, aká je pravdepodobnosť, že model dá phishingovej stránke
+vyššie skóre ako legitímnej. AUC = 0.5 je mincovka, AUC = 1.0 je
+dokonalý model. V bezpečnosti sú rozdiely typu 0.97 vs. 0.99 obrovské —
+na miliónoch URL denne to robí státisíce chýb ročne.
+
+- **Binárny klasifikátor** (model, ktorý predikuje jednu z dvoch tried —
+  u nás phishing vs. legitimate) vracia pre každý príklad
+  pravdepodobnosť P(phishing). Aby sme spravili tvrdé rozhodnutie,
+  potrebujeme **prah** (napr. predikuj "phishing", ak P > 0.5).
 - **ROC krivka** (Receiver Operating Characteristic) vykresľuje pre
   **všetky možné prahy** dvojicu:
   - os X: False Positive Rate = FP / (FP + TN) = aká časť legitimate
     stránok je chybne označená ako phishing,
   - os Y: True Positive Rate = TP / (TP + FN) = aká časť phishing
     stránok je správne odhalená.
+  *Intuícia:* každý bod krivky zodpovedá jednému prahu. Ak prah zvýšim,
+  model je prísnejší → menej phish zachytím, ale aj menej legit
+  prezlobím (pohyb doľava-dole). Ak znížim, opak.
 - **AUC** = integrál pod touto krivkou, hodnota medzi 0 a 1.
   - AUC = 1.0 → dokonalý klasifikátor,
   - AUC = 0.5 → náhodné hádanie,
@@ -22,7 +62,9 @@
   - AUC = 0.8 → dobrý klasifikátor.
 - **Prečo práve AUC a nie Accuracy?**
   1. AUC je **prahovo nezávislá**: porovnáva kvalitu *skóre*, nie
-     konkrétneho rozhodnutia.
+     konkrétneho rozhodnutia. Accuracy závisí od toho, kde nastavíme
+     prah — ak ho zmeníme, accuracy vyskočí alebo klesne, ale model
+     samotný sa nezlepšil. AUC tento efekt odstraňuje.
   2. AUC má štatistickú interpretáciu: *pravdepodobnosť, že náhodne
      vybraná phishing URL dostane vyššie skóre ako náhodne vybraná
      legitimate URL.*
@@ -32,62 +74,128 @@
 
 ### FPR, TPR, Accuracy, Precision, Recall, F1
 Základné metriky klasifikácie, všetky počítané z matice zámien
-(confusion matrix):
+(confusion matrix — tabuľka, ktorá sčíta, ako často sa model pomýlil
+v každom z dvoch možných smerov):
 
 |              | skutočne Phishing | skutočne Legitimate |
 |--------------|-------------------|---------------------|
 | predikované Phishing   | **TP** (true positive) | **FP** (false positive) |
 | predikované Legitimate | **FN** (false negative) | **TN** (true negative) |
 
+*Ľudskou rečou:* TP = správne zablokovaný phish, FP = zablokovaná
+nevinná stránka (používateľ zúri), FN = phish prešiel (používateľ
+príde o heslo), TN = legit stránka prešla (normálny deň).
+
 - **Accuracy** = (TP + TN) / (TP + FP + TN + FN) — aká časť predikcií je
-  správna.
+  správna. *V praxi:* „v koľkých percentách prípadov má model pravdu."
 - **Precision** = TP / (TP + FP) — zo všetkých, ktoré sme označili za
-  phishing, aká časť naozaj phishingom je.
-- **Sensitivity** = TP / (TP + FN) — zo všetkých
-  skutočných phishing, koľko sme zachytili.
-- **Specificity** = TN / (TN + FP) — zo všetkých legitímnych, koľko sme
-  ich nesprávne neoznačili.
+  phishing, aká časť naozaj phishingom je. *V praxi:* „keď model
+  povie poplach, ako často má pravdu." Nízka Precision = veľa falošných
+  poplachov, používatelia prestanú filtru veriť.
+- **Sensitivity** (= Recall = True Positive Rate) = TP / (TP + FN) — zo
+  všetkých skutočných phishing, koľko sme zachytili. *V praxi:*
+  „koľko zlých stránok sme chytili z tých, čo tam naozaj boli." Nízka
+  Sensitivity = phishing prešiel k používateľovi.
+- **Specificity** (= True Negative Rate) = TN / (TN + FP) — zo všetkých
+  legitímnych, koľko sme ich nesprávne neoznačili. *V praxi:* „ako často
+  necháme nevinnú stránku na pokoji." Nízka Specificity = veľa falošných
+  blokov.
 - **F1** = harmonický priemer Precision a Recall =
-  2·P·R / (P + R). Balancuje FP a FN chyby.
+  2·P·R / (P + R). Balancuje FP a FN chyby. *Prečo harmonický, nie
+  aritmetický?* Aritmetický priemer 0.99 a 0.01 je 0.5, čo znie ako
+  priemerný model — ale model, ktorý má Recall 0.01, je k ničomu.
+  Harmonický priemer 0.99 a 0.01 je ≈ 0.02, čo odzrkadľuje realitu:
+  keď jedno zo dvoch čísel skolabuje, F1 skolabuje s ním. F1 teda
+  odhalí „polovičato použiteľné" modely, ktoré Accuracy skryje.
 
 ### Cross-Validation (CV, krížová validácia)
-Metóda odhadu, ako dobre sa bude model chovať na neuviedených dátach.
+Metóda odhadu, ako dobre sa bude model chovať na neuvidených dátach.
+
+*Ľudskou rečou:* nestačí otestovať model iba na jednom testovom balíku
+— môže sa stať, že nám náhodou „padli" tie ľahšie URL do testu a
+výsledok je krajší, než by model v realite zvládol. CV rozbije dáta na
+10 približne rovnako veľkých kôpok, každú raz použije ako test (a
+ostatných 9 na tréning), výsledky spriemeruje. Tým dostaneme
+**10 odhadov** kvality namiesto jedného a vidíme aj **rozptyl** —
+stabilný model má malý rozptyl, vrtkavý veľký.
+
 Trénovacie dáta sa rozdelia na **k** rovnako veľkých častí (foldov):
 - Pre každý fold: trénuj na zvyšných k-1 foldoch, vyhodnoť na tomto.
 - Výsledok = priemer metriky naprieč foldami + smerodajná odchýlka.
 
 **Stratified CV** = v každom folde zachová rovnaký pomer tried ako v
 celej sade. Potrebné pre nerovnovážne, ale aj pre naše mierne
-nevyvážené dáta.
+nevyvážené dáta. *Bez stratifikácie* by sa mohlo stať, že jeden fold
+má napr. 90 % phish, iný 30 % — výsledky by boli nezmyselne rozhádzané.
+
+**Prečo práve 10 foldov?** Kompromis medzi presnosťou odhadu (viac
+foldov → menej šumu) a výpočtovým časom (viac foldov → viac tréningov).
+10 je v literatúre de-facto štandard; pri 10 000+ trénovacích riadkoch
+dáva veľmi stabilné odhady. *V práci sme začínali s 5, ale pri malom
+počte foldov sa párový Wilcoxonov test rýchlo „zarazí" o minimálnu
+dosiahnuteľnú p-hodnotu — viac v §6.*
 
 ### SMD (Standardized Mean Difference — štandardizovaný rozdiel priemerov)
-Efektová veľkosť pre **spojitý** príznak medzi dvomi triedami:
+Efektová veľkosť (effect size = miera, aký veľký je rozdiel, ktorú
+neovplyvňuje veľkosť vzorky — na rozdiel od p-hodnoty) pre **spojitý**
+príznak medzi dvomi triedami:
 $$ \text{SMD} = \frac{|\mu_1 - \mu_0|}{\sqrt{(\sigma_0^2 + \sigma_1^2)/2}} $$
 
+*Ľudskou rečou:* „o koľko sa priemer phishing URL líši od priemeru
+legit URL, ak sa na to pozerám v jednotkách typického rozptylu v rámci
+triedy." SMD = 1 znamená, že priemery sú od seba vzdialené presne
+jednu smerodajnú odchýlku — vizuálne: dva zvony rozdelenia sa síce
+prekrývajú, ale sú jasne posunuté.
+
 Hovorí: *o koľko spoločných smerodajných odchýlok sa líšia priemery
-dvoch tried.* Cohen's thumb rule:
-- SMD < 0.2 → malý efekt,
+dvoch tried.* Cohen's thumb rule (pravidlo Jacoba Cohena, psychológa
+ktorý tieto hranice zaviedol v 80. rokoch):
+- SMD < 0.2 → malý efekt (rozdelenia sa skoro prekrývajú),
 - 0.2–0.5 → stredný,
 - 0.5–0.8 → veľký,
-- > 0.8 → veľmi veľký.
+- > 0.8 → veľmi veľký (rozdelenia sú viditeľne oddelené).
 
-Bezrozmerné číslo → porovnateľné medzi príznakmi.
+Bezrozmerné číslo → porovnateľné medzi príznakmi. *Prečo nie rovno
+rozdiel priemerov v pôvodných jednotkách?* Lebo `URLLength` (v
+znakoch) a `NoOfSubDomain` (počet) majú iné škály; bez normalizácie by
+dlhšie URL dostávali umelo väčšiu „váhu".
 
 ### Cramérove V
-Efektová veľkosť pre **dva kategoriálne** príznaky (u nás binárne),
-počítaná z chi-squared testu nezávislosti:
+Efektová veľkosť pre **dva kategoriálne** príznaky (u nás binárne —
+hodnoty 0/1, napr. `HasTitle`, `Bank`, `IsHTTPS`), počítaná z
+chi-squared testu nezávislosti:
 $$ V = \sqrt{\chi^2 / (n \cdot (k-1))} $$
 kde `k = min(počet riadkov, počet stĺpcov)`. Pre 2×2 tabuľku je V v
 intervale [0, 1], 0 = nezávislé, 1 = perfektne závislé. Analogicky
 **korelácia** pre binárne dáta.
+
+*Ľudskou rečou:* keby som rozdelil URL na phish a legit a pozrel sa,
+v koľkých percentách má každá z nich `HasTitle = 1`, Cramérove V meria,
+ako silne sa tie percentá líšia. V = 0 znamená „obe triedy majú titulok
+rovnako často, príznak nič nehovorí"; V ≈ 1 znamená „phishing skoro
+nikdy nemá titulok, legit skoro vždy má — dokonalý rozlišovač".
+
+*Prečo nie obyčajná korelácia?* Pearson korelácia pre binárne dáta
+**technicky** funguje (vyjde „phi koeficient"), ale interpretácia je
+menej intuitívna a pre nebinárne kategoriálne premenné úplne padá.
+Cramérove V je všeobecnejšia forma, ktorá sa škáluje rovnako na
+2×2 aj na 5×3 tabuľky.
 
 ### VIF (Variance Inflation Factor)
 Diagnostika **multikolinearity**: o koľko sa variancia odhadu
 koeficientu pre daný príznak *nafúkne* kvôli jeho korelácii s ostatnými
 prediktormi.
 $$ \text{VIF}_j = \frac{1}{1 - R_j^2} $$
-kde $R_j^2$ je koeficient determinácie regresie j-teho prediktora na
+kde $R_j^2$ je koeficient determinácie (podiel variability j-teho
+príznaku, ktorý sa dá vysvetliť ostatnými) regresie j-teho prediktora na
 ostatných prediktoroch.
+
+*Ľudskou rečou:* VIF 10 znamená, že odhad váhy daného príznaku je
+10-krát „nestabilnejší", než by bol, keby bol príznak nezávislý od
+ostatných. Prakticky: ak pridám alebo odoberiem pár URL z tréningu,
+koeficient pri kolineárnom príznaku sa môže drasticky zmeniť —
+model mi nepovie nič o „skutočnom vplyve" tohto príznaku.
+
 - VIF = 1 → príznak je úplne nekorelovaný s ostatnými,
 - VIF = 5 → hranica "mierne podozrivej" kolinearity,
 - VIF > 10 → vážna kolinearita, odhady koeficientov sú nestabilné,
@@ -96,18 +204,34 @@ ostatných prediktoroch.
 
 ### Multikolinearita
 Stav, keď sú niektoré prediktory navzájom silne lineárne korelované.
+
+*Ľudskou rečou:* dva príznaky, ktoré vlastne merajú to isté (napr.
+`URLLength` v znakoch a `NoOfLettersInURL` v počte písmen — väčšina
+URL je text, takže tieto dve čísla sú takmer identické). Model má
+problém rozhodnúť, „ktorému z týchto dvojičiek" prisúdiť váhu, a
+výsledok je rozdelený náhodne medzi nimi.
+
 Dôsledky:
 - Koeficienty lineárnych modelov (LR, LDA) sú numericky nestabilné —
   malá zmena dát vyprodukuje veľkú zmenu koeficientov.
 - Individuálne p-hodnoty koeficientov sú vysoké, hoci spoločne
   príznaky vysvetľujú veľkú časť variability.
 - Výklad koeficientov (smer vplyvu, dôležitosť) prestáva byť spoľahlivý.
+- *Čo to NEznamená:* prediktívny výkon modelu (AUC, Accuracy) zvyčajne
+  netrpí — model stále vie predpovedať. Trpí len *interpretácia*
+  jednotlivých váh.
 
 ### Skewness (šikmosť)
 Tretí štandardizovaný moment rozdelenia. Meria asymetriu:
-- skew = 0 → symetrické (napr. normálne),
+- skew = 0 → symetrické (napr. normálne rozdelenie — zvon),
 - skew > 0 → pravý chvost (dlhý chvost hore), napr. dĺžky URL,
 - skew < 0 → ľavý chvost.
+
+*Ľudskou rečou:* väčšina URL má napr. 40–80 znakov, ale existuje zopár
+obluďakov so 700 znakmi — histogram vyzerá ako skala s dlhým „ocasom"
+doprava. To je pravostranná (pozitívna) šikmosť. Linearizovaným
+modelom (LR, LDA) ten ocas pokazí odhad priemeru a rozptylu, akoby ich
+„niekto potiahol za chvost".
 
 Pravidlo: |skew| > 2 → "heavily skewed". Ovplyvňuje modely, ktoré
 predpokladajú normalitu (LR, LDA, Naive Bayes s Gaussom).
@@ -117,47 +241,175 @@ predpokladajú normalitu (LR, LDA, Naive Bayes s Gaussom).
 môžu byť **0** (počty, dĺžky). `log(0) = -∞`, ale `log1p(0) = 0`.
 Aproximuje normálne rozdelenie pri pravostrannej šikmosti.
 
+*Ľudskou rečou:* logaritmus „stlačí" veľké čísla. URL s 40 znakmi ostane
+blízko hodnoty 3.7, ale URL so 700 znakmi klesne na ~6.6 namiesto 700 —
+rozdiel medzi „normálnou" a „obrovskou" URL sa zmenší z ~17× na ~1.8×.
+Histogram po log-transformácii vyzerá podstatne bližšie k zvonu, čo
+parametrické modely potrebujú.
+
 ### Z-score (centrovanie a škálovanie, standardization)
 $$ z_i = \frac{x_i - \bar{x}}{s_x} $$
-Výsledok má priemer 0 a smerodajnú odchýlku 1. Nutné pre:
-- **Distance-based metódy** (KNN, SVM s RBF jadrom): ak bez
-  štandardizácie, jeden príznak s veľkou škálou (napr. URLLength)
-  by úplne dominoval vzdialenosť.
-- **Regularizované modely** (Ridge, LASSO): penalizácia na koeficient
-  by bola nespravodlivá, ak by mali príznaky rôzne škály.
+Výsledok má priemer 0 a smerodajnú odchýlku 1.
+
+*Ľudskou rečou:* premením hodnoty tak, aby každý príznak bol vyjadrený
+v „koľko smerodajných odchýlok od svojho priemeru". Tým zrušíme vplyv
+jednotiek (znaky vs. počet bodiek) a škál.
+
+Nutné pre:
+- **Distance-based metódy** (KNN, SVM s RBF jadrom — modely, ktoré
+  fungujú na vzdialenosti medzi bodmi): ak bez štandardizácie, jeden
+  príznak s veľkou škálou (napr. URLLength v stovkách) by úplne
+  dominoval vzdialenosť a `TLDLength` (v jednotkách) by bol ignorovaný.
+- **Regularizované modely** (Ridge, LASSO — modely, ktoré „trestajú"
+  veľké koeficienty, aby model nepreučil): penalizácia na koeficient by
+  bola nespravodlivá, ak by mali príznaky rôzne škály — väčšia škála by
+  dostala umelo menší koeficient.
 
 ### Párový Wilcoxonov signed-rank test
 Neparametrická alternatíva párového t-testu. Porovnáva **páry**
 pozorovaní (napr. AUC modelu A a B na tej istej CV fold), nepotrebuje
 predpoklad normality. Testuje, či medián rozdielov je 0 vs. alternatíva.
 
+*Ľudskou rečou:* mám 10 foldov a na každom AUC dvoch modelov. Spočítam
+rozdiel A−B pre každý fold → 10 rozdielov. Ak sú všetky kladné, je
+veľmi nepravdepodobné, že A a B sú rovnako dobré. Wilcoxon presne
+vyčísli tú nepravdepodobnosť pomocou poradia rozdielov (nie ich
+hodnôt), čo je robustné voči extrémom.
+
 **Prečo neparametrický?** AUC rozdiely medzi modelmi **nie sú**
 zaručene normálne rozdelené, takže t-test by mohol dať zavádzajúcu
 p-hodnotu. Wilcoxon je robustný voči neštandardnému rozdeleniu.
+
+**Minimálna dosiahnuteľná p-hodnota závisí od počtu foldov.** Pri
+n párovaných pozorovaniach je pre jednostranný test floor
+≈ `1/2^n` (najextrémnejšia možná konfigurácia — všetkých n rozdielov
+má rovnaké znamienko). Pre 5 foldov → 1/32 ≈ 0.031, pre 10 foldov →
+1/1024 ≈ 0.001. Preto má zmysel mať dosť foldov — pri malom počte
+by sa aj „jasné víťazstvá" zarazili o ten istý floor a test by
+nerozlišoval.
 
 ### Parametrický vs. neparametrický model
 - **Parametrický** = model má pevný, dopredu daný počet parametrov,
   ktorý sa nemení s veľkosťou dát. Predpokladá tvar distribúcie
   (napr. logit → linearita log-odds, LDA → normalita) alebo tvar
-  rozhodovacej plochy (nadrovina).
+  rozhodovacej plochy (nadrovina — rovná „čiara" v priestore príznakov,
+  ktorá oddeľuje triedy).
 - **Neparametrický** = počet parametrov rastie s dátami, nerobí
   predpoklady o tvare distribúcie. Patria sem stromy / RF (počet
   listov rastie s dátami), KNN (uchováva celú trénovaciu sadu), SVM
   (počet support vectors rastí s dátami).
 
+*Ľudskou rečou:* parametrický model je ako šablóna — má pevný tvar
+a dáta iba „dotvoria" jeho parametre. Neparametrický je ako plastelína
+— tvar si vyrobí priamo podľa dát, bez predpokladu ako to má
+vyzerať. Plastelína je flexibilnejšia (lepšie zachytí kľukaté
+vzorce), ale stojí viac pamäte a času.
+
+**Analógia:** Predstav si, že učíš niekoho rozpoznať chutný vs.
+nechutný koláč.
+- **Parametrický prístup:** „Chutnosť = 0.4·(sladkosť) + 0.3·(mäkkosť) +
+  0.3·(vôňa)." Jednoduchá formulka, pevné váhy, funguje pri
+  priamočiarom vzorci.
+- **Neparametrický prístup:** „Ak sladkosť > 7 a mäkkosť > 5, je
+  chutný. Ak sladkosť > 7 ale mäkkosť < 5, záleží od vône." Rozvetvené
+  pravidlá, ktoré si model odvodí sám — funguje aj keď je vzťah
+  zložitý.
+
 **Pozor na zmätok:** SVM je "parametrický" v zmysle hyperparametrov
 (C, σ), ale **neparametrický** v štatistickom zmysle — nerobí
 parametrický predpoklad o rozdelení.
+
+### PCA (Principal Component Analysis, analýza hlavných komponentov)
+Technika, ktorá z mnohých korelovaných príznakov vyrobí **menší počet
+nových príznakov** (tzv. hlavných komponentov, PC), z ktorých každý je
+lineárnou kombináciou pôvodných a ktoré sú medzi sebou **nekorelované**.
+
+*Ľudskou rečou:* Predstav si, že máš 40 meradiel URL a mnohé z nich
+merajú skoro to isté (dĺžka, počet písmen, počet číslic — všetky rastú
+s „veľkosťou URL"). PCA nájde skrytú os „veľkosť URL" a stlačí tie
+vzájomne závislé merania do jedného čísla. Urobí to pre každú
+„nezávislú dimenziu variability" v dátach. Výsledok: pár nových
+súradníc namiesto pôvodných 40.
+
+- **PC1** je smer, v ktorom sa dáta najviac líšia (najväčšia variabilita).
+- **PC2** je smer kolmý na PC1 s druhou najväčšou variabilitou. Atď.
+- **Variance explained** = koľko percent pôvodnej variability dát daná
+  os zachytáva. Scree plot to vykresľuje kumulatívne.
+
+**Dôležité a kontraintuitívne:** PCA hľadá smery **najväčšej
+variability**, nie smery, ktoré najlepšie oddeľujú triedy. Tie dve
+veci nemusia súhlasiť — os s najväčšou varianciou môže biť kolmá na
+os, kde sa phish oddelí od legit. Preto v EDA dopĺňame scree plot
+o „AUC každého PC" — aby sme videli, kde žije trieda, nie len kde je
+variabilita.
+
+### LDA projekcia (Linear Discriminant Analysis ako dimenzionality reduction)
+Podobne ako PCA zmenší počet rozmerov, ale **s využitím triednej
+informácie** — hľadá os, na ktorej sú priemery tried od seba čo
+najďalej vzhľadom na ich vnútroskupinový rozptyl.
+
+*Ľudskou rečou:* PCA si povie „kde sú dáta najviac rozhádzané", LDA
+si povie „kde je phish vs. legit najviac oddelený". Pre binárnu
+klasifikáciu LDA vyrobí iba jednu jedinú os (dve triedy → k−1 = 1
+smer), ale často je to tá najužitočnejšia os pre klasifikáciu.
+
+### Stratifikovaný split (stratified split / sampling)
+Delenie dát na tréning a test tak, aby **pomer tried** ostal v oboch
+častiach rovnaký ako v celej sade.
+
+*Ľudskou rečou:* keby som dáta jednoducho zamiešal a odrezal prvých
+80 %, mohlo by sa stať, že phish a legit sa rozložia nerovnomerne.
+Stratifikácia to nedovolí: zvlášť zamiešam phish, zvlášť legit, a z
+každej skupiny odoberiem 80 %. V scenario_2 ideme ešte ďalej — na
+začiatku si cielene vyberieme **presne 15 000 phish + 15 000 legit**,
+takže test set je nútene 1:1. Tento detail sa vráti pri výpočte
+Precision (§6 Q na konci).
+
+### Overfitting (preučenie modelu)
+Model sa „naučí naspamäť" trénovaciu sadu vrátane jej šumu, takže na
+tréningu má skvelé výsledky, ale na nových dátach padne.
+
+*Ľudskou rečou:* ako keby sa študent nabifľoval odpovede z jedného
+konkrétneho testu — na tom teste dostane 100 %, ale na inom teste s
+rovnakou látkou prepadne, lebo otázky sú formulované inak.
+
+**Ako to detekujeme?** Porovnaním **Train AUC** vs. **Test AUC** (alebo
+Train vs. CV AUC). Veľká medzera = overfit; podobné čísla = zdravý
+model. Modelovacia časť projektu zámerne reportuje train aj test AUC,
+aby sa nič nezatajilo.
+
+### Leakage (únik informácie, data leakage)
+Keď sa do modelu dostane informácia, ktorá by v produkcii nebola
+dostupná (napr. výstup iného klasifikátora ako príznak) alebo ktorá
+nepriamo prezrádza cieľ. Dôsledok: model vyzerá lepšie, ako v
+skutočnosti je.
+
+*V našom projekte:* `URLSimilarityIndex` je sám výstup detekčného
+modelu — keby sme ho nechali ako príznak, „podvádzali" by sme. Šesť
+Behavior počtov (`LineOfCode` atď.) má univariátne AUC > 0.95, čiže
+sami o sebe skoro dokonale oddeľujú phish od legit — tzv. **near-leakers**:
+nie je to technicky leakage, ale také silné indikátory, že model sa nič
+iné nenaučí. Preto v scenario_2 používame ich oklieštenú verziu
+(**FullLite**).
 
 ---
 
 ## 1. Formulácia problému
 
 ### 1.1 Reálny scenár
-Používateľ klikne na link. Prehliadač alebo corporate proxy musí
-rozhodnúť **pred načítaním** stránky, či ide o phishing. Najlacnejší
-signál v danom momente je samotný **text URL** — bez DNS dopytu, bez
-stiahnutia HTML, bez vykreslenia.
+Používateľ klikne na link. Prehliadač alebo corporate proxy (= firemný
+server, ktorý kontroluje web prevádzku zamestnancov) musí rozhodnúť
+**pred načítaním** stránky, či ide o phishing (podvodnú stránku, ktorá
+sa vydáva za dôveryhodnú s cieľom vylákať heslá alebo platobné údaje).
+Najlacnejší signál v danom momente je samotný **text URL** — bez DNS
+dopytu (preklad `banka.sk` → IP adresa), bez stiahnutia HTML, bez
+vykreslenia.
+
+*Ľudskou rečou:* proxy je strážnik pri bráne firemnej siete. Každú
+sekundu musí otvoriť tisíce balíčkov (URL) a rozhodnúť: pustiť dnu,
+alebo zahodiť. Nemá čas každý rozbaliť — tak najprv iba pozrie
+„adresu na obálke" (samotný text URL). Otázka, ktorú projekt rieši:
+**stačí strážnikovi adresa na obálke, alebo musí balíček aj otvoriť?**
 
 ### Prečo je tento scenár dôležitý
 Každý filter v detekčnom reťazci (URL → trust → behavior) stojí rôzne
@@ -198,13 +450,23 @@ ako sa platí za drahšie filtre.
 *Na URL-only úrovni neparametrické modely získajú štatisticky významne
 viac signálu než parametrické.*
 
-**Operacionalizácia:** aby sme sa vyhli vágnemu "významne viac", H1 je
+*Ľudskou rečou:* keď má model k dispozícii iba text URL (bez obsahu
+stránky, bez DNS), signál na rozlíšenie phish vs. legit je slabý a
+skrytý v **kombináciách** príznakov (napr. „URL dlhšia ako 100 znakov
+s viac ako 3 subdoménami a s číslicami v prvých 10 znakoch"). Modely
+typu lineárna regresia také kombinácie nedokážu dobre zachytiť —
+narozdiel od lesa rozhodovacích stromov, ktorý si pravidlá „ak-tak"
+vytvorí sám. H1 tvrdí, že v slabom režime (URL-only) je ten rozdiel
+viditeľný, nie len náhodný šum.
+
+**Operacionalizácia (= preklad vágneho „významne viac" do konkrétnych
+overiteľných čísel):** aby sme sa vyhli vágnemu "významne viac", H1 je
 definovaná cez tri konkrétne kritériá:
 
 | Kritérium | Obsah | Prah |
 |-----------|-------|------|
 | C1 | Rozdiel priemerných CV AUC medzi najlepším neparam. a najlepším param. modelom na Lexical | ≥ 0.02 |
-| C2 | Párový Wilcoxonov test na 5 fold-AUCs | p < 0.05 |
+| C2 | Párový Wilcoxonov test na 10 fold-AUCs | p < 0.05 |
 | C3 | Gradient: rozdiel na Lexical > rozdiel na FullLite | gap(Lex) > gap(FullLite) |
 
 H1 **podporená** iba ak C1 A C2 platia; C3 zosilňuje tvrdenie z
@@ -214,7 +476,7 @@ sa zmenšuje, keď sa príznaková rodina stáva silnejšou"*.
 ### Prečo 0.02 a nie 0.05 alebo 0.01?
 - 0.02 AUC je v literatúre vnímané ako "prakticky významný" rozdiel v
   binárnej klasifikácii.
-- Je to **väčšie** ako bežný šum pri 5-foldnej CV na 24 000 trénovacích
+- Je to **väčšie** ako bežný šum pri 10-foldnej CV na 24 000 trénovacích
   riadkoch (SD AUC ≈ 0.005), takže je štatisticky rozoznateľné.
 - Menší prah (0.01) by mohol byť v hladine šumu; väčší (0.05) by bol
   zbytočne prísny — aj 0.03 AUC rozdiel je v bezpečnostnej aplikácii
@@ -224,9 +486,20 @@ sa zmenšuje, keď sa príznaková rodina stáva silnejšou"*.
 *Cena lineárnej redukcie dimenzionality nie je rovnaká v každej rodine
 príznakov.*
 
-Každú rodinu môžeme stlačiť do menšieho počtu osí cez PCA (nesupervízne)
-alebo LDA projekciu (supervízne). Tvrdíme, že tento "kompresný trest"
-nie je rovnomerný:
+*Ľudskou rečou:* „redukcia dimenzionality" = zobrať 40 stĺpcov a stlačiť
+ich do 3 alebo 10 nových, ktoré zachytávajú to podstatné. Keď tie 3-10
+nových stĺpcov pošleme klasifikátoru, ako veľmi stratí presnosť oproti
+tomu, keď by videl všetkých 40? **H2 tvrdí, že to záleží od rodiny
+príznakov** — niekde je tá strata malá (kompresia „lacná"), inde veľká
+(kompresia „drahá"). Dôvod: keď signál žije v **interakciách** medzi
+príznakmi (URL-only), lineárna kompresia tie interakcie vyžehlí a
+stratíš signál. Keď signál žije **priamo v hodnotách** jednotlivých
+príznakov (Behavior), kompresia mu neublíži.
+
+Každú rodinu môžeme stlačiť do menšieho počtu osí cez PCA (unsupervised
+= nepozerá na cieľovú premennú) alebo LDA projekciu (supervised =
+využíva triednu informáciu). Tvrdíme, že táto "compression penalty"
+nie je rovnomerná:
 - na Lexical je veľký (signál je v interakciách, lineárna projekcia ho
   časť zmaže),
 - na Behavior/FullLite je malý (silný, viac aditívny signál).
@@ -258,6 +531,18 @@ C3 mení tvrdenie na gradient: čím slabší tier, tým drahšia kompresia.
 **Toto je pravdepodobne najdôležitejšia sekcia EDA pre obhajobu**, lebo
 demonštruje, že sme dataset pochopili a nezačali sme "slepo" modelovať
 na všetkých 50 príznakoch.
+
+*Ľudskou rečou:* dataset obsahuje 50 „ukazovateľov" každej URL. Nie
+všetky sú však poctivé merania. Niektoré sú v skutočnosti výstupy
+iných detekčných algoritmov (nie surový fakt o URL, ale „čo si myslel
+iný model"). Iné sú duplicity (dve merania, ktoré dávajú to isté
+číslo). Treťia skupina sú pomery typu „počet X lomeno dĺžka URL", ktoré
+sa dajú dopočítať z dvoch iných stĺpcov, ktoré už v datasete sú. Ak
+by sme všetky tieto nechali v modelovaní, model by sa buď „naučil
+tipovať iný model" (neprezradí to nič o URL samotnej), alebo by mal
+chaos v stĺpcoch, ktoré hovoria to isté. Preto ich vyraďujeme **pred**
+modelovaním, aby sme dali férovú odpoveď na to, koľko signálu je
+naozaj v surovej URL.
 
 #### Kategória 1 — vypočítané pravdepodobnosti / skóre
 Vylúčené: `URLSimilarityIndex`, `TLDLegitimateProb`, `URLCharProb`,
@@ -327,12 +612,26 @@ ani missing-indicator príznaky.
 
 Pre každý príznak meriame, ako dobre oddeľuje triedy **sám o sebe**.
 
+*Ľudskou rečou:* predstav si, že máš jediný ukazovateľ a chceš ním
+rozhodovať phish vs. legit. Napr. „URL dlhšia ako 100 znakov → phish".
+Diskriminačná sila = aká časť URL sa dá takto správne zaradiť. Ak
+je sila nízka, žiadny jednotlivý ukazovateľ úlohu nevyrieši a model
+musí ukazovateľe **kombinovať**.
+
 #### Prečo sa počíta dvomi rôznymi mierami?
 SMD je zmysluplné iba pre spojité premenné (vyžaduje mean, SD). Pre
 binárne premenné "pooled SD" degeneruje na funkciu marginálnej
 proporcie a SMD stratí porovnateľnosť. **Cramérove V** je štandardná
 efektová veľkosť pre 2×2 kontingenčnú tabuľku, ktorá býva v rovnakom
 intervale [0,1] ako |korelácia|.
+
+*Ľudskou rečou:* Na spojité čísla (dĺžka URL v znakoch) sa pýtame
+„o koľko smerodajných odchýlok sa líšia priemery dvoch tried?". Na
+binárky (má titulok / nemá) sa tá otázka nedá položiť (nemá zmysel
+hovoriť o „smerodajnej odchýlke" binárnej 0/1 v tomto kontexte), tak
+sa pýtame „ako veľmi sa líši percento `HasTitle = 1` medzi phish a
+legit?". Cieľ oboch otázok je rovnaký — kvantifikovať rozlišovaciu
+silu jediného príznaku — ale matematika je iná.
 
 #### Kľúčový výsledok
 Medián |SMD| je **najnižší v rodine Lexical**. To znamená:
@@ -346,6 +645,14 @@ ukazuje, že úloha vyžaduje viacrozmerné rozhodovanie, kde majú
 neparametrické modely prirodzenú výhodu.
 
 ### 4.3 Multikolinearita — príprava H2
+
+*Ľudskou rečou:* Ak dva ukazovatele merajú takmer to isté, jeden z nich
+je redundantný — a lineárny model z toho bude zmätený. Tu sa
+pozrieme, ktoré Lexical príznaky sú „dvojičky", lebo to má dve
+dôsledky: (1) pre scenario_2 to znamená používať regularizovanú regresiu
+(Ridge), nie obyčajnú; (2) pre scenario_5 to znamená, že Lexical je
+v princípe stlačiteľný — ale to nezaručuje, že ho stlačiť bez straty
+**klasifikačnej** presnosti, to testuje §4.5.
 
 #### 4.3.1 Korelačná matica Lexical príznakov
 Vizualizuje klaster korelovaných príznakov:
@@ -377,6 +684,12 @@ informatívna.
 
 ### 4.4 Šikmosť
 
+*Ľudskou rečou:* väčšina URL je krátka (40–80 znakov), ale zopár je
+extrémne dlhých — histogram má vysoký vrchol vľavo a dlhý tenký
+„chvost" doprava. Tento tvar je typický pre počty a dĺžky (cena,
+čas-do-udalosti, počet kliknutí...), ale nie je dobrý pre lineárne
+modely, ktoré predpokladajú, že dáta vyzerajú ako zvonec.
+
 19 z 22 spojitých príznakov má |skew| > 2 — silne pravostranný chvost
 (napr. väčšina URL je kratšia ako 100 znakov, ale existujú stovky
 znakových "obludiek").
@@ -396,25 +709,52 @@ znakových "obludiek").
 Sekcia 4.3 ukázala varianciu a kolinearitu. To však ešte nehovorí, či
 hlavné komponenty nesú aj separáciu Phishing vs Legitimate.
 
+**Najdôležitejší rozdiel celej sekcie, povedaný nahlas:**
+*variability* (kde sú dáta rozhádzané) a *triedový signál* (kde sa
+phish oddelí od legit) **nie sú to isté**. PCA optimalizuje prvé,
+nie druhé. Bežná chyba pri interpretácii: „scree plot ukazuje že 3 PC
+stačí na 90 % variancie, takže 3 PC stačí aj na klasifikáciu" — a to
+nie je automaticky pravda.
+
+*Ľudskou rečou — analógia:* predstav si mapu parkoviska zhora. Autá
+sú rozhádzané v smere sever-juh (to je smer najväčšej variancie = PC1).
+Ale otázka, ktorú chceš zodpovedať, je „ktoré auto je červené a ktoré
+modré", a farba v skutočnosti súvisí s parkovacím miestom, ktoré beží
+východ-západ (kolmo na PC1). Ak stlačíš mapu iba na os sever-juh,
+dostaneš síce „čo najviac informácie o polohe áut", ale **stratíš
+celú informáciu o farbe**. PCA by v tomto príklade bolo pre
+klasifikáciu katastrofálne napriek tomu, že zachytáva 100 % variancie
+v osi sever-juh.
+
 #### 4.5.1 Scree intuícia (koľko PC treba na 90 % variability)
-- Lexical dosiahne ~90 % variability už pri 3-4 PC.
-- Trust minie prakticky všetky svoje smery (binárne, slabo korelované).
+Scree plot vykresľuje kumulatívne, aké percento variability dáva
+postupne 1 PC, 2 PC, 3 PC atď. Hľadáme „lakeť" krivky — bod, kde
+pridanie ďalšej PC už prináša málo.
+- Lexical dosiahne ~90 % variability už pri 3-4 PC. (Lexical má veľa
+  korelovaných počtov okolo dĺžky URL, takže sa dá stlačiť.)
+- Trust minie prakticky všetky svoje smery (binárne, slabo korelované
+  — každý príznak je „svoj" smer).
 - Behavior a Full potrebujú viac komponentov (10+).
 
 Toto je iba "variance picture". Samotná variancia nemusí byť rovnaká vec
-ako klasifikačný signál.
+ako klasifikačný signál — preto 4.5.2.
 
 #### 4.5.2 AUC na jednotlivých PC (kde je diskriminačný signál)
+Pre každú PC zvlášť spočítame univariátnu AUC (len tá jedna os ako
+klasifikátor). Hovorí nám: „ak by som mal k dispozícii iba tento
+jeden smer, ako dobre by som rozlíšil phish od legit?"
+
 - Na Lexical má PC1 veľa variability, ale separačný signál je rozliaty do
-  viacerých PC s nižšou AUC.
+  viacerých PC s nižšou AUC. → Variance a trieda si **nesadli**.
 - Na Behavior/Full prvé 2-3 PC nesú silný signál (vysoké AUC), takže
-  kompresia je lacnejšia.
+  kompresia je lacnejšia. → Variance aj trieda si **sadli**.
 
 **Interpretácia pre H2:**
 - "málo PC na 90 % variance" automaticky neznamená "málo PC stačí na
   klasifikáciu".
 - Práve preto v Scenario 5 čakáme veľký pokles po kompresii na Lexical a
-  malý pokles na FullLite.
+  malý pokles na FullLite. Scenario 5 to potom kvantifikuje
+  naozajstným trénovaním modelov na PC-komprimovaných dátach.
 
 ---
 
@@ -473,15 +813,57 @@ P(score(phishing) > score(legit)) pre náhodné páry, (3) dataset je
 vyvážený, takže AUC nie je zavádzajúca (na 99/1 dátach by bola).
 
 **Q: Ako viete, že rozdiely medzi foldami nie sú iba náhodný šum?**
-A: Párový Wilcoxonov test + veľkosť efektu. Na Lexical diff ≈ 0.10
-AUC, čo je násobok SD per-fold AUC (~0.005). S 5 foldami je minimálne
-dosiahnuteľné p = 1/32 ≈ 0.031 (dolná podlaha testovej štatistiky), čo
-dosahujú všetky úrovne okrem FullLite. Detailnejšia diskusia v `scenario_2.rmd` (§6.2).
+A: Párový Wilcoxonov test + veľkosť efektu.
+
+*Ľudskou rečou:* 10-krát som rozdelil trénovacie dáta na 10 kúskov,
+zakaždým som na 9 z nich vytrénoval oba modely a na tom desiatom
+odmeral AUC. Porovnávam tie isté foldy (páry), takže šum zo splitu sa
+odpočíta.
+
+Čísla: na Lexical je rozdiel ≈ 0.10 AUC, zatiaľ čo smerodajná odchýlka
+per-fold AUC je ~0.005 — rozdiel je rádovo väčší ako šum. Pri 10
+párovaných pozorovaniach je najmenšia dosiahnuteľná p-hodnota
+jednostranného Wilcoxonu `1/2^10 = 1/1024 ≈ 0.001` — ten floor
+trafia tri zo štyroch tierov (Lexical, Behavior, FullLite = každý
+neparam. fold bije svoj spárovaný param. fold). Trust ako jediný dá
+p ≈ 0.019 — nie je na floore, čo správne signalizuje, že tam je
+kontrast medzi rodinami modelov slabší. Staršia 5-foldná verzia mala
+floor `1/32 ≈ 0.031`, tam by všetky tiery kolabovali na to isté
+číslo. Detailnejšia diskusia v `scenario_2.rmd` (§6.2).
 
 **Q: Čo v budúcnosti? Je 235 k URL reprezentatívnych?**
 A: PhiUSIIL je zhromaždený v jednom časovom okne (~2021), takže
 nemodeluje časový drift phishing kit autorov. V produkčnom nasadení by
 bol potrebný kontinuálny retraining. Toto je limitácia, ktorú
 priznávame.
+
+**Q: Prečo je v `scenario_2.rmd` Precision počítaná vzorcom a nie
+priamo z confusion matrix?**
+A: Vzorec `Prec = Sens / (Sens + (1 − Spec))` je **matematicky
+identický** s `TP / (TP + FP)` **za podmienky, že pozitívnych a
+negatívnych príkladov v teste je rovnako**. V scenario_2 tú podmienku
+forsujeme explicitne: subsampling v §3.1 berie presne 15 000 phish +
+15 000 legit, stratifikovaný 80/20 split z toho spraví presne 3000/3000
+testov — teda prevalencia je presne 50/50, nie približne.
+
+*Ľudskou rečou:* keď sú obe triedy rovnako početné, „koľko z alarmov
+je pravdivých" sa dá odvodiť čisto zo senzitivity a špecificity bez
+toho, aby sme sa pozreli do tabuľky. Nie je to aproximácia, je to
+identita.
+
+**Čo na tom môže byť problém?** Ak by sa subsampling niekedy zmenil
+(napr. na 60/40), vzorec by prestal platiť a dal by tichú chybu.
+Robustnejší kód by čítal priamo `cm$byClass["Precision"]` z
+confusionMatrix — výsledok pri súčasnom 50/50 splite je identický,
+ale kód prežije zmeny.
+
+**Treba kvôli prechodu na priame CM pretrénovať?** Nie. Cache v
+`scenario_2/artifacts/res_*.rds` síce `test_prec` priamo neukladá (iba
+`test_sens`, `test_spec`), ale keď sa do `fit_one_tier` doplní
+`test_prec = unname(cm$byClass["Precision"])` a v `test_tbl` sa nechá
+fallback na vzorec pre staré cache, čísla budú rovnaké a nič sa
+nepretréňuje. Pretrénovanie je potrebné len vtedy, keď sa zmení dátový
+podklad alebo metóda trénovania — kozmetický prechod na CM do tejto
+kategórie nepatrí.
 
 
