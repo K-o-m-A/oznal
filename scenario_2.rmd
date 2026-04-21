@@ -357,7 +357,7 @@ print_tier_summary <- function(res) {
   knitr::kable(
     tbl,
     align   = "lrrrrrrrrrr",
-    caption = sprintf("%s — %s  (Gap = Train AUC − Test AUC; > 0.01 hints at overfit; Prec read from caret::confusionMatrix)",
+    caption = sprintf("%s — %s",
                       res$model, res$family)
   )
 }
@@ -435,9 +435,11 @@ visibly better than LR — yet the threshold-0.5 operating point is
 *worse*: Sens 0.971 / Spec 0.688, i.e. ~31 % of legitimate URLs
 blocked. The Gaussian class-conditional assumption pushes the decision
 surface toward the legit side of the score distribution, so a good
-rank metric ends up with a badly miscalibrated cut. On **Trust**,
-**Behavior** and **FullLite** the Sens/Spec values converge
-(≈ 0.86 → 0.99), symmetric in both directions. This is the cleanest
+rank metric ends up with a badly miscalibrated cut. On **Trust**
+(0.860 / 0.861) and **FullLite** (0.989 / 0.994) the Sens/Spec values
+collapse to a tight ±0.005 band; **Behavior** (0.905 / 0.981) keeps a
+residual ~8 pp skew toward Spec, but the asymmetry is a fraction of
+the Lexical gap. This is the cleanest
 case in the report where AUC and the proxy-relevant operating point
 disagree: LDA beats LR on AUC but is *more* unusable as a Lexical
 block/allow filter without threshold recalibration.
@@ -592,7 +594,7 @@ print_tier_summary(res_knn)
 KNN is the close non-parametric runner-up
 to SVM-RBF. On **Lexical** AUC 0.987 with Sens 0.944 / Spec 0.923 —
 symmetric, deployable, ~6–8 % error either way. On **Trust** the AUC
-holds at 0.931 but Accuracy drops to 0.867: with only 7 mostly-binary
+holds at 0.932 but Accuracy drops to 0.862: with only 7 mostly-binary
 features, many training points collapse to identical coordinates, the
 jittered distance barely separates classes, and the 25-NN vote
 averages over a near-uniform neighbourhood. Behavior and FullLite

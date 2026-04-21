@@ -755,10 +755,13 @@ AUC ordinálne triedi body podľa skóre — ale dve veci potichu zakrýva:
 
 Všetky tieto metriky sú počítané pri **default prahu 0.5**.
 
-Precision je odvodená analyticky zo Sens/Spec vzorcom
-`Prec = Sens / (Sens + (1 − Spec))`. Platí presne pri vyváženej test
-sade 1:1 — náš stratifikovaný split to spĺňa (~50/50), takže odvodená
-hodnota je zhodná s `caret::confusionMatrix` na ≈10⁻⁴.
+Precision je čítaná priamo z held-out confusion matrix cez
+`caret::confusionMatrix(...)$byClass["Precision"]`, teda $TP/(TP+FP)$.
+Pri vyváženej test sade 1:1 (~50/50 po stratifikovanom splite) by
+analytický vzorec `Prec = Sens / (Sens + (1 − Spec))` dal prakticky
+identické hodnoty, no čítanie priamo z confusion matrix je presnejšie
+a nezávisí na triednom pomere v test sade — odporúčaná cesta pre
+akékoľvek budúce re-sampling experimenty.
 
 #### Namerané hodnoty na test sade
 
