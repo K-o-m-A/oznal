@@ -654,12 +654,14 @@ remain (13 Lexical + 7 Trust + 20 Behavior). On this reduced set the task
 is near-perfectly separable once Behavior is present — six Behavior
 counts have univariate AUC > 0.95 on their own, so a naive Full tier
 saturates at AUC ≈ 1.0 and the parametric vs. non-parametric contrast
-disappears. For H1 we therefore use the scenario_2 tier layout: Lexical
+disappears.
+
+For H1 we therefore use the scenario_2 family layout: Lexical
 (13), Trust (7), Behavior with the six near-leakers stripped (14), and
 **FullLite** (34) = Lexical + Trust + reduced Behavior. H1 is tested
 primarily on the **URLOnly tier**, where the family contrast has the most
-room to show, and the tier gradient (C3) is measured against **FullLite**,
-not Full. H2 is tested across the same tiers, because the cost of
+room to show, and the family gradient (C3) is measured against **FullLite**,
+not Full. H2 is tested across the same families, because the cost of
 compression is what differs between them.
 
 ## 5.1 Implications for modelling scenarios

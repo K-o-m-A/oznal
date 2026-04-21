@@ -557,9 +557,6 @@ print_tier_summary(res_knn)
 
 ## 6.1 Per-(model, tier) summary
 
-First we build a long table with one row per `(model, tier, fold)`, then
-a wide summary with mean ± SD CV AUC and held-out test metrics.
-
 ```{r build-long}
 all_results <- list(res_lr, res_lda, res_nb, res_rf, res_svm, res_knn)
 
