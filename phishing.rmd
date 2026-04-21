@@ -33,11 +33,7 @@ The question we want to answer is simple:
 **how much phishing signal is already in the URL?** If a URL-only model works well, we can run it as a fast
 first-line filter. Where it fails, the slower trust- and behavior-level checks have to take over.
 
-This lines up with our two chosen scenarios:
-
-- **Scenario 2** — parametric vs. non-parametric models on the URL-only
-  tier. Tells us whether a linear model is enough, or whether the URL hides
-  non-linear patterns that only RF/SVM/GBM can pick up.
+Explored scenarios for hypothesis driven modelling: 2,5
 
 ## 1.2 Dataset
 
@@ -410,7 +406,7 @@ ggplot(smd_family, aes(family, effect, fill = family)) +
   geom_boxplot(alpha = 0.7, show.legend = FALSE) +
   geom_jitter(width = 0.15, alpha = 0.5, size = 2) +
   scale_fill_brewer(palette = "Set2") +
-  labs(title = "SMD distribution by family (continuous features only)"
+  labs(title = "SMD distribution by family (continuous features only)",
        x = NULL, y = "| SMD |") +
   theme_minimal(base_size = 12)
 ```

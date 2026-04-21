@@ -29,10 +29,6 @@
   3. Na približne vyváženom datasete (43/57) sú AUC aj Accuracy
      informatívne, ale AUC sa nemení pri zmene prahu.
 
-### ROC (Receiver Operating Characteristic)
-Názov sa zachoval z radaru z 2. svetovej vojny: "krivka prijímača" pre
-detekciu nepriateľských lietadiel. Dnes je to štandard v medicíne,
-bezpečnosti a strojovom učení.
 
 ### FPR, TPR, Accuracy, Precision, Recall, F1
 Základné metriky klasifikácie, všetky počítané z matice zámien
@@ -47,7 +43,7 @@ Základné metriky klasifikácie, všetky počítané z matice zámien
   správna.
 - **Precision** = TP / (TP + FP) — zo všetkých, ktoré sme označili za
   phishing, aká časť naozaj phishingom je.
-- **Recall** (= Sensitivity, = TPR) = TP / (TP + FN) — zo všetkých
+- **Sensitivity** = TP / (TP + FN) — zo všetkých
   skutočných phishing, koľko sme zachytili.
 - **Specificity** = TN / (TN + FP) — zo všetkých legitímnych, koľko sme
   ich nesprávne neoznačili.
@@ -209,7 +205,7 @@ definovaná cez tri konkrétne kritériá:
 |-----------|-------|------|
 | C1 | Rozdiel priemerných CV AUC medzi najlepším neparam. a najlepším param. modelom na Lexical | ≥ 0.02 |
 | C2 | Párový Wilcoxonov test na 5 fold-AUCs | p < 0.05 |
-| C3 | Gradient: rozdiel na Lexical > rozdiel na Full | gap(Lex) > gap(Full) |
+| C3 | Gradient: rozdiel na Lexical > rozdiel na FullLite | gap(Lex) > gap(FullLite) |
 
 H1 **podporená** iba ak C1 A C2 platia; C3 zosilňuje tvrdenie z
 "statement o jednej úrovni" na **gradient**: *"výhoda neparametrických
@@ -224,31 +220,31 @@ sa zmenšuje, keď sa príznaková rodina stáva silnejšou"*.
   zbytočne prísny — aj 0.03 AUC rozdiel je v bezpečnostnej aplikácii
   rozdielom medzi dobrým a výborným filtrom.
 
-### H2 (Scenario 3)
-Embedded výber (LASSO, ElasticNet, RF importance) ponechá **výrazne
-menej** príznakov než algoritmický výber (stepwise, RFE), lebo
-penalizácia zrazí kolineárne klastre na jedného prežijúceho.
+### H2 (Scenario 5)
+*Cena lineárnej redukcie dimenzionality nie je rovnaká v každej rodine
+príznakov.*
 
-### Prečo očakávame rozdiel medzi embedded a algoritmickým výberom
-- **Algoritmický** hľadá kroky po kroku: "pomôže pridanie tohto
-  príznaku, ak už mám tamtých?" Ak dva príznaky nesú podobný signál,
-  môže si nechať obidva, lebo obidva marginálne pomáhajú.
-- **Embedded** optimalizuje spoločnú stratu s penalizáciou. LASSO
-  (L1-norm) má geometricky **ostré rohy** v bodoch, kde niektoré
-  koeficienty = 0 → rieši rozmenené klastre tak, že ponechá jedného
-  reprezentanta a ostatné zrazí na 0.
+Každú rodinu môžeme stlačiť do menšieho počtu osí cez PCA (nesupervízne)
+alebo LDA projekciu (supervízne). Tvrdíme, že tento "kompresný trest"
+nie je rovnomerný:
+- na Lexical je veľký (signál je v interakciách, lineárna projekcia ho
+  časť zmaže),
+- na Behavior/FullLite je malý (silný, viac aditívny signál).
+
+| Kritérium | Obsah | Prah |
+|-----------|-------|------|
+| C1 | Pokles AUC: raw Lexical vs. Lexical komprimovaný na 3 PC (najlepší downstream model) | ΔAUC ≥ 0.05 |
+| C2 | Pokles AUC: raw FullLite vs. FullLite komprimovaný na 10 PC (ten istý model) | ΔAUC ≤ 0.01 |
+| C3 | Gradient poklesu | drop(Lexical) > drop(FullLite) |
+
+H2 je podporená iba ak C1 aj C2 platia na rovnakej rodine klasifikátora.
+C3 mení tvrdenie na gradient: čím slabší tier, tým drahšia kompresia.
 
 ---
 
 ## 3. Načítanie a čistenie dát
 
 ### 3.1 Načítanie
-UTF-8 BOM stripping: `names(raw) <- map_chr(names(raw), ~ str_replace(.x, "^\ufeff", ""))`.
-
-**Prečo?** Windows/MS Excel často pridáva **Byte Order Mark** na začiatok
-UTF-8 súborov. R-kové `read_csv` ho necháva ako súčasť názvu prvého
-stĺpca, takže potom `features$FirstColumn` by nefungovalo — skutočný
-názov je `"\ufeffFirstColumn"`.
 
 ### 3.2 Role stĺpcov
 - `ID_COLS` (FILENAME, URL, Domain, TLD, Title) — voľný text, vylučujeme
@@ -373,12 +369,11 @@ binárneho indikátora na spojitých prediktoroch nie je v rovnakej škále
 informatívna.
 
 #### Prečo je to dôležité pre H2
-- **Algoritmické metódy** (stepwise, RFE) pridávajú/odoberajú jeden
-  príznak naraz. Každý z troch kolineárnych príznakov prináša marginálny
-  signál, takže sa často všetky tri udržia v konečnom modeli.
-- **Embedded metódy** (LASSO, ElasticNet) s L1 penalizáciou hľadajú
-  riedke riešenia. V klastri troch takmer identických príznakov je
-  optimálne ponechať **jedného reprezentanta** a ostatné zraziť na 0.
+- Kolineárny Lexical klaster znamená, že veľká časť variability žije v
+  pár smeroch. To zvádza k záveru, že PCA kompresia bude "lacná".
+- Ale H2 rieši inú otázku: či tieto dominantné smery variability nesú aj
+  triedový signál. Preto po korelácii/VIF potrebujeme ešte PCA diagnostiku
+  s AUC na jednotlivých PC (sekcia 4.5).
 
 ### 4.4 Šikmosť
 
@@ -396,43 +391,70 @@ znakových "obludiek").
   vzdialenosti a ostatné (napr. TLDLength v jednotkách) by boli
   ignorované.
 
+### 4.5 Kde leží triedový signál po PCA (kľúč k H2)
+
+Sekcia 4.3 ukázala varianciu a kolinearitu. To však ešte nehovorí, či
+hlavné komponenty nesú aj separáciu Phishing vs Legitimate.
+
+#### 4.5.1 Scree intuícia (koľko PC treba na 90 % variability)
+- Lexical dosiahne ~90 % variability už pri 3-4 PC.
+- Trust minie prakticky všetky svoje smery (binárne, slabo korelované).
+- Behavior a Full potrebujú viac komponentov (10+).
+
+Toto je iba "variance picture". Samotná variancia nemusí byť rovnaká vec
+ako klasifikačný signál.
+
+#### 4.5.2 AUC na jednotlivých PC (kde je diskriminačný signál)
+- Na Lexical má PC1 veľa variability, ale separačný signál je rozliaty do
+  viacerých PC s nižšou AUC.
+- Na Behavior/Full prvé 2-3 PC nesú silný signál (vysoké AUC), takže
+  kompresia je lacnejšia.
+
+**Interpretácia pre H2:**
+- "málo PC na 90 % variance" automaticky neznamená "málo PC stačí na
+  klasifikáciu".
+- Práve preto v Scenario 5 čakáme veľký pokles po kompresii na Lexical a
+  malý pokles na FullLite.
+
 ---
 
 ## 5. Zhrnutie EDA a implikácie pre modelovanie
 
-### Near-perfect separabilita na Full tier
-Po vylúčení scores v §3.3 stále platí, že na Full (40 príznakov) každý
-typ modelu dosahuje AUC ≈ 0.99. Dôsledky:
-- **H1 testujeme primárne na URLOnly (Lexical, 13 príznakov)**, kde
-  modely skutočne líšia.
-- H2 testujeme na Full, kde kolinearita driftujúca rozdiel embedded vs.
-  algoritmický výber skutočne existuje.
+### Near-perfect separabilita na Full a prechod na FullLite
+Po vylúčení príznakov v §3.3 zostáva 40 feature (13 Lexical, 7 Trust,
+20 Behavior). Keď je Behavior plný, úloha je takmer saturovaná (AUC ~1.0)
+a rozdiely medzi modelovými rodinami sa stierajú.
+
+Pre H1 preto používame **FullLite** (34 feature): z Behavior odoberieme
+6 near-leakerov (`LineOfCode`, `NoOfJS`, `NoOfCSS`, `NoOfImage`,
+`NoOfSelfRef`, `NoOfExternalRef`). Takto je porovnanie medzi tiermi
+informatívne a nie "utopené" v saturácii.
 
 ### Implikácie pre Scenario 2 (H1)
 | Zistenie z EDA | Implikácia pre modelovanie |
 |----------------|----------------------------|
 | Near-perfect AUC na Full | Testujeme H1 primárne na Lexical |
-| Najnižšie SMD v Lexical | Najväčší param. vs. neparam. rozdiel sa čaká tu |
+| Najnižšie SMD v Lexical | Najväčší param. vs. neparam. rozdiel sa čaká na URLOnly |
 | Šikmosť v 19 z 22 príznakov | Log + scale pre LR/LDA/NB/SVM/KNN; RF bez transform |
 | VIF > 500 | Ridge-regularizovaná LR na fairnej stabilite |
 
-### Implikácie pre Scenario 3 (H2)
+### Implikácie pre Scenario 5 (H2)
 | Zistenie z EDA | Implikácia |
 |----------------|------------|
-| Kolineárny klaster URLLength/NoOfLetters/NoOfDegits | Najsilnejší test pre algoritmický vs. embedded výber |
-| Trust binárky majú nízku vzájomnú koreláciu | Pravdepodobne sa zachovajú v **obidvoch** prístupoch (prekryv) |
+| Lexical: nízky per-feature signal + signál rozliaty naprieč PC | Kompresia na 3 PC má mať citeľný AUC pokles |
+| Behavior/Full: silný signál v prvých PC | Kompresia má byť lacná (malý AUC pokles) |
+| Kolineárny URL-length klaster | Variancia je low-rank, ale to samo o sebe nezaručuje low-loss kompresiu |
+| Trust binárky majú nízku vzájomnú koreláciu | Trust minie viac PC na varianciu; krátka projekcia môže rýchlo strácať informáciu |
 
 ---
 
 ## 6. Typické otázky komisie a návrhy odpovedí
 
-**Q: Prečo ste nepoužili PCA na zníženie kolinearity?**
-A: PCA by zničilo interpretovateľnosť — principálne komponenty sú
-lineárne kombinácie pôvodných príznakov a nedá sa pekne povedať "je to
-phishing preto, že PC3 = 2.7". Pre bezpečnostnú aplikáciu je
-interpretovateľnosť dôležitá (audit, vysvetlenie používateľovi). H2 je
-navyše **presne o tom**: porovnať dva prístupy k feature selection,
-ktoré *zachovávajú* pôvodné príznaky.
+**Q: Prečo vôbec používate PCA, keď znižuje interpretovateľnosť?**
+A: V tomto projekte PCA nepoužívame ako finálny produkčný model, ale ako
+kontrolovaný experiment pre H2: meriame, koľko výkonu stratí každý tier
+po kompresii. Tým testujeme, kde je signál "komprimovateľný" a kde nie.
+Interpretovateľný baseline zostáva na pôvodných príznakoch.
 
 **Q: Prečo nie SMOTE, keď signál v Lexical je slabý?**
 A: Slabosť signálu ≠ class imbalance. Dataset je vyvážený (43/57);
@@ -454,7 +476,7 @@ vyvážený, takže AUC nie je zavádzajúca (na 99/1 dátach by bola).
 A: Párový Wilcoxonov test + veľkosť efektu. Na Lexical diff ≈ 0.10
 AUC, čo je násobok SD per-fold AUC (~0.005). S 5 foldami je minimálne
 dosiahnuteľné p = 1/32 ≈ 0.031 (dolná podlaha testovej štatistiky), čo
-dosahujú všetky úrovne okrem FullLite. Detailnejšia diskusia v Scenario 2 §6.2.
+dosahujú všetky úrovne okrem FullLite. Detailnejšia diskusia v `scenario_2.rmd` (§6.2).
 
 **Q: Čo v budúcnosti? Je 235 k URL reprezentatívnych?**
 A: PhiUSIIL je zhromaždený v jednom časovom okne (~2021), takže
