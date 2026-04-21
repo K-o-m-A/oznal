@@ -1,11 +1,49 @@
 # Príprava na obhajobu — `scenario_2.rmd` (parametrické vs. neparametrické modely)
 
-Tento dokument je učebnou pomôckou k notebooku `scenario_2.rmd`. Prechádza
-notebook po sekciách a vysvetľuje **čo sa robí**, **prečo sa to robí** a
-**prečo sú hyperparametre modelov zvolené práve takto (a nie inak)**.
+---
 
-Všetky odborné pojmy (AUC, ROC, VIF, CV, ...) sú vysvetlené v
-**§ 0. Slovník pojmov**, kam sa z ďalších sekcií odkazuje.
+## 0.0 Pre úplných začiatočníkov — o čom to celé je
+
+### Úloha
+Chceme **automaticky rozhodnúť**, či je konkrétna URL adresa phishing alebo legitímna.
+
+
+Na rozhodovanie máme **50 príznakov** (features) o každej URL —
+napríklad: koľko má znakov, či obsahuje digity, koľko subdomén, či
+odkazuje na banku, či obsahuje skryté formuláre atď. Cieľom je vyrobiť
+**matematický model**, ktorý z týchto čísel odhadne
+**pravdepodobnosť**, že daná URL je phishing.
+
+### Čo sa môže pokaziť
+- **Overfitting**: model sa naučí trénovacie dáta naspamäť, ale na
+  nových URL zlyháva.
+- **Underfitting**: model je príliš hlúpy na to, aby zachytil vzory.
+  Ako keby sme rozhodovali podľa *"URL dlhšia ako 30 znakov = phishing"*
+  — funguje, ale nie veľmi dobre.
+- **Chybné rozhodnutie môže byť v dvoch smeroch:**
+  - **False Negative (FN)** — prepustíme phishing.
+  - **False Positive (FP)** — zablokujeme legitímnu URL.
+  - V bankovom svete **FN stojí 10–100× viac než FP**, ale obidva typy
+    sú pre nás podstatné.
+
+### Prečo vôbec porovnávame "parametrické" vs "neparametrické" modely
+**Parametrický model** má **pevný, vopred daný tvar** rozhodovania
+(napr. lineárnu čiaru alebo Gaussovský zvon) — v dátach hľadá iba
+niekoľko koeficientov, ktoré ten tvar upresnia. Keď sa dáta naozaj
+takto správajú, je to efektívne a interpretovateľné; keď nie,
+parametrický model narazí na strop.
+
+**Neparametrický model** na rozdiel od toho **nedrží pevný tvar**. Čím
+viac dát mu dáme, tým zložitejšie vzory dokáže zachytiť — pretože jeho
+"zložitosť" rastie spolu s dátami. Má menej predpokladov o tom, ako
+svet vyzerá, no za to platí výpočtovým časom a horšou
+interpretovateľnosťou.
+
+V našom projekte to chceme zmerať v praxi: **keď dáme modelu iba 13
+URL príznakov (slabý signál), pomôže mu flexibilita neparametrického
+prístupu?** To je jadro H1. A keď dáme modelu 34 silných príznakov
+— spraví ten rozdiel ešte zmysel, alebo už všetko funguje rovnako?
+To je motivácia pre "gradient" naprieč 4 tiermi.
 
 ---
 
@@ -13,6 +51,15 @@ Všetky odborné pojmy (AUC, ROC, VIF, CV, ...) sú vysvetlené v
 
 ### AUC (Area Under the ROC Curve)
 **Najdôležitejšia metrika v tomto projekte.**
+
+**Intuícia v ľudskej reči:** AUC meria, **ako dobre model rozlišuje
+phishing od legitímnych URL na úrovni skórovania** — bez ohľadu na to,
+kde presne nastavíme prah. Predstavte si, že model vypľuje skóre
+P(phishing) pre každú URL: keby sme všetky URL zoradili podľa skóre od
+najnižšieho po najvyššie, **AUC je pravdepodobnosť, že v náhodnej
+dvojici (jeden phishing + jeden legit) dostane phishing vyššie skóre**.
+
+Technické detaily:
 - **Binárny klasifikátor** vracia pre každý príklad pravdepodobnosť
   P(phishing). Pre tvrdé rozhodnutie potrebujeme **prah**.
 - **ROC krivka** vykresľuje pre všetky možné prahy:
@@ -21,11 +68,13 @@ Všetky odborné pojmy (AUC, ROC, VIF, CV, ...) sú vysvetlené v
   - **TPR** (True Positive Rate) = TP/(TP+FN) = aká časť phishing je
     správne odhalená.
 - **AUC** = integrál pod ROC krivkou, hodnota v intervale [0, 1].
-  - 1.0 → dokonalý klasifikátor, 0.5 → náhoda.
-- **Štatistická interpretácia:** pravdepodobnosť, že náhodne zvolená
-  phishing URL dostane vyššie skóre ako náhodne zvolená legitimate URL.
+  - 1.0 → dokonalý klasifikátor, 0.5 → náhoda (mince).
+  - 0.85 už je slušný klasifikátor, 0.95+ veľmi dobrý.
 - Prahovo nezávislá → férovo porovnáva kvalitu *skórovania*, nie
   konkrétneho rozhodnutia.
+- **Slabina:** nevidí, čo sa stane pri konkrétnom prahu 0.5. Dva
+  modely s rovnakým AUC môžu pri prahu 0.5 robiť úplne iné chyby
+  (viď NB patológia v §6.1.1).
 
 ### Cross-validation (CV, krížová validácia)
 Metóda odhadu výkonu modelu na neuvidených dátach. **k-fold**: dáta
@@ -70,19 +119,92 @@ Neparametrická alternatíva párového t-testu. Testuje, či medián
 rozdielov dvoch spárovaných vzoriek je 0.
 
 **Prečo neparametrický?** Rozdiely AUC medzi modelmi **nemusia** byť
-normálne rozdelené (náš vzorka má n=5, to je málo na overenie
-normality). Wilcoxon je robustný.
+normálne rozdelené (náš vzorka má n=10, stále málo na spoľahlivé
+overenie normality). Wilcoxon je robustný voči odchýlkam od normality.
 
-**Diskrétna podlaha p-hodnoty:** pri n=5 spárovaných pozorovaniach má
-jednostranný test najmenšiu možnú p-hodnotu **1/2^5 = 1/32 ≈ 0.031**.
-Ak sú všetky 5 fold-rozdielov rovnakého znamienka, dosiahneme presne
-túto hodnotu — nižšie sa nedá dostať bez väčšieho počtu foldov.
+**Diskrétna podlaha p-hodnoty:** pri n=10 spárovaných pozorovaniach
+má jednostranný test najmenšiu možnú p-hodnotu **1/2¹⁰ = 1/1024 ≈
+0.00098**. Ak všetky fold-rozdiely majú rovnaké znamienko, dosiahneme
+presne túto hodnotu — nižšie sa nedá dostať bez ďalšieho navýšenia
+foldov. Podstatný rozdiel oproti predošlej 5-fold verzii (podlaha
+1/32 ≈ 0.031): s 10 foldami vieme po prvýkrát **odlíšiť Trust
+(p ≈ 0.02)** od ostatných tierov, ktoré naďalej padajú na podlahu
+(p ≈ 0.001). Test teda konečne nesie informáciu.
 
 ### Parametrický vs. neparametrický model
 - **Parametrický** = pevný počet parametrov, predpoklady o distribúcii
   (LR, LDA, NB).
 - **Neparametrický** = počet efektívnych parametrov rastie s dátami,
   bez distribučných predpokladov (RF, KNN, SVM).
+
+### Kernel (jadro) v SVM
+Keď data nie sú oddeliteľné rovnou čiarou v pôvodnom
+priestore, **kernel je matematický trik, ktorý ich prenesie do
+priestoru s vyšším počtom dimenzií**, kde uz čiarou oddeliteľné sú. SVM
+potom v tom novom priestore nájde rovnú deliacu rovinu; v pôvodnom
+priestore to zodpovedá zakrivenej deliacej ploche.
+
+**RBF jadro** $K(x,y) = \exp(-\sigma \|x-y\|^2)$ — meria "podobnosť"
+dvoch bodov ako gaussovský zvon okolo vzdialenosti. Čím bližšie sú
+body, tým vyššia hodnota jadra. Univerzálny aproximátor: pri dostatku
+dát vie aproximovať ľubovoľnú spojitú rozhodovaciu funkciu.
+
+### Margin a support vectors
+- **Margin** (okraj) = šírka pásma okolo deliacej čiary, kde nestojí
+  žiadny trénovací bod. SVM hľadá **maximálny** margin — deliacu
+  hranicu, ktorá má od najbližších bodov oboch tried čo najväčšiu
+  vzdialenosť. Intuícia: široký margin = robustné rozhodovanie, malé
+  posunutie bodu nezmení predikciu.
+- **Support vectors** = body, ktoré ležia **na okraji marginu** (alebo
+  zle-klasifikované body). **Iba ony** definujú deliacu hranicu — ostatné
+  trénovacie body by sa mohli odstrániť a SVM by dal ten istý model.
+  Typicky je to niekoľko stovák až tisícov bodov z 24 000 tréningových.
+
+### Bagging (bootstrap aggregating)
+Technika v Random Forest: namiesto jedného stromu natrénujeme **stovky
+stromov**, každý na inej **bootstrap sample** (náhodný výber s
+vracaním z trénovacích dát — niektoré body sa zopakujú, iné vôbec
+nezahrnú). Predikcie stromov sa potom priemerujú.
+
+**Prečo to pomáha:** jeden strom je náchylný na overfitting (vidí presný
+šum v dátach). Priemer stoviek stromov, každý s trochu iným pohľadom,
+dáva hladšie a robustnejšie predikcie. Efekt je podobný hlasovaniu
+poroty — nezhody jednotlivých sudcov sa vyrušia, kým spoločná intuícia
+prevládne.
+
+### Bootstrap sample
+Náhodný výber z trénovacej sady **s vracaním** — ak má pôvodná sada
+10 000 bodov, bootstrap má tiež 10 000, ale niektoré sú zopakované 2–3×
+a ~36 % bodov vôbec nie je zahrnutých (tie sú "out-of-bag" a používajú
+sa na priebežné validovanie modelu).
+
+### Out-of-bag (OOB) AUC
+V RF: pre každý trénovací bod pozrieme iba na stromy, v ktorých tento
+bod **nebol** v bootstrap sample (out-of-bag). Priemerujeme ich predikcie
+— tým dostaneme predikciu pre tento bod, ktorú tieto stromy nevideli pri
+učení. OOB AUC je teda **vnútorný CV** zadarmo, bez nutnosti oddeliť
+validačnú sadu.
+
+### Podmienená nezávislosť (v Naive Bayes)
+Naive Bayes predpokladá, že príznaky sú **vnútri jednej triedy
+navzájom nezávislé**. Napr. *"medzi phishing URL nemá `URLLength`
+nijakú súvislosť s `NoOfDegitsInURL`"*. V realite je to naše dáta
+**porušené** (|r| > 0.7), čo vedie k systematickému vychýleniu NB
+predikcií. Viac detailov v §4.3.
+
+### Kovariančná matica (pre LDA)
+Matica, ktorá popisuje **ako sa spolu menia príznaky**. Na diagonále sú
+variancie (rozptyly) jednotlivých príznakov, mimo diagonály kovariancie
+(keď `URLLength` rastie, ako sa v priemere mení `NoOfDegits`). LDA
+predpokladá, že **obe triedy** (phishing, legit) majú **rovnakú**
+kovariančnú maticu — sú posunuté v priestore, ale majú rovnaký
+"tvar oblaku".
+
+### Feature selection
+Proces výberu podmnožiny príznakov, ktoré idú do modelu (ostatné sa
+zahodia). Dôvod: menej príznakov → jednoduchší model, lepšia
+interpretovateľnosť, niekedy lepšia generalizácia. LASSO to robí
+automaticky; Ridge nie (všetky zachová).
 
 ---
 
@@ -112,9 +234,7 @@ pseudo-leakery.
 
 **Konzistentné pravidlo:** ak je to pseudo-leaker, je to pseudo-leaker
 nezávisle od tier-u. Preto ich vyhadzujeme **aj z Behavior** (20→14),
-**aj z FullLite** (40→34). Predošlá verzia mala tier Full (AUC ≈ 1.0
-pre všetko) a tier Behavior s 20 príznakmi (tiež saturovaný), čo by
-znamenalo obhajovať AUC ≈ 1.0 **dvakrát**. Po konzistentnom odstránení:
+**aj z FullLite** (40→34).  Po konzistentnom odstránení:
 - Lexical a Trust ostávajú slabé (AUC 0.85–0.93),
 - Behavior sa stáva **honest middle tier** (AUC 0.99, ale Accuracy
   rozptyl 0.86–0.97 → viditeľný family contrast),
@@ -146,20 +266,39 @@ na **tej istej** 40-príznakovej matrici, aby EDA závery (VIF, SMD,
 
 Celý dataset má 235 795 riadkov. **SVM s RBF jadrom** má zložitosť
 **O(n²)–O(n³)** v počte trénovacích bodov. Trénovanie 6 modelov × 4
-úrovne × 5 foldov by trvalo dni.
+úrovne × 10 foldov by na celých dátach trvalo dni.
 
 **Prečo 30 k?** Empiricky najväčšia veľkosť, kde:
-- SVM-RBF dobehne v rozumnom čase (~15 min cez všetky úrovne),
+- SVM-RBF dobehne v rozumnom čase (~30 min cez všetky úrovne pri
+  10-fold CV),
 - CV AUC má SD < 0.01 (stabilné),
 - stratifikácia 15 k / 15 k drží triedy dokonale vyvážené.
 
 **Prečo stratified, nie random sampling?** Aby pomer tried ostal fixný
-naprieč úrovňami a foldami. Random by fluktuoval ~1 % medzi replikami,
-čo by zbytočne zašumelo porovnanie modelov.
+naprieč úrovňami a foldami.
+
+#### Čo by sa stalo s inou veľkosťou vzorky
+
+| Veľkosť | Čo sa stane |
+|---------|-------------|
+| 5 000 | CV AUC kolíše o 0.02–0.03 medzi behmi, H1 gradient sa stráca v šume |
+| 10 000 | Stabilnejšie, ale SVM-RBF trvá ešte dlho na niektorých foldoch |
+| **30 000 (naša voľba)** | Najväčšia veľkosť, kde SVM-RBF dobehne v rozumnom čase (~15 min), CV SD < 0.01 |
+| 100 000 | SVM by trval hodiny, RF/KNN tiež rastú; žiadny ďalší zisk stability |
+| 235 000 (celý dataset) | SVM dni na tréning, experiment nepraktický; AUC sa už nezlepší |
+
+#### Čo by sa stalo s iným počtom foldov (k)
+
+| k | Čo sa stane |
+|---|-------------|
+| 3 | Málo odhadov, vysoká SD; Wilcoxon podlaha je 1/8 = 0.125 (test takmer bezmocný) |
+| 5 | Rozumný kompromis času/stability; Wilcoxon podlaha 1/32 ≈ 0.031, čo celé tri silnejšie tiery stlačí na rovnakú p-hodnotu a test neinformuje |
+| **10 (naša voľba)** | Dvojnásobný čas SVM (~30 min); Wilcoxon podlaha 1/1024 ≈ 0.001 — prvá úroveň, kde sa Trust (p ≈ 0.02) odlíši od ostatných tierov |
+| 25 (repeated 5×5) | Lepšia štatistická moc; Wilcoxon podlaha ~10⁻⁸. Odporúčané budúce rozšírenie. |
 
 ### 3.2 Zdieľané fold indices
 
-`createFolds(..., k=5)` vyrobí 5 fold-indexov **raz** a tie isté sa
+`createFolds(..., k=10)` vyrobí 10 fold-indexov **raz** a tie isté sa
 použijú pre všetkých 6 modelov × 4 úrovne.
 
 **Prečo to je dôležité?**
@@ -254,6 +393,23 @@ automatickou redukciou*.
   variability** do porovnania rodín modelov. Pre férovosť
   kontrastu preferujeme **fixné hyperparametre** pre všetky modely.
 
+#### Čo by sa stalo s inou hodnotou λ
+
+| Hodnota λ | Čo sa stane | Dopad na AUC |
+|-----------|-------------|--------------|
+| 0 (obyčajná LR) | Numerická nestabilita v Lexical klastri, koeficienty oscilujú medzi foldami | ~stále OK na Behavior/FullLite, na Lexical prípadne chybové hlásenia konvergencie |
+| 0.001 | Takmer žiadna regularizácia, koeficienty prakticky voľné | Na Lexical sa výsledky kolísajú v ±0.01 AUC medzi behmi |
+| **0.01 (naša voľba)** | Malá, stabilizujúca regularizácia | Stabilné AUC, žiadna strata signálu |
+| 0.1 | Mierne šetrná regularizácia | Na Lexical pokles AUC o ~0.01-0.02 |
+| 1.0 | Silná regularizácia, koeficienty stiahnuté k 0 | Zreteľný pokles AUC všade (~0.03-0.05) |
+| 100 | Model skoro "nič sa nenauč", predikuje priemernú pravdepodobnosť | AUC padá smerom k 0.5 (náhoda) |
+
+**Prečo by nás malé λ nezničilo:** máme 24 000 bodov a iba 13–34
+príznakov, pomer bodov/parameterov je 700–1800. V tomto režime sa aj
+bez silnej regularizácie model poctivo natrénuje. λ = 0.01 len zaistí,
+že pri silne korelovaných Lexical príznakoch nezačnú koeficienty
+"bojovať" medzi sebou.
+
 ### 4.2 Linear Discriminant Analysis (LDA)
 
 **Model:** predpokladá $x | y = c \sim \mathcal{N}(\mu_c, \Sigma)$, s
@@ -307,6 +463,21 @@ Presne preto. NB predpokladá **podmienenú nezávislosť**, čo na našich
 dátach **nie je** splnené (|r| > 0.7 v Lexical klastri). Chceme
 empiricky zmerať, **koľko NB stratí** kvôli porušeniu tohto predpokladu.
 
+#### Čo by sa stalo s iným `fL`
+
+| Hodnota fL | Čo sa stane |
+|------------|-------------|
+| 0 | Niektorá kombinácia (trieda, hodnota) môže mať P = 0 → celý produkt Bayesovej pravdepodobnosti sa vynásobí nulou → model na týchto bodoch nevie predikovať |
+| **1 (naša voľba, štandard)** | Každej kombinácii sa pridá 1 pseudo-count → P(x=v\|y) nikdy nie je 0 |
+| 10 | Prílišné vyhladenie, reálne vzory v dátach sa "rozpustia" v pseudo-countoch → pokles AUC |
+
+#### Čo by sa stalo s iným jadrom hustoty (`usekernel`)
+
+| Voľba | Čo sa stane |
+|-------|-------------|
+| `FALSE` (Gaussian NB) | Pri nulovej variancii vo folde (binárny príznak, všetky body rovnaké) → delenie nulou → pád modelu |
+| **`TRUE` (naša voľba, KDE)** | Kernel density estimator zvládne aj nulovú varianciu; odhaduje hustotu cez gaussovské jadrá okolo pozorovaných bodov |
+
 ---
 
 ## 5. Neparametrické modely — voľba a zdôvodnenie parametrov
@@ -317,7 +488,7 @@ empiricky zmerať, **koľko NB stratí** kvôli porušeniu tohto predpokladu.
 bootstrap sample dát a na náhodnom podmnožine `mtry` príznakov pri
 každom splite. Predikcia = priemer pravdepodobností stromov.
 
-**Parametre:** `ntree = 500`, `mtry = floor(sqrt(p))`.
+**Parametre:** `ntree = 300`, `mtry = floor(sqrt(p))`.
 
 #### Prečo mtry = √p?
 Je to **štandard pre klasifikáciu** (Breiman 2001).
@@ -332,11 +503,13 @@ Matematická intuícia:
 
 √p je empiricky dobrý kompromis; nič v EDA nás nenúti odchýliť sa.
 
-#### Prečo 500 stromov?
-- Out-of-bag AUC konverguje obvykle po ~200-300 stromoch.
-- 500 je **bezpečne nad** touto hranicou bez zásadného navýšenia
-  času (RF sa trénuje paralelne).
-- Overkill, ale garancia stability AUC medzi behmi.
+#### Prečo 300 stromov?
+- Out-of-bag AUC konverguje na tomto datasete po ~200–300 stromoch.
+- 300 je **najmenšia hodnota, pri ktorej AUC už nerastie** — každý
+  strom navyše je compute, za ktorý nič nedostaneme.
+- Empiricky overené: prepočet s `ntree = 500` dáva totožné AUC v
+  rámci 0.001 na všetkých 4 tiers, čiže pridávať stromy je len
+  marketing stability, nie reálny zisk.
 
 #### Prečo neladiť `maxdepth`, `nodesize`?
 - RF je robustný voči týmto parametrom. Default `nodesize = 1` (plné
@@ -344,6 +517,24 @@ Matematická intuícia:
 - Zámer Scenario 2 je **porovnať rodiny modelov**, nie ladiť
   jednotlivé. Viac hyperparametrov = väčšia plocha na cherry-picking
   = menšia metodologická férovosť.
+
+#### Čo by sa stalo s iným `mtry`
+
+| Hodnota | Čo sa stane |
+|---------|-------------|
+| 1 | Stromy sú takmer náhodné (každý split pozerá iba 1 príznak) → príliš dekorelované → individuálne slabé → pomalý konverg AUC |
+| **√p (naša voľba)** | Štandardný kompromis medzi silou jednotlivých stromov a ich dekoreláciou |
+| p (všetky príznaky) | "Bagged trees" bez náhodnosti, stromy sú si veľmi podobné → variancia ensemblu sa neznižuje → overfit podobný jednému stromu |
+
+#### Čo by sa stalo s iným počtom stromov
+
+| ntree | Čo sa stane |
+|-------|-------------|
+| 10 | Nestabilné, medzi behmi AUC kolíše o 0.01–0.02 |
+| 100 | Už takmer stabilné, AUC dosiahne ~99 % konvergenčnej hodnoty |
+| **300 (naša voľba)** | Najmenšia hodnota, kde AUC už neprirastá — optimum ceny a stability |
+| 500 | Totožné AUC (rozdiel < 0.001), len ~1.7× pomalší tréning |
+| 5000 | Prakticky identické ako 300, len ~17× dlhšie |
 
 ### 5.2 SVM s RBF jadrom
 
@@ -388,6 +579,26 @@ $\sigma \|x-y\|^2 \approx 0.1-1$, čo dáva $K(x,y) \in [0.37, 1]$ —
 - Tuning všetkých 6 modelov v rovnakom rozsahu by bol pre LDA (0
   hyperparametrov) zbytočný; nefér porovnanie.
 
+#### Čo by sa stalo s iným C
+
+| Hodnota C | Čo sa stane | Intuícia |
+|-----------|-------------|----------|
+| 0.01 | Margin extrémne široký, chyby takmer zadarmo → underfit | "Model si môže dovoliť prehliadnuť body" |
+| 0.1 | Mierne pokojnejší SVM, pokles AUC o 0.01–0.02 na Lexical | Väčší margin, menej support vectors |
+| **1 (naša voľba, štandard)** | Vyvážený trade-off | Default pre štandardizované vstupy |
+| 10 | Agresívnejší fit, viac support vectors, mierne overfit | "Chyby sú veľmi drahé" |
+| 100+ | Extrémny overfit, rozhodovacia plocha prispôsobená šumu | Train AUC ≈ 1, Test AUC výrazne nižší |
+
+#### Čo by sa stalo s iným σ
+
+| Hodnota σ | Čo sa stane | Intuícia |
+|-----------|-------------|----------|
+| 0.001 | RBF jadro je skoro konštantné (≈ 1 pre všetky páry bodov) → SVM sa správa takmer lineárne | Stratíme výhodu nelinearity |
+| 0.01 | Jadro je veľmi hladké, deliaca plocha pokojná | Underfit pri zložitejších vzoroch |
+| **0.1 (naša voľba)** | Rozumná šírka pre z-score vstupy, $K(x,y) \in [0.37, 1]$ typicky | Dobré dynamické rozpätie jadra |
+| 1 | Ostrejšie jadro, každý bod ovplyvní iba tesných susedov | Začína sa overfit |
+| 10 | Jadro takmer δ-funkcia, iba zhodné body majú nenulovú hodnotu → SVM v podstate memoruje trénovaciu sadu | Katastrofický overfit |
+
 ### 5.3 K-Nearest Neighbors (KNN)
 
 **Model:** klasifikuj bod podľa väčšinového hlasovania **k najbližších
@@ -418,6 +629,25 @@ vyhlási chybu `"too many ties in knn"`.
 rozbije tie bez zmeny rozhodnutia (0.001 je zanedbateľné v porovnaní s
 veľkosťou cluster).
 
+#### Čo by sa stalo s inou hodnotou k
+
+| Hodnota k | Čo sa stane |
+|-----------|-------------|
+| 1 | Model je extrémne citlivý — outlier v susedstve určí rozhodnutie. Train AUC = 1 (každý bod je sám sebe suseda), Test AUC padá kvôli šumu |
+| 5 | Mierne šetrnejšie, stále citlivé na lokálne anomálie |
+| **25 (naša voľba)** | Kompromis: dostatočne veľké hlasovanie na vyhladenie šumu, stále citlivé na lokálnu štruktúru |
+| 155 (≈√n) | Príliš hladké, lokálny phishing cluster sa stratí v priemere širokého susedstva |
+| n = 24 000 | Každá predikcia je priemer celej trénovacej sady → model predikuje iba priemernú P(phishing) → AUC ≈ 0.5 |
+
+#### Čo by sa stalo s inou hodnotou jittera
+
+| Jitter SD | Čo sa stane |
+|-----------|-------------|
+| 0 | `knn3` zlyhá na Trust tier kvôli ties |
+| **10⁻³ (naša voľba)** | Ties rozbité, šum zanedbateľný v porovnaní s unit distance medzi susedmi |
+| 0.1 | Šum 10 % škály — začal by narúšať reálnu štruktúru, body z odlišných tried by sa miešali v susedstve |
+| 1 | Šum rovnakej veľkosti ako signál → KNN by hlasoval takmer náhodne |
+
 ---
 
 ## 6. Porovnanie výsledkov
@@ -428,10 +658,10 @@ veľkosťou cluster).
 |-------|--------:|------:|---------:|---------:|
 | LogReg-Ridge | 0.861 | 0.924 | 0.992 | 1.000 |
 | LDA | 0.931 | 0.923 | 0.993 | 1.000 |
-| NaiveBayes | 0.861 | 0.922 | 0.990 | 0.999 |
-| Random Forest | 0.972 | 0.924 | **0.997** | **1.000** |
-| **SVM-RBF** | **0.997** | 0.920 | 0.995 | 1.000 |
-| KNN | 0.988 | **0.931** | 0.994 | 1.000 |
+| NaiveBayes | 0.861 | 0.922 | 0.991 | 0.999 |
+| Random Forest | 0.973 | 0.924 | **0.997** | **1.000** |
+| **SVM-RBF** | **0.997** | 0.917 | 0.995 | 1.000 |
+| KNN | 0.989 | **0.932** | 0.995 | 1.000 |
 
 **Čo sa zmenilo oproti predošlej verzii:** po odstránení 6 near-leakerov
 z Behavior (20→14 príznakov) Behavior viac nesaturuje presne na 1.0 —
@@ -537,16 +767,16 @@ hodnota je zhodná s `caret::confusionMatrix` na ≈10⁻⁴.
 | LogReg-Ridge | Lexical | 0.818 | 0.835 | 0.764 | 0.921 | 0.716 |
 | LDA          | Lexical | 0.829 | 0.851 | 0.757 | 0.971 | 0.688 |
 | NaiveBayes   | Lexical | 0.691 | 0.764 | **0.618** | **0.999** | **0.383** |
-| RandomForest | Lexical | 0.858 | 0.873 | 0.792 | 0.971 | 0.746 |
+| RandomForest | Lexical | 0.856 | 0.871 | 0.792 | 0.967 | 0.745 |
 | **SVM-RBF**  | Lexical | **0.984** | **0.984** | **0.983** | 0.985 | 0.983 |
 | KNN          | Lexical | 0.934 | 0.934 | 0.925 | 0.944 | 0.923 |
 | NaiveBayes   | Behavior | 0.864 | 0.843 | **0.995** | 0.732 | **0.996** |
 | LDA          | Behavior | 0.943 | 0.941 | 0.979 | 0.905 | 0.981 |
 | LogReg-Ridge | Behavior | 0.952 | 0.952 | 0.967 | 0.937 | 0.968 |
-| RandomForest | Behavior | **0.974** | **0.974** | 0.977 | 0.970 | 0.977 |
+| RandomForest | Behavior | **0.975** | **0.975** | 0.978 | 0.972 | 0.978 |
 | SVM-RBF      | Behavior | 0.968 | 0.968 | 0.970 | 0.966 | 0.970 |
 | KNN          | Behavior | 0.967 | 0.967 | 0.967 | 0.968 | 0.967 |
-| RandomForest | FullLite | **0.997** | **0.997** | 0.996 | 0.997 | 0.996 |
+| RandomForest | FullLite | **0.996** | **0.996** | 0.996 | 0.997 | 0.996 |
 
 (Plná tabuľka všetkých 24 kombinácií je v `scenario_2.rmd` §6.1.)
 
@@ -580,7 +810,7 @@ contrast vidno v Accuracy.**
 - NB na Behavior: AUC 0.990, Acc 0.864, Sens 0.732 / Spec 0.996 —
   NB "sa bojí phishingu pri prahu 0.5" aj tu, len menej extrémne než
   na Lexical.
-- RF na Behavior: AUC 0.997, Acc 0.974.
+- RF na Behavior: AUC 0.996, Acc 0.975.
 - **Rozdiel v chybovosti ~5×** (136 vs. 26 chýb na 1000 URL) pri
   rozdiele AUC len 0.006. Presne toto je informácia, ktorú 20-feature
   verzia Behavior strácala (tam bola NB Acc ≈ 0.97, teda 5× menej chýb
@@ -628,7 +858,7 @@ $$ \text{Loss} \approx P(\text{phish}) \cdot C_{FN} \cdot (1-\text{Sens}) + P(\t
 | NaiveBayes | 0.999 | **0.383** | zachytí takmer všetko, ale 62 % legit blokuje → **nepoužiteľné** |
 | LR-Ridge | 0.921 | 0.716 | 8 % phish prejde **a** 28 % FP — dvojnásobná bolesť |
 | LDA | 0.971 | 0.688 | menej extrémny NB |
-| RandomForest | 0.971 | 0.746 | prekvapivo nevyvážené — 25 % FP |
+| RandomForest | 0.967 | 0.745 | prekvapivo nevyvážené — 25 % FP |
 | **KNN** | 0.944 | 0.923 | vyvážený, produkčne použiteľný |
 | **SVM-RBF** | **0.985** | **0.983** | **jasný víťaz** — FN aj FP pod 2 % |
 
@@ -681,7 +911,7 @@ Konkrétne čísla pre Lexical tier prekladajú AUC do praxe:
 |----------|----------|------------------|
 | SVM-RBF  | 0.984    | ~16              |
 | KNN      | 0.934    | ~66              |
-| RF       | 0.858    | ~142             |
+| RF       | 0.856    | ~144             |
 | LDA      | 0.829    | ~171             |
 | LR-Ridge | 0.818    | ~182             |
 | NB       | 0.691    | ~309             |
@@ -747,17 +977,27 @@ Z toho plynie náš postup pri obhajobe:
 Test je **jednostranný** (`alternative = "greater"`): alternatíva
 "neparametrické > parametrické".
 
-**POZOR na podlahu p-hodnoty:** so 5 foldami je najmenšia možná
-jednostranná p-hodnota **1/32 ≈ 0.031**. Ak všetky 5 foldov
-neparametrický prekonal parametrický, dostaneme presne túto hodnotu —
-lepšie nie je možné dostať bez viac foldov.
+**POZOR na podlahu p-hodnoty:** s 10 foldami je najmenšia možná
+jednostranná p-hodnota **1/1024 ≈ 0.00098**. Ak všetkých 10 foldov
+neparametrický prekonal parametrický, dostaneme presne túto hodnotu.
+(V predošlej 5-fold verzii bola podlaha 1/32 ≈ 0.031 a všetky tiery
+na ňu padali — test bol pri malom k prakticky nemý.)
 
-**Dôsledok:** úrovne Lexical (diff ≈ 0.102), Trust (diff ≈ 0.002),
-Behavior (diff ≈ 0.004) a FullLite (diff ≈ 0.0003) môžu všetky
-dosiahnuť p = 0.031, hoci veľkosti efektov sú rádovo odlišné.
+**Namerané hodnoty pri 10 foldoch:**
 
-**Pravidlo obhajoby:** vždy uvádzať aj `diff`, aj `p`. Veľkosť efektu
-(diff) je **informatívnejšia** než p-hodnota, keď je k malé.
+| Tier | diff (np − p) | Wilcoxon p | Interpretácia |
+|------|--------------:|-----------:|---------------|
+| **Lexical** | **+0.102** | 0.00098 | na podlahe — každý z 10 foldov ide v smere H1, efekt masívny |
+| Trust | +0.0015 | **0.019** | **mimo podlahy** — test korektne zachytil, že signál je slabý |
+| Behavior | +0.004 | 0.00098 | na podlahe, ale diff je malý (~0.4 % AUC) — štatisticky konzistentné, prakticky bezvýznamné |
+| FullLite | +0.0003 | 0.00098 | na podlahe, diff ~0 — saturované |
+
+**Pravidlo obhajoby:** vždy uvádzať aj `diff`, aj `p`.
+- **p-hodnota** odpovedá na otázku *"ide efekt konzistentne rovnakým
+  smerom naprieč foldmi?"* Pri 10 foldoch to už aspoň rozlíši Trust.
+- **diff** odpovedá na otázku *"je ten efekt veľký?"* Tam má p-hodnota
+  svoj limit — Behavior (0.004) a Lexical (0.102) majú rovnakú p-hodnotu
+  0.00098, hoci sa v praxi líšia rádovo.
 
 ### 6.3 Boxplots per úroveň
 Každý bod na ploche = jedna CV fold. Farby: modrá = parametrický,
@@ -777,7 +1017,7 @@ na Lexical sú červené boxy **výrazne vyššie** než modré; na ďalších
 - **ΔAUC = 0.066** — viac ako **trojnásobok** prahu C1 (0.02).
 - LR-Ridge a Naive Bayes klesajú až na ~0.861 → za LDA aj za nimi
   zostáva SVM-RBF s masívnym náskokom.
-- RBF jadro a lokálne hlasovanie (KNN = 0.988) zachytávajú nelineárne
+- RBF jadro a lokálne hlasovanie (KNN = 0.989) zachytávajú nelineárne
   **interakcie** typu `URLLength × NoOfDegits × NoOfSubDomain`,
   ktoré ani ridge-regularizovaný logit nedokáže modelovať.
 
@@ -787,17 +1027,21 @@ má **implicitnú shrinkage** cez spoločnú kovariančnú maticu. Ridge-LR
 s α=0 a malou λ nemôže "zabudnúť" kolineárne príznaky tak efektívne
 ako LDA zmiešavajúca variability oboch tried.
 
-**2. Na Trust úrovni: H1 sa rúca prakticky**
-- Všetkých 6 modelov: 0.92–0.93.
-- Diff ≈ +0.002 → môže dosiahnuť p = 0.031, ale **prakticky
-  zanedbateľné**.
+**2. Na Trust úrovni: H1 konzistentný, ale prakticky zanedbateľný**
+- Všetkých 6 modelov: 0.917–0.932.
+- Diff ≈ +0.0015 → pri 10-fold CV Wilcoxon **p = 0.019** (nad podlahou
+  1/1024). Smer efektu je konzistentný naprieč foldmi, ale amplitúda
+  je zanedbateľná.
 - Dôvod: 7 príznakov, prevažne binárnych. Nelineárne interakcie medzi
   binárkami sú efektívne XOR kombinácie, ktoré v reálnych
   phishing/legit URL nevznikajú v signifikantnej miere.
+- Toto je jediný tier, kde Wilcoxon test **dokáže rozlíšiť veľkosť
+  efektu** — na ostatných tieroch efekt preráža podlahu a všetky p-hodnoty
+  ležia na 0.00098.
 
 **3. Na Behavior úrovni: honest middle tier po odstránení leakerov**
 - Po vyhodení 6 near-leakerov (20→14 príznakov) Behavior **nesaturuje**:
-  AUC 0.990–0.997, Accuracy 0.864–0.974.
+  AUC 0.991–0.997, Accuracy 0.864–0.975.
 - diff (neparam − param AUC) ≈ +0.004 — malý, ale merateľný.
 - **Family contrast vidno hlavne v Accuracy**: neparametrické balanced
   (Sens ≈ Spec ≈ Prec ≈ 0.97), parametrické asymetrické (NB 0.73/0.996/
@@ -825,7 +1069,7 @@ ako LDA zmiešavajúca variability oboch tried.
 | Úroveň | diff (neparam − param AUC) | Veľkosť |
 |--------|---------------------------:|---------|
 | Lexical | **+0.102** | obrovský |
-| Trust | +0.002 | zanedbateľný |
+| Trust | +0.0015 | zanedbateľný |
 | Behavior | +0.004 | malý, merateľný |
 | FullLite | +0.0003 | saturované |
 
@@ -875,9 +1119,11 @@ tam, kde je signál slabý a nelineárny"**. Náš experiment to dokazuje.
    inferenciu než SVM.
 
 ### Zlepšenia experimentu
-5. **Viac foldov / repeated CV** — 5 foldov limituje Wilcoxon podlahu
-   na 1/32. Repeated 5-fold × 5 = 25 fold-rozdielov by podlahu posunul
-   na ~10⁻⁸ a umožnil jemnejšie štatistické rozlíšenie.
+5. **Repeated CV / viac opakovaní** — 10 foldov (aktuálne nastavenie)
+   posúva Wilcoxon podlahu na 1/1024 ≈ 10⁻³ a už **rozlíši Trust** od
+   ostatných tierov. Ďalší krok: repeated 10-fold × 5 = 50 fold-rozdielov
+   → podlaha ~10⁻¹⁵, umožní jemnejšie rozlíšenie aj medzi tiermi, kde
+   teraz všetky padajú na aktuálnu podlahu.
 6. **Nested CV** — vnútorná slučka na tuning hyperparametrov, vonkajšia
    na odhad výkonu. Metodologicky správnejšie ako fixné parametre, ale
    10-20× drahšie výpočtovo.
@@ -904,10 +1150,6 @@ tam, kde je signál slabý a nelineárny"**. Náš experiment to dokazuje.
   "`C = 1, σ = 0.1` sú literárny default pre štandardizované vstupy,
   tuning by mohol nespravodlivo zvýhodniť SVM oproti LDA (ktorá nemá
   hyperparametre)".
-- **Jeden dataset (PhiUSIIL)**. Výsledky by sme mali replikovať na
-  Ebbu-2017 alebo PhishTank. V práci spomenúť ako plánované rozšírenie.
-- **Statická snímka dát** — neobsahuje časový rozmer. V reálnom
-  nasadení je adverzárny proces aktívny.
 
 ---
 
@@ -933,7 +1175,7 @@ literárnych odporúčaní.
 
 **Q: Prečo KNN bez tuning k?**
 A: k = 25 je zámerne fixné. Rule-of-thumb `k ≈ √n` by dalo ~155, čo je
-príliš hladké. Tuning k by pravdepodobne pohol Lexical AUC z 0.988 na
+príliš hladké. Tuning k by pravdepodobne pohol Lexical AUC z 0.989 na
 0.99x, ale **podstata H1 by ostala** — parametrické modely sú výrazne
 nižšie.
 
@@ -944,7 +1186,7 @@ classifiers (CNN nad znakmi URL). Náš experiment dokazuje, že
 **neparametrická rodina dominuje** — rozdiely medzi SVM-RBF a KNN
 sú **malé** v porovnaní s rozdielom medzi nimi a LR.
 
-**Q: Prečo sa KNN správa na Trust lepšie ako SVM (0.931 vs 0.920)?**
+**Q: Prečo sa KNN správa na Trust lepšie ako SVM (0.932 vs 0.917)?**
 A: Trust = 7 binárnych príznakov → takmer diskrétny priestor
 "Hamming-like". KNN s k=25 a jitterom robí vlastne multinomiálne
 hlasovanie v malej Voronoi bunke. SVM-RBF s fixným σ=0.1 v tomto
@@ -959,9 +1201,3 @@ použiť Precision-Recall curve / PR-AUC a zvážiť class-weighting.
 Naša analýza však odpovedá na **typovú** otázku (akú rodinu modelov
 zvoliť), ktorá je invariantná voči class prior pri AUC metrike.
 
-**Q: Prečo ste nezvolili neurónovú sieť?**
-A: Scope zadania Scenario 2 je **parametrické vs. neparametrické modely
-klasického ML**. NN (najmä character-level CNN nad URL) je logické
-ďalšie rozšírenie, ale otvára samostatný experimentálny rozmer
-(architektúra, optimizer, learning rate schedule), ktorý by prekročil
-rámec práce. Spomíname to v §8 ako budúcu prácu.

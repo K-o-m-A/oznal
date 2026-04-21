@@ -209,7 +209,7 @@ table(df_sub$label)
 ## 3.2 Shared train/test split and CV folds
 
 Every model × tier combination uses **the same rows** for training, the
-**same 80/20 split**, and the **same 5-fold CV indices**. The only thing
+**same 80/20 split**, and the **same 10-fold CV indices**. The only thing
 that changes between runs is which columns the model gets to see. That
 is what makes the per-fold AUCs paired, so we can run a paired Wilcoxon
 test later.
@@ -218,7 +218,7 @@ test later.
 idx       <- createDataPartition(df_sub$label, p = 0.8, list = FALSE)
 train_raw <- df_sub[idx, ]
 test_raw  <- df_sub[-idx, ]
-fold_idx  <- createFolds(train_raw$label, k = 5, returnTrain = TRUE)
+fold_idx  <- createFolds(train_raw$label, k = 10, returnTrain = TRUE)
 
 cat("Train:", nrow(train_raw), "Test:", nrow(test_raw),
     "CV folds:", length(fold_idx), "\n")
@@ -265,7 +265,7 @@ cat(length(continuous_features), "continuous,",
 
 Fitting the same model across four tiers would mean four almost identical
 blocks of code, so we wrap the logic in one function. It subsets the
-data to a tier's features, runs 5-fold CV using the shared `fold_idx`,
+data to a tier's features, runs 10-fold CV using the shared `fold_idx`,
 and returns per-fold AUCs plus test-set metrics.
 
 ```{r fit-utility}
@@ -488,8 +488,9 @@ before it is deployable at all.
 Random Forest is the natural non-parametric counterpart to LR: it builds
 piecewise-constant decision regions as an ensemble of trees and is
 invariant to monotone feature transforms. `mtry = floor(sqrt(p))` scales
-the random feature subset with the tier size; 500 trees is plenty for
-the AUC to stabilise at this sample size.
+the random feature subset with the tier size. We use **`ntree = 300`**:
+OOB AUC on this dataset converges at ~200–300 trees, and going higher
+spends extra compute without measurable AUC gain.
 
 ```{r fit-rf}
 res_rf <- run_or_load("rf", function() {
@@ -503,18 +504,18 @@ res_rf <- run_or_load("rf", function() {
       tiers[[tier]], train_raw, test_raw,
       method = "rf",
       tuneGrid = data.frame(mtry = mtry),
-      ntree = 500)
+      ntree = 300)
   }
   out
 })
 print_tier_summary(res_rf)
 ```
 
-On **Lexical** RF posts AUC 0.968 but the
-threshold-0.5 split is Sens 0.971 / Spec 0.746 — Spec is the soft
+On **Lexical** RF posts AUC 0.969 but the
+threshold-0.5 split is Sens 0.967 / Spec 0.745 — Spec is the soft
 spot, driven by the bagging vote under deep unpruned trees (leaves
 that see few legits vote "phish"). From **Trust** upward the model
-becomes symmetric: Behavior Sens 0.970 / Spec 0.977, FullLite 0.997 /
+becomes symmetric: Behavior Sens 0.972 / Spec 0.978, FullLite 0.997 /
 0.996. RF is therefore the model that would most benefit from a
 simple **threshold shift** on Lexical — the AUC is already there, the
 0.5 cut just isn't the cost-optimal one. Unlike NB the problem is not
@@ -594,7 +595,7 @@ print_tier_summary(res_knn)
 KNN is the close non-parametric runner-up
 to SVM-RBF. On **Lexical** AUC 0.987 with Sens 0.944 / Spec 0.923 —
 symmetric, deployable, ~6–8 % error either way. On **Trust** the AUC
-holds at 0.932 but Accuracy drops to 0.863: with only 7 mostly-binary
+holds at 0.931 but Accuracy drops to 0.867: with only 7 mostly-binary
 features, many training points collapse to identical coordinates, the
 jittered distance barely separates classes, and the 25-NN vote
 averages over a near-uniform neighbourhood. Behavior and FullLite
@@ -720,7 +721,7 @@ For each tier we take the per-fold mean AUC of the three non-parametric
 models and the three parametric models, then compare them with a
 one-sided paired Wilcoxon test (non-parametric > parametric). Because we
 share folds across models, the test is fully paired — each entry in
-either series comes from the same five validation sets.
+either series comes from the same ten validation sets.
 
 ```{r h1-test}
 per_tier_test <- auc_long %>%
@@ -748,14 +749,19 @@ per_tier_test %>%
   kable()
 ```
 
-A caveat about the p-value column: with only **five paired
-observations** (one per CV fold), the smallest p-value a one-sided
-paired Wilcoxon can possibly produce is \(1/32 \approx 0.031\). Three
-of the four tiers hit exactly this floor — meaning every non-parametric
-fold beat its matched parametric fold. So the p-value alone can't tell
-apart a large effect (Lexical, diff ≈ 0.10) from a negligible one
-(Behavior, diff ≈ 0.0004). **Read the `diff` column, not the p-value**,
-if you want to judge effect size.
+A caveat about the p-value column: with **10-paired observations**
+, the smallest p-value a one-sided paired Wilcoxon
+can produce is \(1/2^{10} = 1/1024 \approx 0.00098\). Three of the four
+tiers (Lexical, Behavior, FullLite) hit exactly this floor — every
+single non-parametric fold beat its matched parametric fold. The
+fourth tier, **Trust**, lands at p ≈ 0.019, which is well above the
+floor and correctly signals that the family contrast is genuinely
+weaker there. Compared to the earlier 5-fold version (floor
+\(1/32 \approx 0.031\)), the 10-fold setup is the first one that lets
+the p-value separate Trust from the rest rather than collapsing all
+four tiers onto the same floor. Still: **read the `diff` column for
+effect size** — a small diff (Behavior 0.004, FullLite 0.0003) at
+p ≈ 0.001 is statistically consistent but practically irrelevant.
 ---
 
 # 7. Conclusion — H1 gradient
