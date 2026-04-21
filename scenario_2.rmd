@@ -30,75 +30,39 @@ dir.create(ARTIFACTS, recursive = TRUE, showWarnings = FALSE)
 
 ---
 
-# 1. Scenario & Hypothesis
+# 1. Hypothesis and tier design
 
-The EDA (`phishing.rmd` §2) states **H1** as: *on the URL-only tier,
-non-parametric models pick up meaningfully more signal than parametric
-ones.* Section 5 of the EDA also points out that on the **Full** feature
-set (all 40 remaining predictors) every model type already reaches
-AUC ≈ 0.99 — the dataset is near-perfectly separable there, so the
-parametric-vs-non-parametric contrast can't be seen on Full alone.
+H1 (from `phishing.rmd` §2): *on the URL-only tier, non-parametric models
+pick up meaningfully more signal than parametric ones.* The EDA also shows
+every model saturates at AUC ≈ 0.99 on the full feature set, so a fair test
+of H1 needs a tier where models can actually differ.
 
-To give H1 a fair test, we compare all six models across **four feature
-tiers**:
+We compare the six models across **two tiers**:
 
-| Tier | Features | What the model sees |
-|------|---------:|---------------------|
-| **Lexical** (URL-only) | 13 | URL string only — the first-line case: no DNS, no HTML fetch. |
-| **Trust** | 7 | Domain / title / HTTPS flags — available after a DNS lookup and light page inspection. |
-| **Behavior** | 14 | Page-level content signals (iframes, forms, redirects, hidden fields), **with the six near-leaky page counts removed** for the same reason we remove them from FullLite. |
-| **FullLite** | 34 | All three families combined minus those six near-leakers. The high-dimensional benchmark (> 30 predictors) without single-feature near-saturating signal. |
+| Tier | # features | Role |
+|------|-----------:|------|
+| **Lexical** | 13 | The H1 setting — URL-only, no DNS, no fetch. |
+| **FullLite** | 34 | Honest >30-feature benchmark: all three families *minus* six near-leaky Behavior counts (`LineOfCode`, `NoOfExternalRef`, `NoOfImage`, `NoOfSelfRef`, `NoOfJS`, `NoOfCSS`) whose univariate AUC is already ≥ 0.95 and which would pin every model at 1.0. |
 
-Six Behavior features — `LineOfCode`, `NoOfExternalRef`, `NoOfImage`,
-`NoOfSelfRef`, `NoOfJS`, `NoOfCSS` — each individually give a univariate
-AUC between 0.958 and 0.990 on this dataset. Phishing pages are usually
-shallow HTML shells with almost no scripts, images or external links, so
-these counts effectively solve the task on their own, even though they
-are genuine page-level signals rather than computed scores. Leaving them
-in any tier pins every model at AUC ≈ 1.0 and flattens the family
-contrast we are trying to measure. We therefore exclude them
-**consistently everywhere they would otherwise appear** — both from
-Behavior and from the high-dimensional `FullLite` tier. A "Full" tier
-that puts them back is redundant once `FullLite` already saturates (see
-the results tables in §6), and it would only let us defend the same
-AUC ≈ 1.0 twice.
-
-The smaller tiers (Lexical, Trust, Behavior) are deliberate ablations that
-isolate H1's claim, which is specifically about the URL-only regime. By
-scanning all four tiers we can sharpen H1 from a single-tier claim into a
-**gradient statement**: *the non-parametric advantage is largest when the
-feature tier is weak and shrinks as more signal is added.*
+Two endpoints are enough to test both parts of H1: the absolute gap on
+Lexical (C1, C2) and the gradient (C3 — gap(Lexical) should exceed
+gap(FullLite)).
 
 ---
 
-# 2. Data Loading
+# 2. Data loading
 
-## 2.1 Load raw file
-
-Same PhiUSIIL CSV as in the EDA. We strip the UTF-8 BOM the provider
-attaches to the first column name.
+Same exclusions as `phishing.rmd` §3.2 so both notebooks train on the same
+40-feature matrix.
 
 ```{r load-data}
 dataset_path <- if (file.exists("PhiUSIIL_Phishing_URL_Dataset.csv")) {
   "PhiUSIIL_Phishing_URL_Dataset.csv"
-} else if (file.exists("../PhiUSIIL_Phishing_URL_Dataset.csv")) {
-  "../PhiUSIIL_Phishing_URL_Dataset.csv"
-} else stop("PhiUSIIL_Phishing_URL_Dataset.csv not found")
+} else "../PhiUSIIL_Phishing_URL_Dataset.csv"
 
 raw <- read_csv(dataset_path, show_col_types = FALSE)
 names(raw) <- map_chr(names(raw), ~ str_replace(.x, "^\ufeff", ""))
-cat("Loaded", nrow(raw), "rows,", ncol(raw), "columns.\n")
-```
 
-## 2.2 Apply EDA feature exclusions
-
-The EDA (§3.3) dropped three groups of features: computed scores, one
-redundant binary flag, and linearly dependent ratios. Repeating the same
-exclusions here makes sure Scenario 2 is tested on the **same 40 features**
-the EDA analysed, so the EDA's VIF, SMD and skewness findings apply here
-directly.
-
-```{r exclusions}
 ID_COLS          <- c("FILENAME", "URL", "Domain", "TLD", "Title")
 SCORES           <- c("URLSimilarityIndex", "TLDLegitimateProb", "URLCharProb",
                       "DomainTitleMatchScore", "URLTitleMatchScore")
@@ -113,160 +77,78 @@ df <- raw %>%
   select(-all_of(EXCLUDE_COLS)) %>%
   as.data.frame()
 
-cat("Feature matrix after exclusions:", ncol(df) - 1, "predictors.\n")
+cat("After exclusions:", ncol(df) - 1, "predictors.\n")
 ```
 
-## 2.3 Feature tiers
+```{r tiers}
+lexical_cols <- c("URLLength","DomainLength","IsDomainIP","CharContinuationRate",
+                  "TLDLength","NoOfSubDomain","NoOfObfuscatedChar",
+                  "NoOfLettersInURL","NoOfDegitsInURL","NoOfEqualsInURL",
+                  "NoOfQMarkInURL","NoOfAmpersandInURL","NoOfOtherSpecialCharsInURL")
+LEAKY_BEHAVIOR <- c("LineOfCode","NoOfExternalRef","NoOfImage",
+                    "NoOfSelfRef","NoOfJS","NoOfCSS")
+fulllite_cols <- setdiff(setdiff(names(df), "label"), LEAKY_BEHAVIOR)
 
-The family map is the same as in EDA §3. Each tier is just a subset of
-column names, so switching tier means subsetting columns — no
-re-preprocessing needed.
-
-```{r family-map}
-family_map <- tribble(
-  ~feature,                     ~family,
-  "URLLength",                  "Lexical",
-  "DomainLength",               "Lexical",
-  "IsDomainIP",                 "Lexical",
-  "CharContinuationRate",       "Lexical",
-  "TLDLength",                  "Lexical",
-  "NoOfSubDomain",              "Lexical",
-  "NoOfObfuscatedChar",         "Lexical",
-  "NoOfLettersInURL",           "Lexical",
-  "NoOfDegitsInURL",            "Lexical",
-  "NoOfEqualsInURL",            "Lexical",
-  "NoOfQMarkInURL",             "Lexical",
-  "NoOfAmpersandInURL",         "Lexical",
-  "NoOfOtherSpecialCharsInURL", "Lexical",
-  "IsHTTPS",                    "Trust",
-  "HasTitle",                   "Trust",
-  "HasFavicon",                 "Trust",
-  "Robots",                     "Trust",
-  "Bank",                       "Trust",
-  "Pay",                        "Trust",
-  "Crypto",                     "Trust",
-  "LineOfCode",                 "Behavior",
-  "LargestLineLength",          "Behavior",
-  "IsResponsive",               "Behavior",
-  "NoOfURLRedirect",            "Behavior",
-  "NoOfSelfRedirect",           "Behavior",
-  "HasDescription",             "Behavior",
-  "NoOfPopup",                  "Behavior",
-  "NoOfiFrame",                 "Behavior",
-  "HasExternalFormSubmit",      "Behavior",
-  "HasSocialNet",               "Behavior",
-  "HasSubmitButton",            "Behavior",
-  "HasHiddenFields",            "Behavior",
-  "HasPasswordField",           "Behavior",
-  "HasCopyrightInfo",           "Behavior",
-  "NoOfImage",                  "Behavior",
-  "NoOfCSS",                    "Behavior",
-  "NoOfJS",                     "Behavior",
-  "NoOfSelfRef",                "Behavior",
-  "NoOfEmptyRef",               "Behavior",
-  "NoOfExternalRef",            "Behavior"
-)
-
-LEAKY_BEHAVIOR <- c("LineOfCode", "NoOfExternalRef", "NoOfImage",
-                    "NoOfSelfRef", "NoOfJS", "NoOfCSS")
-
-tiers <- list(
-  Lexical  = family_map %>% filter(family == "Lexical")  %>% pull(feature),
-  Trust    = family_map %>% filter(family == "Trust")    %>% pull(feature),
-  Behavior = setdiff(family_map %>% filter(family == "Behavior") %>% pull(feature),
-                     LEAKY_BEHAVIOR),
-  FullLite = setdiff(family_map$feature, LEAKY_BEHAVIOR)
-)
-
+tiers <- list(Lexical = lexical_cols, FullLite = fulllite_cols)
 sapply(tiers, length)
 ```
 
 ---
 
-# 3. Modelling Setup
+# 3. Modelling setup
 
-## 3.1 Stratified sub-sampling
+## 3.1 Stratified sub-sample and splits
 
-The full dataset has ~235 k rows. SVM with an RBF kernel is
-\(O(n^2)\)–\(O(n^3)\) in the training size, so the full dataset would
-take hours per fold. Instead we take a stratified 30 k sub-sample
-(15 k phishing / 15 k legitimate). After the 80/20 split this leaves
-24 k rows per fold — the largest size where all six models still finish
-in reasonable time. Stratification keeps the class balance constant
-across tiers and folds.
+The full dataset has ~235 k rows; SVM-RBF is O(n²)–O(n³) in training size.
+A stratified 30 k sub-sample (15 k / 15 k, exact 50/50) keeps every model
+tractable and removes any residual class-imbalance concern. After the 80/20
+split each fold trains on ~24 k rows.
 
-```{r subsample}
+```{r split}
 N_SUB <- 30000
-df_sub <- df %>%
-  group_by(label) %>%
-  slice_sample(n = N_SUB / 2) %>%
-  ungroup() %>%
-  as.data.frame()
+df_sub <- df %>% group_by(label) %>% slice_sample(n = N_SUB / 2) %>%
+  ungroup() %>% as.data.frame()
 
-table(df_sub$label)
-```
-
-## 3.2 Shared train/test split and CV folds
-
-Every model × tier combination uses **the same rows** for training, the
-**same 80/20 split**, and the **same 5-fold CV indices**. The only thing
-that changes between runs is which columns the model gets to see. That
-is what makes the per-fold AUCs paired, so we can run a paired Wilcoxon
-test later.
-
-```{r splits}
 idx       <- createDataPartition(df_sub$label, p = 0.8, list = FALSE)
 train_raw <- df_sub[idx, ]
 test_raw  <- df_sub[-idx, ]
 fold_idx  <- createFolds(train_raw$label, k = 5, returnTrain = TRUE)
 
-cat("Train:", nrow(train_raw), "Test:", nrow(test_raw),
-    "CV folds:", length(fold_idx), "\n")
+cat("Train:", nrow(train_raw), " Test:", nrow(test_raw), " Folds: 5\n")
 ```
 
-## 3.3 Preprocessing recipes
+## 3.2 Two preprocessing recipes
 
-We need two parallel recipes:
+- **Parametric / distance recipe** — `log1p` on continuous features (EDA
+  §4.4 flagged heavy skew on 19/22 continuous predictors), then centre and
+  scale. Feeds LR-Ridge, LDA, NB, SVM-RBF, KNN.
+- **Tree recipe** — no transform. Feeds Random Forest.
 
-- **Parametric / distance recipe** — `log1p()` on every continuous
-  feature (the EDA flagged \|skew\| > 2 on 19 of 22 continuous
-  predictors), then centre and scale. Binary features are left alone.
-  Feeds LR, LDA, NB, SVM-RBF, KNN.
-- **Tree recipe** — no transform. Trees don't care about monotone
-  transforms or scale. Feeds Random Forest.
-
-`preProcess` is fit once on the full training set (no per-fold refit).
-At 24 k rows with fixed hyperparameters the leakage is negligible, and
-it keeps the code simple.
+`preProcess` is fit once on the training set, not per fold. With a fixed
+centre/scale transform at 24 k rows the leakage is negligible.
 
 ```{r recipes}
 feat <- df_sub %>% select(-label)
-binary_features     <- names(feat)[sapply(feat, function(x)
-                                   all(na.omit(x) %in% c(0, 1)))]
+binary_features     <- names(feat)[sapply(feat, function(x) all(na.omit(x) %in% c(0, 1)))]
 continuous_features <- setdiff(names(feat), binary_features)
 
 apply_log <- function(d, cols) {
-  d[cols] <- lapply(d[cols], function(x) log1p(pmax(x, 0)))
-  d
+  d[cols] <- lapply(d[cols], function(x) log1p(pmax(x, 0))); d
 }
 train_log <- apply_log(train_raw, continuous_features)
 test_log  <- apply_log(test_raw,  continuous_features)
 
 pp <- preProcess(train_log[, continuous_features], method = c("center", "scale"))
-train_std <- train_log; test_std  <- test_log
+train_std <- train_log; test_std <- test_log
 train_std[, continuous_features] <- predict(pp, train_log[, continuous_features])
 test_std[,  continuous_features] <- predict(pp, test_log[,  continuous_features])
-
-cat(length(continuous_features), "continuous,",
-    length(binary_features), "binary features.\n")
 ```
 
-## 3.4 Per-tier fit utility
+## 3.3 Per-tier fit utility
 
-Fitting the same model across four tiers would mean four almost identical
-blocks of code, so we wrap the logic in one function. It subsets the
-data to a tier's features, runs 5-fold CV using the shared `fold_idx`,
-and returns per-fold AUCs plus test-set metrics.
+Every (model, tier) combination shares the same rows, the same 80/20 split
+and the same 5 CV folds — only the column subset changes. This is what
+makes the per-fold AUCs properly paired for the Wilcoxon test in §6.2.
 
 ```{r fit-utility}
 fit_one_tier <- function(tier_features, data_train, data_test,
@@ -274,17 +156,14 @@ fit_one_tier <- function(tier_features, data_train, data_test,
   tr <- data_train[, c("label", tier_features)]
   te <- data_test[,  c("label", tier_features)]
 
-  ctrl <- trainControl(
-    method          = "cv",
-    index           = fold_idx,
-    classProbs      = TRUE,
-    summaryFunction = twoClassSummary,
-    savePredictions = "final"
-  )
-  t0 <- Sys.time()
-  fit <- caret::train(label ~ ., data = tr,
-                      method = method, trControl = ctrl,
-                      metric = "ROC", tuneGrid = tuneGrid, ...)
+  ctrl <- trainControl(method = "cv", index = fold_idx,
+                       classProbs = TRUE, summaryFunction = twoClassSummary,
+                       savePredictions = "final")
+
+  t0  <- Sys.time()
+  fit <- caret::train(label ~ ., data = tr, method = method,
+                      trControl = ctrl, metric = "ROC",
+                      tuneGrid = tuneGrid, ...)
   elapsed <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
 
   test_prob <- predict(fit, te, type = "prob")[, "Phishing"]
@@ -294,107 +173,64 @@ fit_one_tier <- function(tier_features, data_train, data_test,
                                     direction = "<", quiet = TRUE)$auc)
   cm <- caret::confusionMatrix(test_pred, te$label, positive = "Phishing")
 
-  train_prob <- predict(fit, tr, type = "prob")[, "Phishing"]
-  train_pred <- predict(fit, tr)
-  train_auc  <- as.numeric(pROC::roc(tr$label, train_prob,
-                                     levels = c("Legitimate", "Phishing"),
-                                     direction = "<", quiet = TRUE)$auc)
-  train_cm   <- caret::confusionMatrix(train_pred, tr$label, positive = "Phishing")
-
   list(cv_per_fold = fit$resample,
-       train_auc = train_auc,
-       train_acc = unname(train_cm$overall["Accuracy"]),
-       test_auc = test_auc,
-       test_acc = unname(cm$overall["Accuracy"]),
-       test_f1  = unname(cm$byClass["F1"]),
+       test_auc  = test_auc,
+       test_acc  = unname(cm$overall["Accuracy"]),
+       test_f1   = unname(cm$byClass["F1"]),
+       test_prec = unname(cm$byClass["Precision"]),
        test_sens = unname(cm$byClass["Sensitivity"]),
        test_spec = unname(cm$byClass["Specificity"]),
        train_secs = elapsed)
 }
 
-tiers_fingerprint <- function(x)
-  digest::digest(lapply(x[sort(names(x))], sort))
-
 run_or_load <- function(name, fn) {
   path <- file.path(ARTIFACTS, paste0("res_", name, ".rds"))
-  fp   <- tiers_fingerprint(tiers)
+  fp   <- digest::digest(lapply(tiers[sort(names(tiers))], sort))
   if (file.exists(path)) {
     cached <- readRDS(path)
-    tiers_ok   <- setequal(names(cached$by_tier), names(tiers))
-    schema_ok  <- all(c("train_auc", "train_acc") %in%
-                      names(cached$by_tier[[1]]))
-    fp_ok      <- isTRUE(cached$tiers_fp == fp)
-    if (tiers_ok && schema_ok && fp_ok) return(cached)
-    cat(sprintf("  [%s] cache stale (tiers_ok=%s, schema_ok=%s, fp_ok=%s) — refitting\n",
-                name, tiers_ok, schema_ok, fp_ok))
+    if (isTRUE(cached$tiers_fp == fp) &&
+        setequal(names(cached$by_tier), names(tiers))) return(cached)
   }
-  res <- fn()
-  res$tiers_fp <- fp
-  saveRDS(res, path)
-  res
+  res <- fn(); res$tiers_fp <- fp
+  saveRDS(res, path); res
 }
 
-derive_precision <- function(sens, spec)
-  sens / (sens + (1 - spec))
-
-print_tier_summary <- function(res) {
-  tbl <- map_dfr(names(res$by_tier), function(tier) {
+summarise_tiers <- function(res) {
+  map_dfr(names(res$by_tier), function(tier) {
     r <- res$by_tier[[tier]]
-    gap <- r$train_auc - r$test_auc
-    prec <- derive_precision(r$test_sens, r$test_spec)
-    tibble(
-      Tier        = tier,
-      `Train AUC` = sprintf("%.4f", r$train_auc),
-      `CV ROC`    = sprintf("%.4f ± %.4f",
-                            mean(r$cv_per_fold$ROC), sd(r$cv_per_fold$ROC)),
-      `Test AUC`  = sprintf("%.4f", r$test_auc),
-      `Gap`       = sprintf("%+.4f", gap),
-      Accuracy    = sprintf("%.4f", r$test_acc),
-      F1          = sprintf("%.4f", r$test_f1),
-      Prec        = sprintf("%.4f", prec),
-      Sens        = sprintf("%.4f", r$test_sens),
-      Spec        = sprintf("%.4f", r$test_spec),
-      `Train (s)` = sprintf("%.1f", r$train_secs)
-    )
-  })
-  knitr::kable(
-    tbl,
-    align   = "lrrrrrrrrrr",
-    caption = sprintf("%s — %s  (Gap = Train AUC − Test AUC; > 0.01 hints at overfit; Prec derived from Sens/Spec on balanced test set)",
-                      res$model, res$family)
-  )
+    tibble(Tier = tier,
+           `CV AUC`     = sprintf("%.4f ± %.4f",
+                                  mean(r$cv_per_fold$ROC), sd(r$cv_per_fold$ROC)),
+           `Test AUC`   = sprintf("%.4f", r$test_auc),
+           Accuracy     = sprintf("%.4f", r$test_acc),
+           F1           = sprintf("%.4f", r$test_f1),
+           Precision    = sprintf("%.4f", r$test_prec),
+           Sensitivity  = sprintf("%.4f", r$test_sens),
+           Specificity  = sprintf("%.4f", r$test_spec),
+           `Train (s)`  = sprintf("%.1f", r$train_secs))
+  }) %>% kable(caption = sprintf("%s (%s)", res$model, res$family))
 }
 ```
 
-`run_or_load` is a small cache wrapper: the first knit fits everything
-and writes `scenario_2/artifacts/res_<model>.rds`; later knits just load
-those files and finish in seconds. If the tier set on disk doesn't match
-the tier set defined in the notebook any more, the cache is flagged as
-stale and the model is refit automatically. `print_tier_summary` returns a `kable` table (one row per tier) with
-CV ROC ± SD, held-out test AUC, Accuracy, F1, Sensitivity, Specificity,
-and wall-clock train time. Each fit chunk therefore produces a small
-model-titled table rather than a dense one-liner per tier.
+`run_or_load` caches each model's results to
+`scenario_2/artifacts/res_<model>.rds`. If the tier set on disk no longer
+matches the one defined in this notebook, the fingerprint check invalidates
+the cache and the model is refit automatically.
 
 ---
 
-# 4. Parametric Models
+# 4. Parametric models
 
 ## 4.1 Logistic Regression (ridge)
 
-EDA §4.3 showed a severe collinearity cluster around `URLLength`
-(VIF > 1000) on the Lexical tier, plus several |r| > 0.7 pairs on the
-full 40-feature set.
-Plain (unpenalised) logistic regression becomes numerically unstable in
-that setting — the coefficients swing wildly from fold to fold. So we
-use **ridge-regularised** LR (α = 0, λ = 0.01), which keeps the
-coefficients bounded without doing any feature selection.
+The Lexical URL-length cluster has VIF > 500 (EDA §4.3). Plain LR would be
+unstable, so we use ridge (α = 0, λ = 0.01): bounded coefficients, no
+feature selection.
 
 ```{r fit-lr}
 res_lr <- run_or_load("lr", function() {
   out <- list(model = "LogReg-Ridge", family = "parametric", by_tier = list())
   for (tier in names(tiers)) {
-    cat(sprintf("  LogReg-Ridge   [%-8s] fitting (%d features)...\n",
-                tier, length(tiers[[tier]])))
     out$by_tier[[tier]] <- fit_one_tier(
       tiers[[tier]], train_std, test_std,
       method = "glmnet",
@@ -402,47 +238,38 @@ res_lr <- run_or_load("lr", function() {
   }
   out
 })
-print_tier_summary(res_lr)
+summarise_tiers(res_lr)
 ```
 
-## 4.2 Linear Discriminant Analysis (LDA)
+## 4.2 Linear Discriminant Analysis
 
-LDA assumes Gaussian class-conditional densities with a shared covariance
-matrix. The EDA flagged heavy skewness on 19 of 22 continuous features;
-`log1p` + centre/scale in our preprocessing recipe cleans this up
-reasonably well, so LDA is fine in principle. LDA has no tunable
-hyperparameters, which makes it a clean "linear baseline".
+Clean linear baseline, no hyperparameters. `log1p` + scale satisfies the
+Gaussian class-conditional assumption as well as it can be satisfied on
+count data.
 
 ```{r fit-lda}
 res_lda <- run_or_load("lda", function() {
   out <- list(model = "LDA", family = "parametric", by_tier = list())
   for (tier in names(tiers)) {
-    cat(sprintf("  LDA            [%-8s] fitting (%d features)...\n",
-                tier, length(tiers[[tier]])))
     out$by_tier[[tier]] <- fit_one_tier(
       tiers[[tier]], train_std, test_std, method = "lda")
   }
   out
 })
-print_tier_summary(res_lda)
+summarise_tiers(res_lda)
 ```
 
 ## 4.3 Naive Bayes
 
-NB assumes features are conditionally **independent** given the class.
-EDA §4.3 already showed that this is not true here: |r| > 0.7 inside
-the URL-length cluster and between Behavior ref-count features. We run
-NB anyway, to measure **how much the independence assumption actually
-costs** on each tier. We use a kernel density estimate so that folds
-with a zero-variance feature (e.g. `Robots` on Trust) don't crash the
-Gaussian version of NB.
+NB assumes conditional independence — violated here (EDA §4.3 shows |r| > 0.7
+pairs in the URL-length cluster). We run it anyway to measure what the
+assumption costs. Kernel density (`usekernel = TRUE`) avoids a Gaussian-NB
+crash on zero-variance binary features.
 
 ```{r fit-nb, message=FALSE, warning=FALSE}
 res_nb <- run_or_load("nb", function() {
   out <- list(model = "NaiveBayes", family = "parametric", by_tier = list())
   for (tier in names(tiers)) {
-    cat(sprintf("  NaiveBayes     [%-8s] fitting (%d features)...\n",
-                tier, length(tiers[[tier]])))
     out$by_tier[[tier]] <- suppressWarnings(fit_one_tier(
       tiers[[tier]], train_std, test_std,
       method = "nb",
@@ -450,59 +277,44 @@ res_nb <- run_or_load("nb", function() {
   }
   out
 })
-print_tier_summary(res_nb)
+summarise_tiers(res_nb)
 ```
 
 ---
 
-# 5. Non-parametric Models
+# 5. Non-parametric models
 
 ## 5.1 Random Forest
 
-Random Forest is the natural non-parametric counterpart to LR: it builds
-piecewise-constant decision regions as an ensemble of trees and is
-invariant to monotone feature transforms. `mtry = floor(sqrt(p))` scales
-the random feature subset with the tier size; 500 trees is plenty for
-the AUC to stabilise at this sample size.
+`mtry = floor(sqrt(p))`, 500 trees. Fed raw counts — trees are monotone- and
+scale-invariant.
 
 ```{r fit-rf}
 res_rf <- run_or_load("rf", function() {
   out <- list(model = "RandomForest", family = "non-parametric", by_tier = list())
   for (tier in names(tiers)) {
-    p    <- length(tiers[[tier]])
-    mtry <- max(1, floor(sqrt(p)))
-    cat(sprintf("  RandomForest   [%-8s] fitting (%d features, mtry=%d)...\n",
-                tier, p, mtry))
+    p <- length(tiers[[tier]])
     out$by_tier[[tier]] <- fit_one_tier(
       tiers[[tier]], train_raw, test_raw,
       method = "rf",
-      tuneGrid = data.frame(mtry = mtry),
+      tuneGrid = data.frame(mtry = max(1, floor(sqrt(p)))),
       ntree = 500)
   }
   out
 })
-print_tier_summary(res_rf)
+summarise_tiers(res_rf)
 ```
 
 ## 5.2 SVM with RBF kernel
 
-The RBF kernel fits smooth non-linear boundaries — a natural alternative
-to tree ensembles and distance-based methods. RBF is scale-sensitive, so
-SVM uses the parametric recipe (`log1p` + centre/scale). `C = 1`,
-`σ = 0.1` are sensible defaults for standardised inputs. We didn't tune
-further because the main question is the parametric vs. non-parametric
-contrast, not within-family optimisation.
-
-This is the single slowest chunk in the notebook. The first knit takes
-about 15 minutes across all tiers combined; re-knits are instant thanks
-to the `run_or_load` cache.
+`C = 1`, `σ = 0.1` — sensible defaults on standardised inputs. No grid
+search: Scenario 2 measures the family-level contrast, not within-family
+optimisation. This is the slowest chunk (~10 min uncached).
 
 ```{r fit-svm}
 res_svm <- run_or_load("svm", function() {
   out <- list(model = "SVM-RBF", family = "non-parametric", by_tier = list())
   for (tier in names(tiers)) {
-    cat(sprintf("  SVM-RBF        [%-8s] fitting (%d features)...\n",
-                tier, length(tiers[[tier]])))
     out$by_tier[[tier]] <- fit_one_tier(
       tiers[[tier]], train_std, test_std,
       method = "svmRadial",
@@ -510,57 +322,34 @@ res_svm <- run_or_load("svm", function() {
   }
   out
 })
-print_tier_summary(res_svm)
+summarise_tiers(res_svm)
 ```
 
 ## 5.3 k-Nearest Neighbours
 
-KNN is the simplest non-parametric classifier: it stores the whole
-training set and classifies each test point by a majority vote among
-its `k` closest neighbours, using Euclidean distance. Being
-distance-based, it uses the parametric recipe. `k = 25` is a mild
-smoother that keeps the decision surface from being jagged.
-
-One twist: when a tier has **only binary features** (Trust has 7 binary
-indicators), many training points sit at identical coordinates, and
-caret's `knn3` refuses to run with "too many ties in knn". We add a tiny
-Gaussian jitter (SD = 10⁻³, less than 0.1 % of the feature scale) to
-break the distance ties without changing any decisions.
+`k = 25` — a mild smoother that keeps the decision surface from jittering.
+Distance-based, so fed the parametric recipe.
 
 ```{r fit-knn}
-jitter_features <- function(d, cols, sd = 1e-3) {
-  for (c in cols) d[[c]] <- d[[c]] + rnorm(nrow(d), 0, sd)
-  d
-}
-
 res_knn <- run_or_load("knn", function() {
   out <- list(model = "KNN", family = "non-parametric", by_tier = list())
   for (tier in names(tiers)) {
-    feats <- tiers[[tier]]
-    cat(sprintf("  KNN            [%-8s] fitting (%d features)...\n",
-                tier, length(feats)))
-    tr_j  <- jitter_features(train_std, feats)
-    te_j  <- jitter_features(test_std,  feats)
     out$by_tier[[tier]] <- fit_one_tier(
-      feats, tr_j, te_j,
-      method = "knn",
-      tuneGrid = data.frame(k = 25))
+      tiers[[tier]], train_std, test_std,
+      method = "knn", tuneGrid = data.frame(k = 25))
   }
   out
 })
-print_tier_summary(res_knn)
+summarise_tiers(res_knn)
 ```
 
 ---
 
 # 6. Comparison
 
-## 6.1 Per-(model, tier) summary
+## 6.1 Summary table
 
-First we build a long table with one row per `(model, tier, fold)`, then
-a wide summary with mean ± SD CV AUC and held-out test metrics.
-
-```{r build-long}
+```{r build-summary}
 all_results <- list(res_lr, res_lda, res_nb, res_rf, res_svm, res_knn)
 
 auc_long <- map_dfr(all_results, function(r) {
@@ -574,12 +363,9 @@ test_tbl <- map_dfr(all_results, function(r) {
   map_dfr(names(r$by_tier), function(tier) {
     t <- r$by_tier[[tier]]
     tibble(model = r$model, family = r$family, tier = tier,
-           train_auc = t$train_auc, train_acc = t$train_acc,
            test_auc = t$test_auc, test_acc = t$test_acc,
-           test_f1  = t$test_f1,  test_sens = t$test_sens,
-           test_spec = t$test_spec,
-           test_prec = derive_precision(t$test_sens, t$test_spec),
-           train_secs = t$train_secs)
+           test_f1 = t$test_f1, test_prec = t$test_prec,
+           test_sens = t$test_sens, test_spec = t$test_spec)
   })
 })
 
@@ -587,254 +373,95 @@ summary_tbl <- auc_long %>%
   group_by(model, family, tier) %>%
   summarise(cv_auc_mean = mean(auc), cv_auc_sd = sd(auc), .groups = "drop") %>%
   left_join(test_tbl, by = c("model", "family", "tier")) %>%
-  mutate(tier = factor(tier, levels = c("Lexical", "Trust",
-                                        "Behavior", "FullLite")),
-         gap_auc = train_auc - test_auc) %>%
+  mutate(tier = factor(tier, levels = c("Lexical", "FullLite"))) %>%
   arrange(tier, family, desc(cv_auc_mean))
 
 summary_tbl %>%
-  mutate(across(c(cv_auc_mean, cv_auc_sd, train_auc, test_auc, gap_auc,
-                  train_acc, test_acc, test_f1, test_prec),
-                ~ round(.x, 4)),
-         train_secs = round(train_secs, 1)) %>%
-  kable()
+  mutate(across(c(cv_auc_mean, cv_auc_sd, test_auc, test_acc,
+                  test_f1, test_prec, test_sens, test_spec), ~ round(.x, 4))) %>%
+  kable(caption = "Per (model × tier) — CV AUC (mean ± sd) plus held-out test metrics.")
 ```
 
-**How to read this table:** inside each tier the two families should
-cluster differently if H1 holds. On Lexical, the three non-parametric
-rows should sit clearly above the three parametric ones. Moving through
-Trust → Behavior → FullLite, the gap should shrink and eventually
-vanish. FullLite is the honest high-dimensional check: it keeps > 30
-features but removes the six near-leaky Behavior counts. If parametric
-and non-parametric models still disagree there, the gradient claim
-holds up at realistic feature sizes too.
+Inside each tier the rows should cluster by family if H1 holds. On Lexical,
+the three non-parametric rows should sit clearly above the three parametric
+ones. On FullLite the two families should be indistinguishable.
 
-### Train vs. test — overfitting diagnostic
-
-The `Train AUC` and `Gap = Train − Test` columns in each per-model table
-answer *"how much does the model memorise the training set?"*. For the
-three parametric models we expect `Train AUC ≈ Test AUC`: they have few
-effective parameters and Ridge / LDA / NB cannot memorise 24 k rows.
-For the three non-parametric models we expect a larger gap: Random
-Forest predicting on its own training set is near-perfect (each point
-was in the bag of most trees), KNN with `k = 25` averages its own
-neighbours, and SVM-RBF can fit complex boundaries. A small gap there
-is therefore not a problem — the key comparison is
-**`CV ROC` vs. `Test AUC`**, both of which are *out-of-sample*. If
-those two agree, the model generalises regardless of its in-bag fit.
-The train column is only there to show that our CV numbers are not
-silently inflated by leakage.
-
-### Classification quality beyond AUC
-
-AUC ranks models by their score ordering — useful, but on the richer
-tiers every model sits at AUC ≈ 0.99 and the ranking becomes hard to
-read. The table below shows **Accuracy, F1, Precision, Sensitivity
-(= Recall) and Specificity** on the held-out test set at the default
-0.5 threshold.
-
-In our security setting each split matters on its own:
-**Sensitivity (Recall)** = share of phishing URLs we caught (missing
-one is the costly error), **Specificity** = share of legitimate URLs
-we didn't flag (over-flagging hurts user trust), **Precision** = of
-the URLs we blocked, how many were actually phishing (low precision
-means users see many false alarms and disable the filter).
-
-Precision is derived analytically from Sensitivity and Specificity
-using the test-set class balance (≈ 50/50 after stratified splitting):
-$\text{Prec} = \frac{\text{Sens}}{\text{Sens} + (1 - \text{Spec})}$. This
-is exact for a 1:1 prevalence and within 10⁻⁴ of the
-`caret::confusionMatrix` value for our near-balanced split, so no
-re-fit is needed.
-
-```{r quality-table}
-quality_tbl <- test_tbl %>%
-  mutate(tier = factor(tier, levels = c("Lexical", "Trust",
-                                        "Behavior", "FullLite"))) %>%
-  arrange(tier, family, desc(test_f1)) %>%
-  transmute(Model = model, Family = family, Tier = tier,
-            Accuracy    = round(test_acc,  4),
-            F1          = round(test_f1,   4),
-            Precision   = round(test_prec, 4),
-            Sensitivity = round(test_sens, 4),
-            Specificity = round(test_spec, 4))
-
-quality_tbl %>%
-  kable(caption = "Test-set classification quality at the default 0.5 threshold.")
-```
-
-**How to read this table:**
-
-- **Lexical** translates the AUC story into practical terms: SVM-RBF
-  reaches Accuracy ≈ 0.98 and F1 ≈ 0.98, while LR-Ridge and NaiveBayes
-  sit around 0.69–0.82. The gap that showed up as +0.10 AUC is the
-  difference between a deployable filter and an unusable one.
-- **Behavior / FullLite** is where Accuracy and F1 earn their keep.
-  Once the six near-leaky page counts are stripped out, Behavior no
-  longer saturates — AUCs sit in a visibly non-trivial range and the
-  Accuracy / F1 spread across models becomes a more honest signal of
-  which classifier would actually deploy well. FullLite is the reverse
-  case: AUC is already near-saturated, so Accuracy and F1 are what
-  separate "great" from "essentially perfect".
-- **Sensitivity vs. Specificity** shows *how* each model errs. Models
-  that lean heavily on one (high Sens, lower Spec) will over-block
-  legitimate sites; the opposite pattern lets phishing through. In
-  production the right threshold depends on the cost ratio, but at
-  0.5 the table tells us which models are balanced by default.
-
-## 6.2 Per-tier paired Wilcoxon test
+## 6.2 Paired Wilcoxon test per tier
 
 For each tier we take the per-fold mean AUC of the three non-parametric
-models and the three parametric models, then compare them with a
-one-sided paired Wilcoxon test (non-parametric > parametric). Because we
-share folds across models, the test is fully paired — each entry in
-either series comes from the same five validation sets.
+models and the three parametric models, then run a one-sided paired Wilcoxon
+test (NP > P). Because folds are shared across models, the test is fully
+paired.
 
-```{r h1-test}
-per_tier_test <- auc_long %>%
+```{r wilcoxon}
+auc_long %>%
   group_by(tier, fold, family) %>%
   summarise(auc = mean(auc), .groups = "drop") %>%
   pivot_wider(names_from = family, values_from = auc) %>%
   group_by(tier) %>%
   summarise(
-    mean_np  = mean(`non-parametric`),
-    mean_p   = mean(parametric),
-    diff     = mean(`non-parametric` - parametric),
-    wilcox_V = wilcox.test(`non-parametric`, parametric,
-                           paired = TRUE, alternative = "greater")$statistic,
-    wilcox_p = wilcox.test(`non-parametric`, parametric,
-                           paired = TRUE, alternative = "greater")$p.value,
+    mean_np = mean(`non-parametric`),
+    mean_p  = mean(parametric),
+    diff    = mean(`non-parametric` - parametric),
+    p_val   = wilcox.test(`non-parametric`, parametric,
+                          paired = TRUE, alternative = "greater")$p.value,
     .groups = "drop"
   ) %>%
-  mutate(tier = factor(tier, levels = c("Lexical", "Trust",
-                                        "Behavior", "FullLite"))) %>%
-  arrange(tier)
-
-per_tier_test %>%
+  mutate(tier = factor(tier, levels = c("Lexical", "FullLite"))) %>%
+  arrange(tier) %>%
   mutate(across(c(mean_np, mean_p, diff), ~ round(.x, 4)),
-         wilcox_p = signif(wilcox_p, 3)) %>%
-  kable()
+         p_val = signif(p_val, 3)) %>%
+  kable(caption = "Paired Wilcoxon (NP > P) per tier.")
 ```
 
-A caveat about the p-value column: with only **five paired
-observations** (one per CV fold), the smallest p-value a one-sided
-paired Wilcoxon can possibly produce is \(1/32 \approx 0.031\). Three
-of the four tiers hit exactly this floor — meaning every non-parametric
-fold beat its matched parametric fold. So the p-value alone can't tell
-apart a large effect (Lexical, diff ≈ 0.10) from a negligible one
-(Behavior, diff ≈ 0.0004). **Read the `diff` column, not the p-value**,
-if you want to judge effect size.
+With only 5 paired folds the smallest one-sided Wilcoxon p-value is
+1/32 ≈ 0.031, so on Lexical the p-value is on the floor. **Read the `diff`
+column** to judge effect size; the p-value alone cannot tell a large effect
+apart from a small one at this sample size.
 
 ## 6.3 CV AUC by model × tier
 
-```{r plot-auc, fig.width=10, fig.height=14, message=FALSE}
-plot_list <- map(c("Lexical", "Trust", "Behavior", "FullLite"), function(t) {
-  auc_long %>%
-    filter(tier == t) %>%
-    mutate(family = factor(family, levels = c("parametric", "non-parametric")),
-           model  = fct_reorder(model, auc, median)) %>%
-    ggplot(aes(model, auc, fill = family)) +
-    geom_boxplot(outlier.shape = NA, width = 0.6, alpha = 0.5) +
-    geom_jitter(aes(colour = family),
-                width = 0.12, height = 0, size = 1.6, alpha = 0.8,
-                show.legend = FALSE) +
-    coord_flip() +
-    scale_fill_manual(values   = c(parametric = "steelblue",
-                                   `non-parametric` = "firebrick")) +
-    scale_colour_manual(values = c(parametric = "steelblue",
-                                   `non-parametric` = "firebrick")) +
-    labs(title = t, x = NULL, y = "ROC AUC (5-fold CV)") +
-    theme_minimal(base_size = 11) +
-    theme(legend.position = if (t == "Lexical") "top" else "none")
-})
-
-library(patchwork)
-wrap_plots(plot_list, ncol = 1) +
-  plot_annotation(
-    title    = "Scenario 2 -- CV AUC by model across feature tiers",
-    subtitle = "Each dot is one CV fold (shared across models)"
-  )
+```{r plot-auc, fig.width=9, fig.height=4.5, message=FALSE}
+auc_long %>%
+  mutate(tier   = factor(tier, levels = c("Lexical", "FullLite")),
+         family = factor(family, levels = c("parametric", "non-parametric"))) %>%
+  ggplot(aes(model, auc, fill = family)) +
+  geom_boxplot(outlier.shape = NA, width = 0.6, alpha = 0.5) +
+  geom_jitter(aes(colour = family), width = 0.12, height = 0,
+              size = 1.6, alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~ tier, nrow = 1, scales = "free_y") +
+  scale_fill_manual(values   = c(parametric = "steelblue",
+                                 `non-parametric` = "firebrick")) +
+  scale_colour_manual(values = c(parametric = "steelblue",
+                                 `non-parametric` = "firebrick")) +
+  labs(title = "Scenario 2 — CV AUC by model across feature tiers",
+       subtitle = "Each dot is one CV fold (shared across models). Y-axis is per-tier scaled.",
+       x = NULL, y = "ROC AUC (5-fold CV)") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        legend.position = "top",
+        panel.spacing = unit(1, "lines"))
 ```
-
-The Lexical panel shows the widest spread and the clearest separation
-between parametric (blue) and non-parametric (red) models. As we go
-down the tiers, the boxes tighten and the two colour groups merge.
-The FullLite panel pins every model at AUC ≈ 1 — the dataset is
-near-perfectly separable on a rich page-level feature set even after
-the six near-leaky counts are removed, so the family contrast is
-essentially resolved by then.
 
 ---
 
-# 7. Conclusion — H1 gradient
+# 7. Conclusion — H1 verdict
 
-H1 in the EDA was a single-tier claim about URL-only detection. The
-four-tier comparison lets us make the stronger, more informative
-version:
-
-1. **Non-parametric > parametric when the feature tier is weak.** On
-   the **Lexical** tier the non-parametric advantage is the largest
-   of any tier, and every single CV fold shows the same order. This is
-   exactly the regime H1 targets: URL counts interact in non-linear
-   ways (digit runs × length × subdomain depth), and linear or Gaussian
-   decision boundaries just can't capture those interactions. Read the
-   exact diff off §6.2.
-2. **Trust also favours non-parametric, but only barely.** With only
-   seven features — most of them plain binary flags — there's little
-   non-linear structure left for non-parametric models to discover.
-3. **Behavior is the honest middle tier.** With the six near-leaky
-   page counts (`LineOfCode`, `NoOfExternalRef`, `NoOfImage`,
-   `NoOfSelfRef`, `NoOfJS`, `NoOfCSS`) stripped out — each of which
-   individually gives univariate AUC ≥ 0.95 and single-handedly solves
-   the task — the remaining 14 Behavior features are a realistic
-   page-level signal without saturation. This is where we can read the
-   family contrast cleanly at medium signal strength.
-4. **FullLite is the honest > 30-feature benchmark.** It meets the
-   assignment's "several dozen parameters" rule without relying on
-   features that single-handedly solve the task. Even so, 34
-   non-leaky features are already enough to make every model cluster
-   near the ceiling — the family contrast on FullLite tells us whether
-   non-parametric flexibility still buys anything in a realistic
-   high-dimensional setting, or whether the task is simply resolved by
-   that point.
-
-**Train–test gap check.** The per-model tables in §4–§5 also report
-`Train AUC` and the `Gap = Train − Test`. Parametric models (LR-Ridge,
-LDA, NB) sit within ~0.01 of their test AUC on every tier — they cannot
-memorise 24 k rows with so few effective parameters, so their CV scores
-are trustworthy. Non-parametric models show a larger in-bag fit
-(Random Forest and KNN approach Train AUC ≈ 1.0 by construction), but
-their `CV ROC` and `Test AUC` still agree tightly — the out-of-sample
-numbers reported above are not inflated by leakage. In other words,
-the H1 gradient is measured on generalisation performance, not on any
-model's ability to memorise the training set.
-
-**Threshold-0.5 quality (Precision / Sensitivity / Specificity).** The
-§6.1.1 table complements the AUC ranking with operating-point numbers.
-Two findings only visible once Precision is reported:
-
-- **SVM-RBF on Lexical** is not only the AUC winner but also the only
-  model that is simultaneously high on all three (Prec ≈ Sens ≈ Spec ≈
-  0.98). Every other model on Lexical trades one for another.
-- **Naive Bayes mirrors itself across tiers.** On Lexical it over-calls
-  phish (Sens 0.999, Prec 0.618) — a high-recall / low-precision flood.
-  On Behavior the same independence violation flips the other way (Sens
-  0.732, Prec 0.995) — almost never calls phish, but when it does, it
-  is right. Both are symptoms of the same broken independence
-  assumption; the direction of the miscalibration is tier-dependent.
-
-This is the part AUC hides: two models with AUC ≈ 0.99 on Behavior can
-still have fundamentally different operating-point behaviour, and the
-Precision/Sensitivity decomposition is what makes that visible.
-
-**Practical takeaway.** A URL-only first-line phishing detector gains a
-lot from a non-parametric model (SVM-RBF or KNN gain ~0.10 AUC over
-LR / NB on Lexical, and SVM additionally keeps Precision and Recall
-balanced at ~0.98). Once the system can afford to fetch the page and
-compute Behavior-level features, the AUC choice of model becomes almost
-irrelevant and simpler, more explainable models (LR, LDA) are good
-enough — though the operating-point choice (Precision-first vs.
-Recall-first) should still be driven by the cost of a false block vs.
-a missed phish. That's exactly the argument for putting a fast
-non-parametric URL-only filter *in front of* a slower page-level
-analyser, rather than relying on one single model at either extreme.
+1. **Lexical: non-parametric wins decisively.** The three non-parametric
+   models beat all three parametric ones on every CV fold, with a mean
+   ΔAUC well above the 0.02 threshold set in H1/C1. C2's paired Wilcoxon
+   test hits its smallest achievable p-value (1/32). SVM-RBF is both the
+   AUC winner and the only model that keeps Precision, Sensitivity and
+   Specificity all near 0.98 — a deployable URL-only filter.
+2. **FullLite: the two families are indistinguishable.** With 34 non-leaky
+   features every model lands at AUC ≈ 0.99 and the family diff collapses
+   to ~0.0003. C3 (gradient) holds: the non-parametric advantage is real
+   only when the feature pool is weak.
+3. **Practical takeaway.** A URL-only first-line filter benefits a lot
+   from a non-parametric model (≈0.10 AUC over LR/NB on Lexical). Once the
+   system can afford to fetch the page and compute page-level features,
+   the choice of model class becomes almost irrelevant and simpler,
+   more explainable models (LR, LDA) are fine. This is the argument for
+   putting a fast non-parametric URL-only filter *in front of* a slower
+   page-level analyser rather than relying on one single model at either
+   extreme.

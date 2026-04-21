@@ -9,11 +9,12 @@ output:
     theme: flatly
     highlight: tango
 ---
+
 ```{r libraries, message=FALSE, warning=FALSE}
 library(tidyverse)
 library(corrplot)
-library(patchwork)
 library(scales)
+library(knitr)
 ```
 
 ---
@@ -22,134 +23,86 @@ library(scales)
 
 ## 1.1 Real-world scenario
 
-A user clicks a link in an email, chat, or search result. The browser or a
-corporate proxy has to decide **before the page loads** whether the link is
-phishing. The cheapest signal at that moment is the URL string itself — no
-DNS lookup, no HTML fetch, no rendering. If a URL-only check is good enough,
-we can block the link for free. If it isn't, we have to fall back to a
-slower page-level check.
+A user clicks a link. The browser or a corporate proxy has to decide
+**before the page loads** whether the link is phishing. The cheapest signal
+at that moment is the URL string itself — no DNS lookup, no HTML fetch, no
+rendering. If a URL-only check is good enough, we block for free; if not, a
+slower page-level check takes over.
 
-The question we want to answer is simple:
-**how much phishing signal is already in the URL, and how few features do
-we really need?** If a URL-only model works well, we can run it as a fast
-first-line filter. Where it fails, the slower trust- and behavior-level
-checks take over.
-
-This lines up with our two chosen scenarios:
-
-- **Scenario 2** — parametric vs. non-parametric models on the URL-only
-  tier. Tells us whether a linear model is enough, or whether the URL hides
-  non-linear patterns that only RF/SVM/GBM can pick up.
-- **Scenario 3** — algorithmic vs. embedded feature selection on the full
-  feature matrix. Tells us how few features we really need, and which ones
-  survive penalisation when features are correlated.
+The question: **how much phishing signal is already in the URL, and which
+class of model extracts it best?**
 
 ## 1.2 Dataset
 
-The PhiUSIIL dataset has ~235 k rows and 50 predictor features. We split
-them into three families by how expensive they are to compute:
+PhiUSIIL: ~235 k rows, 54 columns = 5 IDs + `label` + 48 numeric predictors.
+After the exclusions in §3.2 we model on **40 predictors** split into three
+families by cost at decision time:
 
 | Family | What it captures | Example features |
 |--------|------------------|-----------------|
-| **Lexical** | Properties of the URL string | `URLLength`, `NoOfSubDomain`, `NoOfObfuscatedChar`, `CharContinuationRate` |
-| **Trust** | Domain / title consistency | `IsHTTPS`, `HasTitle`, `HasFavicon`, `Bank`, `Pay`, `Crypto` |
-| **Behavior** | Page-level content signals | `NoOfURLRedirect`, `NoOfiFrame`, `HasExternalFormSubmit`, `HasHiddenFields` |
+| **Lexical** | Properties of the URL string (zero network cost) | `URLLength`, `NoOfSubDomain`, `NoOfObfuscatedChar`, `CharContinuationRate` |
+| **Trust** | Domain / title consistency (light lookup) | `IsHTTPS`, `HasTitle`, `HasFavicon`, `Bank`, `Pay`, `Crypto` |
+| **Behavior** | Page-level content signals (fetch + parse) | `NoOfURLRedirect`, `NoOfiFrame`, `HasExternalFormSubmit`, `HasHiddenFields` |
 
-Lexical is the URL-only first-line case. Trust and Behavior need more
-network / page work, and serve as a strong baseline to compare against.
+Lexical is the URL-only first-line case. Trust and Behavior require a
+network fetch and act as the rich-feature upper bound.
 
 ---
 
-# 2. Hypotheses
+# 2. Hypothesis
 
-## H1 (Scenario 2) — On the URL-only tier, non-parametric models pick up meaningfully more signal than parametric ones
+## H1 — On the URL-only tier, non-parametric models pick up meaningfully more signal than parametric ones
 
-Phishing URLs usually leave lexical traces: odd subdomain depth, paths full
-of digits, obfuscated characters. None of this needs the page to be
-downloaded. We expect a model trained only on Lexical features (URL string,
-no DNS, no HTML) to still reach a reasonable AUC — but with a **bigger**
-parametric vs. non-parametric gap than any other tier. The reason: lexical
-patterns interact in non-additive ways (lengths × digit counts × special
-chars), and a linear decision boundary can't fully use those interactions.
-We compare three parametric methods (LR, LDA, Naive Bayes) against three
-non-parametric ones (RF, SVM-RBF, KNN).
+Phishing URLs usually leave lexical traces: odd subdomain depth, digit-heavy
+paths, obfuscated characters. Lexical patterns interact in non-additive
+ways (length × digit count × special chars), so a linear decision boundary
+cannot fully use those interactions. We compare three parametric methods
+(LR, LDA, NB) against three non-parametric ones (RF, SVM-RBF, KNN) on the
+Lexical tier, and repeat on a richer tier as a saturation check.
 
-**Concrete success criteria.** To keep the claim precise, H1 is tested
-against the 5-fold CV protocol from `scenario_2.rmd`:
+**Success criteria** (tested in `scenario_2.rmd` with a 5-fold CV protocol
+on shared folds):
 
 | # | Criterion | Threshold |
 |---|-----------|-----------|
-| C1 | Mean CV AUC gap between the best non-parametric and best parametric model on the **Lexical (URLOnly) tier** | **ΔAUC ≥ 0.02** |
+| C1 | Mean CV AUC gap between the best non-parametric and best parametric model on **Lexical** | **ΔAUC ≥ 0.02** |
 | C2 | Paired Wilcoxon signed-rank test on the 5 per-fold AUCs of those two models | **p < 0.05** |
-| C3 | Gradient across tiers: the Lexical gap is **strictly larger** than the Full-tier gap (Full saturates at AUC ≈ 0.99 and the gap should drop to ≤ 0.005). | gap(Lexical) > gap(Full) |
+| C3 | Gradient: Lexical gap **strictly larger** than rich-tier gap | gap(Lexical) > gap(FullLite) |
 
-H1 is **supported** only if C1 **and** C2 hold. C3 turns the claim from
-"non-parametric wins on one tier" into the stronger statement *"the
-non-parametric advantage shrinks as the feature tier gets stronger."* H1 is
-**rejected** if either C1 or C2 fails on Lexical.
-
-## H2 (Scenario 3) — Embedded feature selection keeps clearly fewer features than algorithmic selection, because it collapses correlated clusters
-
-The full feature matrix has severe multicollinearity (a URL-length cluster
-with VIF > 1000, see Section 4.3) and several pairs with |r| > 0.7. We
-expect **embedded methods** (LASSO, ElasticNet, Random Forest permutation
-importance) to keep fewer features than **algorithmic methods**
-(forward/backward stepwise, RFE). The reason: embedded penalisation pulls
-each correlated cluster down to one or two survivors, while stepwise search
-treats correlated features as independent candidates. We will report (a)
-how many features each method keeps, (b) how much the kept sets overlap,
-and (c) which features stop being statistically significant when their
-correlated partners are added or removed.
+H1 is supported only if C1 **and** C2 hold. C3 turns the claim into *"the
+non-parametric advantage shrinks as the feature tier gets stronger."*
 
 ---
 
 # 3. Data Loading & Cleaning
 
 ```{r load-data}
-raw <- read_csv(
-  "PhiUSIIL_Phishing_URL_Dataset.csv",
-  show_col_types = FALSE
-)
-
-# Strip UTF-8 BOM that appears on the first column name
+raw <- read_csv("PhiUSIIL_Phishing_URL_Dataset.csv", show_col_types = FALSE)
 names(raw) <- map_chr(names(raw), ~ str_replace(.x, "^\ufeff", ""))
-
-# glimpse(raw)
 ```
 
 ```{r define-roles}
-# Columns excluded from modelling (identifiers / free text)
 ID_COLS <- c("FILENAME", "URL", "Domain", "TLD", "Title")
 
-# Binary target as factor
 df <- raw %>%
   mutate(label_bin = factor(label, levels = c(0, 1),
                             labels = c("Legitimate", "Phishing"))) %>%
   select(-all_of(ID_COLS))
 
-# Feature matrix (numeric predictors only)
 features <- df %>% select(-label, -label_bin)
 
 cat("Observations:", nrow(df), "\n")
-cat("Predictors:  ", ncol(features), "\n")
+cat("Predictors (before exclusion):", ncol(features), "\n")
 ```
 
+## 3.1 Family map
+
+Families reflect the cost of obtaining each signal at decision time.
+`IsHTTPS` is placed in **Trust**, not Lexical: modern browsers refuse plain
+HTTP for sensitive interactions, so the scheme is enforced at the trust
+layer rather than acting as a free lexical clue.
+
 ```{r family-map}
-# ── Feature-family mapping (reused throughout EDA) ──────────────────────────
-# The three families (Lexical / Trust / Behavior) are our own taxonomy, not
-# a property of the dataset. They reflect the cost of obtaining each signal
-# at decision time:
-#   Lexical  — derivable from the raw URL string alone (zero network cost).
-#   Trust    — requires light page/domain inspection or an external lookup
-#              (DNS, TLD database, HTTPS handshake, title parsing).
-#   Behavior — requires fetching, parsing and partially rendering the page.
-#
-# Note on `IsHTTPS`: although the "https://" scheme is part of the URL string,
-# we place it in the **Trust** family. Modern browsers refuse plain HTTP for
-# any sensitive interaction and warn the user prominently, so the scheme is
-# already enforced by the trust layer of the browser rather than acting as a
-# free lexical clue. Treating it as Lexical would let the URLOnly tier cheat
-# off a binary that is, in practice, a deployment/trust signal.
 family_map <- tribble(
   ~feature,                    ~family,
   "URLLength",                 "Lexical",
@@ -205,87 +158,53 @@ family_map <- tribble(
 )
 ```
 
-## 3.3 Feature Exclusion
+## 3.2 Feature exclusion
 
-Before the EDA we drop three groups of features that would bias the
-analysis or trivialise the modelling. All three decisions are based on
-what the feature actually means.
+Three groups of features are dropped before modelling.
 
-### Category 1 — Computed probability / similarity scores
-
-These are not raw URL measurements. They are outputs of other models or
-expert-written scoring functions that already encode phishing-detection
-logic. Keeping them would mean we are classifying another classifier's
-output, not the URL itself.
+**(a) Computed scores** — outputs of other models or hand-crafted scoring
+functions that already encode phishing logic. Keeping them means classifying
+a classifier's output (e.g. `URLSimilarityIndex` alone gives AUC ≈ 1.0).
 
 ```{r exclude-scores}
-SCORES <- c(
-  "URLSimilarityIndex",   # similarity to known-phishing URL patterns
-  "TLDLegitimateProb",    # P(TLD is legitimate) from an external lookup
-  "URLCharProb",          # P(character sequence) from a language model
-  "DomainTitleMatchScore",# computed domain↔title consistency score
-  "URLTitleMatchScore"    # computed URL↔title consistency score
-)
-cat("Computed scores to remove:", paste(SCORES, collapse = ", "), "\n")
+SCORES <- c("URLSimilarityIndex", "TLDLegitimateProb", "URLCharProb",
+            "DomainTitleMatchScore", "URLTitleMatchScore")
 ```
 
-### Category 2 — Redundant binary indicator
-
-`HasObfuscation` is literally `(NoOfObfuscatedChar > 0)`. It holds no
-information that the count feature doesn't already carry.
+**(b) Redundant binary flag.** `HasObfuscation = (NoOfObfuscatedChar > 0)` —
+a deterministic function of a count already in the dataset.
 
 ```{r exclude-binary}
 REDUNDANT_BINARY <- "HasObfuscation"
-cat("Redundant binary to remove:", REDUNDANT_BINARY, "\n")
 ```
 
-### Category 3 — Redundant ratio features
-
-Each ratio below equals `count / URLLength`, and both the count and
-`URLLength` are already in the dataset. Keeping the ratio gives us a
-perfect linear dependence — and no extra signal.
+**(c) Redundant ratios.** Each of these equals `count / URLLength` where
+both numerator and denominator are already present. We keep the raw counts
+(easier units to interpret) and drop the ratio.
 
 ```{r exclude-ratios}
-RATIOS <- c(
-  "LetterRatioInURL",      # = NoOfLettersInURL   / URLLength
-  "DegitRatioInURL",       # = NoOfDegitsInURL    / URLLength
-  "ObfuscationRatio",      # = NoOfObfuscatedChar / URLLength
-  "SpacialCharRatioInURL"  # = NoOfOtherSpecialCharsInURL / URLLength
-)
-cat("Linearly dependent ratios to remove:", paste(RATIOS, collapse = ", "), "\n")
+RATIOS <- c("LetterRatioInURL", "DegitRatioInURL",
+            "ObfuscationRatio", "SpacialCharRatioInURL")
 ```
 
 ```{r apply-exclusions}
 EXCLUDE_COLS <- c(SCORES, REDUNDANT_BINARY, RATIOS)
 
-df       <- df %>% select(-all_of(EXCLUDE_COLS))
-features <- df %>% select(-label, -label_bin)
+df       <- df       %>% select(-all_of(EXCLUDE_COLS))
+features <- df       %>% select(-label, -label_bin)
+family_map <- family_map %>% filter(!feature %in% EXCLUDE_COLS)
 
-cat("\nFeatures after exclusion:", ncol(features),
-    "(removed", length(EXCLUDE_COLS), "of", ncol(features) + length(EXCLUDE_COLS), ")\n")
-cat("Removed:", paste(EXCLUDE_COLS, collapse = ", "), "\n")
-```
-
-Update the family map to reflect the reduced feature set:
-
-```{r family-map-update}
-family_map <- family_map %>%
-  filter(!feature %in% EXCLUDE_COLS)
-
+cat("Features after exclusion:", ncol(features),
+    "(dropped", length(EXCLUDE_COLS), "/", ncol(features) + length(EXCLUDE_COLS), ")\n")
 family_map %>% count(family) %>% print()
 ```
 
 ```{r feature-types, include=FALSE}
-# Silent type split used by downstream VIF/skewness chunks
-binary_features <- names(features)[map_lgl(features, ~ all(na.omit(.x) %in% c(0, 1)))]
+binary_features     <- names(features)[map_lgl(features, ~ all(na.omit(.x) %in% c(0, 1)))]
 continuous_features <- setdiff(names(features), binary_features)
 ```
 
-## 3.4 Feature Tiers Used in Modelling
-
-To test H1 we define three nested feature tiers. The modelling notebook
-reads these tier definitions directly from here, so both notebooks stay
-in sync.
+## 3.3 Feature tiers used in modelling
 
 ```{r feature-tiers}
 tier_lexical  <- family_map %>% filter(family == "Lexical")  %>% pull(feature)
@@ -293,20 +212,22 @@ tier_trust    <- family_map %>% filter(family == "Trust")    %>% pull(feature)
 tier_behavior <- family_map %>% filter(family == "Behavior") %>% pull(feature)
 tier_full     <- c(tier_lexical, tier_trust, tier_behavior)
 
-cat("URLOnly tier (Lexical, ",  length(tier_lexical),  " features)\n", sep = "")
-cat("Trust tier              (",  length(tier_trust),    " features)\n", sep = "")
-cat("Behavior tier           (",  length(tier_behavior), " features)\n", sep = "")
-cat("Full tier               (",  length(tier_full),     " features)\n", sep = "")
+cat("Lexical (URLOnly):", length(tier_lexical), "features\n")
+cat("Trust:            ", length(tier_trust),   "features\n")
+cat("Behavior:         ", length(tier_behavior),"features\n")
+cat("Full:             ", length(tier_full),    "features\n")
 ```
 
 ---
 
 # 4. Exploratory Data Analysis
 
+Every plot in this section is tied to a specific modelling decision — we
+avoid generic per-feature histograms or a global correlation matrix across
+all 40 predictors, following the assignment's guidance to keep EDA
+deliberate rather than exhaustive.
 
-## 4.1 Data Overview
-
-### 4.1.1 Class Balance
+## 4.1 Class balance and missingness
 
 ```{r class-balance, fig.height=3.5}
 df %>%
@@ -317,41 +238,29 @@ df %>%
   geom_text(aes(label = scales::percent(pct, 0.1)), vjust = -0.4, size = 4) +
   scale_fill_manual(values = c("steelblue", "firebrick")) +
   scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, .1))) +
-  labs(title = "Class distribution",
-       x = NULL, y = "Count") +
+  labs(title = "Class distribution", x = NULL, y = "Count") +
   theme_minimal(base_size = 12)
+
+cat("Total NAs in feature matrix:", sum(is.na(features)), "\n")
 ```
 
-**Takeaway:** The dataset is roughly balanced, so we don't need resampling
-or class-weighting. Accuracy works as a secondary metric next to AUC.
+Roughly balanced (≈57/43) → AUC and Accuracy are both valid metrics, no
+resampling needed. Zero missing values in any predictor. Scenario 2
+additionally stratifies the modelling sub-sample to an exact 50/50, so
+class weighting is not needed at either stage.
 
-### 4.1.2 Missing Values
+## 4.2 Per-feature discriminative power by family
 
-No missing values are present in any predictor (verified with
-`colSums(is.na(features))`).
+If no single Lexical feature separates the classes, the model has to combine
+several of them — the setting where non-parametric models tend to beat
+linear/Gaussian baselines.
 
-
-## 4.2 H1 — Lexical features overlap between classes, so we'll need non-linear models
-
-H1 claims that a URL-only detector (Lexical features) will show a bigger
-parametric vs. non-parametric gap than any other tier. We don't test
-non-linearity directly in the EDA. Instead we show that **per-feature
-discriminative power is lowest in the Lexical family**. When no single
-feature tells the classes apart, the model has to combine several features
-at once — and that's where non-linear models have an edge.
-
-### 4.2.1 Discriminative Power by Family
-
-We measure discriminative power separately for continuous and binary
-features. The standardised mean difference (SMD) only makes sense for
-continuous features. For binary features the "pooled SD" collapses to a
-function of the class proportion, so SMD stops being comparable across
-features. For those we use **Cramér's V** instead — the standard
-effect-size measure for a 2×2 contingency table, on the same 0–1 scale
-as |correlation|.
+We compute discriminative power separately for continuous and binary
+features. SMD is only meaningful for continuous features; for binary
+features the pooled SD degenerates, so we use **Cramér's V** on a 2×2
+contingency table (same 0–1 scale as |correlation|).
 
 ```{r discriminative-power, fig.height=7, fig.width=8}
-# --- Continuous features: standardised mean difference ----------------------
 smd_df <- df %>%
   select(label, all_of(continuous_features)) %>%
   pivot_longer(-label, names_to = "feature", values_to = "value") %>%
@@ -360,20 +269,16 @@ smd_df <- df %>%
             .groups = "drop") %>%
   pivot_wider(names_from = label, values_from = c(m, s),
               names_glue = "{.value}_{label}") %>%
-  mutate(
-    pooled_sd = sqrt((s_0^2 + s_1^2) / 2),
-    effect    = abs(m_1 - m_0) / (pooled_sd + 1e-9),
-    metric    = "SMD (continuous)"
-  ) %>%
+  mutate(pooled_sd = sqrt((s_0^2 + s_1^2) / 2),
+         effect    = abs(m_1 - m_0) / (pooled_sd + 1e-9),
+         metric    = "SMD (continuous)") %>%
   select(feature, effect, metric)
 
-# --- Binary features: Cramer's V on a 2x2 contingency table -----------------
 cramers_v <- function(x, y) {
   tab <- table(x, y)
   if (any(dim(tab) < 2)) return(NA_real_)
   chi2 <- suppressWarnings(chisq.test(tab, correct = FALSE)$statistic)
-  n <- sum(tab)
-  as.numeric(sqrt(chi2 / (n * (min(dim(tab)) - 1))))
+  as.numeric(sqrt(chi2 / (sum(tab) * (min(dim(tab)) - 1))))
 }
 
 cv_df <- tibble(
@@ -384,94 +289,53 @@ cv_df <- tibble(
 
 discrim_df <- bind_rows(smd_df, cv_df) %>%
   left_join(family_map, by = "feature") %>%
-  replace_na(list(family = "Other")) %>%
-  arrange(desc(effect))
+  replace_na(list(family = "Other"))
 
-ggplot(discrim_df, aes(x = reorder(feature, effect), y = effect, fill = family)) +
-  geom_col() +
-  coord_flip() +
+ggplot(discrim_df, aes(reorder(feature, effect), effect, fill = family)) +
+  geom_col() + coord_flip() +
   facet_wrap(~ metric, scales = "free", ncol = 2) +
   scale_fill_brewer(palette = "Set2") +
-  labs(title = "Per-feature discriminative power",
-       subtitle = "Continuous: |SMD|. Binary: Cramer's V. Both >= 0.",
+  labs(title = "Per-feature discriminative power by family",
+       subtitle = "Continuous: |SMD|, Binary: Cramer's V. Both >= 0.",
        x = NULL, y = "Effect size", fill = "Family") +
   theme_minimal(base_size = 10) +
   theme(legend.position = "top")
 ```
 
-Effect-size distribution per family (continuous features only, so the SMD
-values are directly comparable):
+**Takeaway.** Lexical features cluster at the bottom of the |SMD| ranking —
+no individual URL-length or digit-count feature separates classes on its
+own. Trust and Behavior carry stronger per-feature signal. Weak per-feature
+evidence means a Lexical classifier must combine many small cues, which is
+the setting in which tree ensembles and kernel methods typically beat
+linear models — the motivation for H1.
 
-```{r smd-by-family, fig.height=4, fig.width=6}
-smd_family <- discrim_df %>%
-  filter(metric == "SMD (continuous)", family != "Other")
+## 4.3 Multicollinearity — preparation for modelling
 
-ggplot(smd_family, aes(family, effect, fill = family)) +
-  geom_boxplot(alpha = 0.7, show.legend = FALSE) +
-  geom_jitter(width = 0.15, alpha = 0.5, size = 2) +
-  scale_fill_brewer(palette = "Set2") +
-  labs(title = "SMD distribution by family (continuous features only)",
-       subtitle = "H1: Lexical SMD lowest -> largest parametric gap expected at URLOnly tier",
-       x = NULL, y = "| SMD |") +
-  theme_minimal(base_size = 12)
-```
-
-**Takeaway (H1):** Among the continuous features, Lexical has the lowest
-median |SMD| and the smallest spread. Trust and Behavior carry more
-per-feature signal. Weak per-feature evidence plus visible non-linear
-structure is exactly the setting where parametric models struggle most —
-and where the parametric vs. non-parametric gap predicted by H1 should
-show up.
-
-## 4.3 H2 (Scenario 3) — Multicollinearity is what makes algorithmic vs. embedded selection differ
-
-H2 says that algorithmic and embedded feature selection methods will keep
-different feature sets on the Full tier. The EDA evidence is the
-correlation structure: where are the correlated clusters, and how bad is
-the inflation? Embedded methods (LASSO, ElasticNet, RF importance) collapse
-each cluster down to one survivor. Algorithmic methods (stepwise, RFE)
-treat correlated features as independent candidates and tend to keep more
-of them.
-
-### 4.3.1 Lexical Correlation Matrix
-
-The collinearity that drives H2 lives inside the Lexical family. Trust and
-Behavior have `mean_abs_r` around 0.18 and 0.14 and no dense cluster. The
-plot below makes the URL-length count cluster visible.
+The Lexical family contains a dense count cluster (`URLLength`,
+`NoOfLettersInURL`, `NoOfDegitsInURL`, and the obfuscation / equals /
+ampersand triangle). Plain (unpenalised) logistic regression is numerically
+unstable on such a cluster, so Scenario 2 uses **ridge-regularised LR** on
+every tier. We document the cluster here via a correlation plot and
+target-free VIF so the modelling decision is traceable to data.
 
 ```{r cor-lexical, fig.height=6, fig.width=7}
-lexical_cor <- features %>%
-  select(all_of(tier_lexical)) %>%
+lexical_cor <- features %>% select(all_of(tier_lexical)) %>%
   cor(use = "pairwise.complete.obs")
 
-  corrplot(
-  lexical_cor,
-  method  = "color",
-  order   = "hclust",
-  tl.cex  = 0.7,
-  tl.col  = "black",
-  col     = colorRampPalette(c("firebrick", "white", "steelblue"))(200),
-  title   = "Correlation - Lexical features",
-  mar     = c(0, 0, 1.5, 0),
-  addCoef.col = "black",
-  number.cex  = 0.55
-)
+corrplot(lexical_cor, method = "color", order = "hclust",
+         tl.cex = 0.7, tl.col = "black",
+         col = colorRampPalette(c("firebrick", "white", "steelblue"))(200),
+         title = "Correlation — Lexical features",
+         mar = c(0, 0, 1.5, 0),
+         addCoef.col = "black", number.cex = 0.55)
 ```
 
-Across the full feature matrix, 10 pairs pass `|r| > 0.7` — and all of
-them sit inside this Lexical count cluster (URLLength ↔ NoOfLettersInURL
-↔ NoOfDegitsInURL and friends). These are the correlated pairs we expect
-algorithmic and embedded selection to handle differently.
-
-### 4.3.2 Variance Inflation Factors
+Target-free VIF — regress each continuous feature on the rest of the design
+matrix. This avoids the non-converged binomial GLM that `car::vif` produces
+on this dataset and is computed directly from `lm`:
 
 ```{r vif}
-library(knitr)
-
-# Target-free VIF from the design matrix (avoids non-converged GLM).
-X_vif <- features %>%
-  select(all_of(continuous_features)) %>%
-  as.data.frame()
+X_vif <- features %>% select(all_of(continuous_features)) %>% as.data.frame()
 
 vif_values <- vapply(seq_along(X_vif), function(i) {
   r2 <- summary(lm(X_vif[[i]] ~ ., data = X_vif[, -i, drop = FALSE]))$r.squared
@@ -479,46 +343,29 @@ vif_values <- vapply(seq_along(X_vif), function(i) {
 }, numeric(1))
 names(vif_values) <- names(X_vif)
 
-vif_df <- tibble(
-  feature = names(vif_values),
-  vif     = as.numeric(vif_values)
-) %>%
+tibble(feature = names(vif_values), vif = as.numeric(vif_values)) %>%
   left_join(family_map, by = "feature") %>%
   replace_na(list(family = "Other")) %>%
-  mutate(severity = case_when(
-    vif > 10            ~ "severe (> 10)",
-    vif >= 5 & vif <= 10 ~ "moderate (5-10)",
-    TRUE                ~ "ok (< 5)"
-  )) %>%
-  arrange(desc(vif))
-
-vif_df %>%
-  transmute(Feature = feature,
-            Family  = family,
-            VIF     = round(vif, 2),
-            Severity = severity) %>%
-  kable(caption = "Variance Inflation Factors - continuous features (lm-based, target-free).")
+  mutate(severity = case_when(vif > 10 ~ "severe (> 10)",
+                              vif >= 5 ~ "moderate (5-10)",
+                              TRUE     ~ "ok (< 5)")) %>%
+  arrange(desc(vif)) %>%
+  transmute(Feature = feature, Family = family,
+            VIF = round(vif, 2), Severity = severity) %>%
+  kable(caption = "Variance Inflation Factors (lm-based, target-free).")
 ```
 
-**Takeaway (H2):** Dropping the four ratio features in Section 3.3 was
-necessary but not enough. `URLLength`, `NoOfLettersInURL` and
-`NoOfDegitsInURL` stay near-collinear because they measure overlapping
-properties of the same URL string. Stepwise/RFE will likely keep most of
-them; LASSO and RF importance should keep only one or two. Measuring that
-difference is the H2 task. Binary features are left out of the VIF
-calculation by design — regressing a 0/1 indicator on continuous
-predictors is not comparable on the same scale.
+**Takeaway.** `URLLength`, `NoOfLettersInURL` and `NoOfDegitsInURL` remain
+near-collinear after the ratio-feature drop because they measure
+overlapping properties of the same string. This is what motivates
+ridge-regularised LR in Scenario 2; unpenalised LR would swing its
+coefficients on this cluster from fold to fold.
 
+## 4.4 Skewness
 
-## 4.4 Skewness Assessment *(Scenario 2 preparation)*
-
-```{r outlier-skewness, fig.height=6, fig.width=8}
-# Skewness for all continuous features
+```{r skewness, fig.height=6, fig.width=8}
 skewness_fn <- function(x) {
-  x <- x[!is.na(x)]
-  n <- length(x)
-  m <- mean(x)
-  s <- sd(x)
+  x <- x[!is.na(x)]; n <- length(x); m <- mean(x); s <- sd(x)
   (n / ((n-1)*(n-2))) * sum(((x - m) / s)^3)
 }
 
@@ -528,58 +375,39 @@ skew_df <- tibble(
 ) %>%
   left_join(family_map, by = "feature") %>%
   replace_na(list(family = "Other")) %>%
-  mutate(abs_skew = abs(skewness)) %>%
-  arrange(desc(abs_skew))
+  mutate(abs_skew = abs(skewness))
 
-ggplot(skew_df, aes(x = reorder(feature, abs_skew), y = skewness, fill = family)) +
-  geom_col() +
-  coord_flip() +
+ggplot(skew_df, aes(reorder(feature, abs_skew), skewness, fill = family)) +
+  geom_col() + coord_flip() +
   geom_hline(yintercept = c(-2, 2), linetype = "dashed", colour = "grey40") +
   scale_fill_brewer(palette = "Set2") +
   labs(title = "Skewness of continuous features",
-       subtitle = "Dashed lines at +/- 2 mark heavy skew; LR/LDA may struggle here",
+       subtitle = "Dashed lines at +/- 2 mark heavy skew",
        x = NULL, y = "Skewness", fill = "Family") +
   theme_minimal(base_size = 10) +
   theme(legend.position = "top")
 
-# Count features with |skewness| > 2
-n_heavy_skew <- sum(skew_df$abs_skew > 2)
-cat("\nFeatures with |skewness| > 2:", n_heavy_skew, "of",
-    length(continuous_features), "\n")
-cat("These are:\n")
-skew_df %>% filter(abs_skew > 2) %>% select(feature, skewness, family) %>% print()
+cat("Features with |skewness| > 2:", sum(skew_df$abs_skew > 2),
+    "of", length(continuous_features), "\n")
 ```
 
-**Takeaway (Scenario 2):** Several count features are heavily right-skewed
-with long outlier tails. This shapes our modelling choices:
-
-- **Parametric models** (LR, LDA): need scaling and a log-transform on
-  skewed features to make the distributional assumption hold.
-- **Non-parametric models** (trees, KNN, SVM): robust to skew, but KNN and
-  SVM still need standardisation because they use distances.
-
-
+**Takeaway.** Most continuous features are heavily right-skewed (count data
+with long tails). Parametric LR/LDA/NB and distance-based KNN/SVM apply
+`log1p` + centre/scale in Scenario 2; Random Forest is left untransformed.
 
 ---
 
-# 5. EDA Summary & Modelling Implications
+# 5. EDA summary
 
-**A note on separability:** After the Section 3.3 exclusions, 40 features
-remain (13 Lexical + 7 Trust + 20 Behavior). Even on this reduced set,
-every model type already reaches AUC ≈ 0.99 on the Full tier — the task
-is near-perfectly separable once all three families are present. So we
-test H1 mainly on the **URLOnly tier** (13 Lexical features), where the
-parametric vs. non-parametric contrast has room to show. H2 is tested on
-the **Full tier**, where the multicollinearity that drives the
-algorithmic-vs-embedded gap actually lives.
+After exclusions: **40 features** = 13 Lexical + 7 Trust + 20 Behavior.
 
-## 5.1 Implications for modelling scenarios
+| Finding | Modelling implication |
+|---------|----------------------|
+| Roughly balanced (57/43), zero NAs | AUC + Accuracy both valid; Scenario 2 stratifies sub-sample to exact 50/50 |
+| Per-feature SMD lowest on Lexical | Largest parametric/non-parametric gap expected on Lexical — the H1 test |
+| Heavy skew on 19/22 continuous features | `log1p` + centre/scale for LR/LDA/NB/SVM/KNN; trees unaffected |
+| URL-length cluster with VIF > 500 | Ridge-regularised LR in Scenario 2 |
+| Full-tier saturates at AUC ≈ 0.99 | Compare models on Lexical (where the gap has room to show) and on a >30-feature "lite" tier that drops the near-leaky page counts |
 
-| Finding | Scenario 2 implication (H1) | Scenario 3 implication (H2) |
-|---------|----------------------------|------------------------------|
-| Near-perfect separability on Full tier | Comparison focused on URLOnly tier where models actually differ | Use Full tier; selection methods need a non-trivial pool of redundant features |
-| Lexical SMD lowest + features must be combined | Largest parametric/non-parametric AUC gap expected on URLOnly | Algorithmic methods may keep all weak Lexical features; embedded penalisation should drop them |
-| Heavy skewness in 19 of 22 continuous features | Log-transform + standardisation for LR/LDA; trees/RF unaffected | Apply same transform before LASSO/ElasticNet (they are scale-sensitive) |
-| URL-length cluster: VIF > 500 and abs(r) > 0.84 | Use stable solvers / regularised LR for fairness | Strongest test case for H2 — embedded should collapse cluster, stepwise should not |
-| Trust binary features: low intra-correlation | No special treatment | All three Trust HTTPS-style flags likely retained by both selection families — informative-feature overlap |
-
+Scenario 2 reuses the same exclusions and tier definitions, so the findings
+above apply directly to the modelling results there.
