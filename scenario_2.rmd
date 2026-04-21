@@ -405,7 +405,13 @@ res_lr <- run_or_load("lr", function() {
 print_tier_summary(res_lr)
 ```
 
-## 4.2 Linear Discriminant Analysis (LDA)
+On **Lexical** LR-Ridge sits at AUC 0.852
+with Sens 0.921 / Spec 0.716 — at threshold 0.5 the model blocks
+roughly 28 % of legitimate URLs to keep 92 % of phish. For the
+corporate proxy this is the "unusable filter" regime: the false-block
+rate is an order of magnitude above what a helpdesk can absorb.
+From **Trust** onwards the Sens/Spec gap closes (≈ 0.86–0.99 across both
+axes).
 
 LDA assumes Gaussian class-conditional densities with a shared covariance
 matrix. The EDA flagged heavy skewness on 19 of 22 continuous features;
@@ -427,15 +433,24 @@ res_lda <- run_or_load("lda", function() {
 print_tier_summary(res_lda)
 ```
 
-## 4.3 Naive Bayes
+On **Lexical** LDA posts AUC 0.930 —
+visibly better than LR — yet the threshold-0.5 operating point is
+*worse*: Sens 0.971 / Spec 0.688, i.e. ~31 % of legitimate URLs
+blocked. The Gaussian class-conditional assumption pushes the decision
+surface toward the legit side of the score distribution, so a good
+rank metric ends up with a badly miscalibrated cut. On **Trust**,
+**Behavior** and **FullLite** the Sens/Spec values converge
+(≈ 0.86 → 0.99), symmetric in both directions. This is the cleanest
+case in the report where AUC and the proxy-relevant operating point
+disagree: LDA beats LR on AUC but is *more* unusable as a Lexical
+block/allow filter without threshold recalibration.
 
 NB assumes features are conditionally **independent** given the class.
 EDA §4.3 already showed that this is not true here: |r| > 0.7 inside
 the URL-length cluster and between Behavior ref-count features. We run
 NB anyway, to measure **how much the independence assumption actually
 costs** on each tier. We use a kernel density estimate so that folds
-with a zero-variance feature (e.g. `Robots` on Trust) don't crash the
-Gaussian version of NB.
+with a zero-variance feature don't crash the Gaussian version of NB.
 
 ```{r fit-nb, message=FALSE, warning=FALSE}
 res_nb <- run_or_load("nb", function() {
@@ -453,9 +468,20 @@ res_nb <- run_or_load("nb", function() {
 print_tier_summary(res_nb)
 ```
 
----
-
-# 5. Non-parametric Models
+NB is the textbook case of AUC hiding
+operating-point pathology. On **Lexical** AUC is 0.849 — not terrible
+— but Sens 0.999 / Spec **0.383** means the model calls phishing for
+nearly two thirds of legitimate URLs at threshold 0.5. This is the
+direct empirical fingerprint of the broken independence assumption
+flagged in EDA §4.3: the URL-length cluster (|r| > 0.7) is counted as
+independent evidence six or seven times over, so phish-consistent
+scores collapse toward 1. On **Behavior** the same violation *flips
+direction* — Sens 0.732 / Spec 0.996 — because the correlated block
+this time is the page-count ref group, and its repeated "evidence"
+pulls probabilities the other way. AUC on Behavior is a respectable
+0.990, yet at the default threshold NB misses 27 % of phish. In proxy
+terms: NB on either tier needs recalibration or a tuned threshold
+before it is deployable at all.
 
 ## 5.1 Random Forest
 
@@ -484,7 +510,15 @@ res_rf <- run_or_load("rf", function() {
 print_tier_summary(res_rf)
 ```
 
-## 5.2 SVM with RBF kernel
+On **Lexical** RF posts AUC 0.968 but the
+threshold-0.5 split is Sens 0.971 / Spec 0.746 — Spec is the soft
+spot, driven by the bagging vote under deep unpruned trees (leaves
+that see few legits vote "phish"). From **Trust** upward the model
+becomes symmetric: Behavior Sens 0.970 / Spec 0.977, FullLite 0.997 /
+0.996. RF is therefore the model that would most benefit from a
+simple **threshold shift** on Lexical — the AUC is already there, the
+0.5 cut just isn't the cost-optimal one. Unlike NB the problem is not
+a structural model assumption, it's a calibration artefact.
 
 The RBF kernel fits smooth non-linear boundaries — a natural alternative
 to tree ensembles and distance-based methods. RBF is scale-sensitive, so
@@ -493,9 +527,6 @@ SVM uses the parametric recipe (`log1p` + centre/scale). `C = 1`,
 further because the main question is the parametric vs. non-parametric
 contrast, not within-family optimisation.
 
-This is the single slowest chunk in the notebook. The first knit takes
-about 15 minutes across all tiers combined; re-knits are instant thanks
-to the `run_or_load` cache.
 
 ```{r fit-svm}
 res_svm <- run_or_load("svm", function() {
@@ -513,7 +544,16 @@ res_svm <- run_or_load("svm", function() {
 print_tier_summary(res_svm)
 ```
 
-## 5.3 k-Nearest Neighbours
+SVM-RBF is the only model that is
+**proxy-deployable at threshold 0.5 without recalibration on every
+family**. On **Lexical** it posts AUC
+0.995 with Sens 0.985 / Spec 0.983 — a ~1.7 % miss rate and ~1.7 %
+false-block rate, both directions symmetric. On Trust, Behavior and
+FullLite the same symmetric profile holds.
+Translated back to the EDA §1.1 scenario, this is what "a
+non-parametric URL-only filter worth deploying" actually looks like in
+numbers — roughly 9 × fewer errors than LR-Ridge on Lexical (2 vs. 18
+per 100 URLs) with no threshold tuning required.
 
 KNN is the simplest non-parametric classifier: it stores the whole
 training set and classifies each test point by a majority vote among
@@ -551,9 +591,19 @@ res_knn <- run_or_load("knn", function() {
 print_tier_summary(res_knn)
 ```
 
----
-
-# 6. Comparison
+KNN is the close non-parametric runner-up
+to SVM-RBF. On **Lexical** AUC 0.987 with Sens 0.944 / Spec 0.923 —
+symmetric, deployable, ~6–8 % error either way. On **Trust** the AUC
+holds at 0.932 but Accuracy drops to 0.863: with only 7 mostly-binary
+features, many training points collapse to identical coordinates, the
+jittered distance barely separates classes, and the 25-NN vote
+averages over a near-uniform neighbourhood. Behavior and FullLite
+return to the symmetric ≥ 0.96 profile. One caveat AUC cannot show but
+the proxy deployment needs to know: KNN's **inference cost scales with
+the training set** — every click triggers 24 k distance computations,
+which is the opposite of the "cheap before the page loads" constraint
+that motivated the URL-only filter. SVM-RBF wins on quality and on
+inference cost.
 
 ## 6.1 Per-(model, tier) summary
 
@@ -597,14 +647,6 @@ summary_tbl %>%
   kable()
 ```
 
-**How to read this table:** inside each tier the two families should
-cluster differently if H1 holds. On Lexical, the three non-parametric
-rows should sit clearly above the three parametric ones. Moving through
-Trust → Behavior → FullLite, the gap should shrink and eventually
-vanish. FullLite is the honest high-dimensional check: it keeps > 30
-features but removes the six near-leaky Behavior counts. If parametric
-and non-parametric models still disagree there, the gradient claim
-holds up at realistic feature sizes too.
 
 ### Train vs. test — overfitting diagnostic
 
@@ -624,25 +666,37 @@ silently inflated by leakage.
 
 ### Classification quality beyond AUC
 
-AUC ranks models by their score ordering — useful, but on the richer
-tiers every model sits at AUC ≈ 0.99 and the ranking becomes hard to
-read. The table below shows **Accuracy, F1, Precision, Sensitivity
-(= Recall) and Specificity** on the held-out test set at the default
-0.5 threshold.
+AUC ranks models by their score ordering — useful for comparing
+families in the abstract, but on the richer tiers every model sits at
+AUC ≈ 0.99 and the ranking becomes hard to read. More importantly, AUC
+is **threshold-free**: it says nothing about what happens when the
+corporate proxy from §1.1 of the EDA has to commit to a single
+decision — *block* or *allow* — the moment the user clicks the link.
+At deployment the proxy doesn't get to rank URLs; it gets to pick one
+operating point and live with both error types at once.
 
-In our security setting each split matters on its own:
-**Sensitivity (Recall)** = share of phishing URLs we caught (missing
-one is the costly error), **Specificity** = share of legitimate URLs
-we didn't flag (over-flagging hurts user trust), **Precision** = of
-the URLs we blocked, how many were actually phishing (low precision
-means users see many false alarms and disable the filter).
+That is why a second evaluation is needed. The table below shows
+**Accuracy, F1, Precision, Sensitivity and Specificity** on
+the held-out test set at the default 0.5 threshold — the numbers the
+proxy would actually produce in production.
+
+In this proxy setting each split matters on its own, and the two error
+types are **asymmetrically expensive**:
+**Sensitivity** = share of phishing URLs we caught (a miss lands the
+user on a credential-harvesting page),
+**Specificity** = share of legitimate URLs we didn't flag — every
+false block is a user staring at a broken internal link or a customer
+portal they can't reach, and that is exactly the cost that gets the
+filter disabled by the management.
+**Precision** = of the URLs we blocked, how many were actually phishing
+— low precision means the ratio of "good page blocked" to "real phish
+caught" is bad enough that users stop trusting
+the proxy and start asking for bypass rules, at which point the whole
+URL-only line of defence is gone.
 
 Precision is derived analytically from Sensitivity and Specificity
 using the test-set class balance (≈ 50/50 after stratified splitting):
-$\text{Prec} = \frac{\text{Sens}}{\text{Sens} + (1 - \text{Spec})}$. This
-is exact for a 1:1 prevalence and within 10⁻⁴ of the
-`caret::confusionMatrix` value for our near-balanced split, so no
-re-fit is needed.
+$\text{Prec} = \frac{\text{Sens}}{\text{Sens} + (1 - \text{Spec})}$.
 
 ```{r quality-table}
 quality_tbl <- test_tbl %>%
@@ -659,25 +713,6 @@ quality_tbl <- test_tbl %>%
 quality_tbl %>%
   kable(caption = "Test-set classification quality at the default 0.5 threshold.")
 ```
-
-**How to read this table:**
-
-- **Lexical** translates the AUC story into practical terms: SVM-RBF
-  reaches Accuracy ≈ 0.98 and F1 ≈ 0.98, while LR-Ridge and NaiveBayes
-  sit around 0.69–0.82. The gap that showed up as +0.10 AUC is the
-  difference between a deployable filter and an unusable one.
-- **Behavior / FullLite** is where Accuracy and F1 earn their keep.
-  Once the six near-leaky page counts are stripped out, Behavior no
-  longer saturates — AUCs sit in a visibly non-trivial range and the
-  Accuracy / F1 spread across models becomes a more honest signal of
-  which classifier would actually deploy well. FullLite is the reverse
-  case: AUC is already near-saturated, so Accuracy and F1 are what
-  separate "great" from "essentially perfect".
-- **Sensitivity vs. Specificity** shows *how* each model errs. Models
-  that lean heavily on one (high Sens, lower Spec) will over-block
-  legitimate sites; the opposite pattern lets phishing through. In
-  production the right threshold depends on the cost ratio, but at
-  0.5 the table tells us which models are balanced by default.
 
 ## 6.2 Per-tier paired Wilcoxon test
 
@@ -721,46 +756,6 @@ fold beat its matched parametric fold. So the p-value alone can't tell
 apart a large effect (Lexical, diff ≈ 0.10) from a negligible one
 (Behavior, diff ≈ 0.0004). **Read the `diff` column, not the p-value**,
 if you want to judge effect size.
-
-## 6.3 CV AUC by model × tier
-
-```{r plot-auc, fig.width=10, fig.height=14, message=FALSE}
-plot_list <- map(c("Lexical", "Trust", "Behavior", "FullLite"), function(t) {
-  auc_long %>%
-    filter(tier == t) %>%
-    mutate(family = factor(family, levels = c("parametric", "non-parametric")),
-           model  = fct_reorder(model, auc, median)) %>%
-    ggplot(aes(model, auc, fill = family)) +
-    geom_boxplot(outlier.shape = NA, width = 0.6, alpha = 0.5) +
-    geom_jitter(aes(colour = family),
-                width = 0.12, height = 0, size = 1.6, alpha = 0.8,
-                show.legend = FALSE) +
-    coord_flip() +
-    scale_fill_manual(values   = c(parametric = "steelblue",
-                                   `non-parametric` = "firebrick")) +
-    scale_colour_manual(values = c(parametric = "steelblue",
-                                   `non-parametric` = "firebrick")) +
-    labs(title = t, x = NULL, y = "ROC AUC (5-fold CV)") +
-    theme_minimal(base_size = 11) +
-    theme(legend.position = if (t == "Lexical") "top" else "none")
-})
-
-library(patchwork)
-wrap_plots(plot_list, ncol = 1) +
-  plot_annotation(
-    title    = "Scenario 2 -- CV AUC by model across feature tiers",
-    subtitle = "Each dot is one CV fold (shared across models)"
-  )
-```
-
-The Lexical panel shows the widest spread and the clearest separation
-between parametric (blue) and non-parametric (red) models. As we go
-down the tiers, the boxes tighten and the two colour groups merge.
-The FullLite panel pins every model at AUC ≈ 1 — the dataset is
-near-perfectly separable on a rich page-level feature set even after
-the six near-leaky counts are removed, so the family contrast is
-essentially resolved by then.
-
 ---
 
 # 7. Conclusion — H1 gradient
@@ -818,7 +813,13 @@ Two findings only visible once Precision is reported:
 
 This is the part AUC hides: two models with AUC ≈ 0.99 on Behavior can
 still have fundamentally different operating-point behaviour, and the
-Precision/Sensitivity decomposition is what makes that visible.
+Precision/Sensitivity decomposition is what makes that visible. Brought
+back to the corporate-proxy framing of EDA §1.1: the proxy doesn't
+consume an AUC, it consumes a single *block/allow* verdict per click.
+Two models that look tied on the ranking metric can produce very
+different proxies — one that floods the helpdesk with false blocks,
+and one that silently lets phish through.
+AUC treats these as equivalent; the deployment doesn't.
 
 **Practical takeaway.** A URL-only first-line phishing detector gains a
 lot from a non-parametric model (SVM-RBF or KNN gain ~0.10 AUC over
@@ -828,6 +829,35 @@ compute Behavior-level features, the AUC choice of model becomes almost
 irrelevant and simpler, more explainable models (LR, LDA) are good
 enough — though the operating-point choice (Precision-first vs.
 Recall-first) should still be driven by the cost of a false block vs.
-a missed phish. That's exactly the argument for putting a fast
-non-parametric URL-only filter *in front of* a slower page-level
-analyser, rather than relying on one single model at either extreme.
+a missed phish.
+
+## 7.1 Selected model
+
+**The model we pick for the corporate-proxy deployment is SVM-RBF.**
+
+1. **On Lexical — the only tier the proxy
+   actually sees before the page loads** — SVM-RBF posts AUC 0.995 with
+   Sens 0.985 / Spec 0.983. Every other model either drops ≥ 0.10 AUC
+   or trades one error type for another at threshold 0.5.
+2. **It is symmetric in both error directions without recalibration.**
+   At the default 0.5 cut the miss rate (~1.7 %) and the false-block
+   rate (~1.7 %) are essentially equal — no threshold tuning needed to
+   make the operating point deployable. LR, LDA, NB and RF would all
+   need a separate calibration step on Lexical before they could go
+   behind a proxy; SVM-RBF does not.
+3. **It holds the quality on every other tier too.** Trust, Behavior
+   and FullLite all land in the Sens ≈ Spec ≈ 0.97–1.00 region, so the
+   same model works if the proxy ever expands beyond URL-only — no
+   model swap needed when more signal becomes available.
+4. **Inference cost is acceptable for the proxy loop.** KNN matches
+   SVM-RBF on Lexical AUC (0.987 vs. 0.995) but requires ~24 k
+   distance computations per click, which is exactly the
+   "cheap before the page loads" constraint from our hypothesis.
+
+**When we would revisit the choice.** If the proxy pipeline later gains
+Behavior- or FullLite-grade signals and explainability becomes a
+requirement, LR-Ridge or LDA on that richer tier
+is a defensible downgrade — both reach AUC ≥ 0.99 there with balanced
+Sens/Spec, and their coefficients are interpretable. But for the
+URL-only first-line filter that out hypothesis is built around, SVM-RBF is
+the only model whose numbers support the deployment directly.
