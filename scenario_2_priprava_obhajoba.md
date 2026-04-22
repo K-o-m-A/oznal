@@ -1010,6 +1010,198 @@ na Lexical sú červené boxy **výrazne vyššie** než modré; na ďalších
 
 ---
 
+## 6a. Náhradný rozhodovací strom — Task 4 (vizualizácia RF)
+
+### Čo je surrogate tree a prečo ho robíme
+
+Random Forest je presný, ale ako čierna skrinka: rozhodnutie na Lexical
+úrovni vzniká z hlasu **300 nezávisle trénovaných stromov**, ktoré vidí
+iba  počítač — my to očami neprečítame. Zadanie Task 4 hovorí:
+*"vizualizuj označené dáta stromom alebo heatmapou a povedz, nakoľko
+vizualizácia zachytí správanie modelu"*. My ten cieľ napĺňame **jedným
+`rpart` stromom**, ktorý nie je trénovaný na pravdu (`label`), ale na
+**predikcie RF**. Strom sa teda doslova učí napodobňovať RF → ako
+žiak, ktorý pozoruje učiteľa a skúša kopírovať jeho odpovede. Odmenou
+nie je accuracy proti pravde, ale **fidelity** = percento zhody medzi
+predikciou stromu a predikciou RF na test-sete.
+
+**Prečo práve na Lexical a FullLite?** Lexical je tier, kde RF reálne
+vyhráva (gap ~0.10 AUC nad parametrickými) a teda ma čo vysvetľovať.
+FullLite je sanity check — všetky modely tam sú pri AUC ≈ 0.999, takže
+fidelity musí byť vysoká automaticky a overí, že naša tuning pipeline
+nie je zaujatá. Trust a Behavior sme vynechali: Trust je príliš úzky
+(7 features, väčšinou binárne) a Behavior je prechodový tier medzi
+oboma.
+
+**Prečo nie jeden z 300 RF stromov?** Každý strom v RF je zámerne
+**nedokonalý** — trénovaný na bootstrap vzorke (~63 % trénsetu) a vidí
+iba `mtry = √p` features na každom splite. Vytiahnuť jeden a ukázať
+ho by nič neznamenalo; priemer 300 takýchto stromov je niečo iné ako
+každý z nich samostatne. Surrogate strom naopak vidí **celý trénset a
+všetky features**, takže je najvernejšou možnou aproximáciou
+ensemble-u v tvare jedného stromu.
+
+### Čo sme ladili a prečo
+
+Tri parametre `rpart.control`, každý s inou rolou:
+
+| Parameter | Rozsah | Rola |
+|-----------|--------|------|
+| `maxdepth` | 3..7 | **Hlavný trade-off**: hĺbka stromu = koľko úrovní rozhodovania. Plytký strom = ľahko čitateľný, ale kopíruje RF zle. Hlbší strom = vernejší, ale stráca prehľadnosť a začína sa učiť na šume. |
+| `cp` (complexity parameter) | 1e-4, 1e-3, 1e-2 | Prah pre akceptovanie nového splitu. Čím nižšie, tým viac splitov (sub-tree pruning). `1e-4` je permisívne — nechá `maxdepth` byť reálnym limitom, nie `cp`. |
+| `minbucket` | 10, 30, 100 | Minimálna veľkosť listu. Brzdí pretrénovanie na náhodných odchýlkach v predikciách RF. `10` je liberálne, `100` je konzervatívne. |
+
+5 × 3 × 3 = 45 kombinácií na tier × 2 tiery = 90 stromov. `rpart` na
+24 000 riadkoch trvá ~1 s, takže celá grid search pod 2 minúty. Všetko
+cachované v `scenario_2/artifacts/surrogate_lexical.rds` a
+`surrogate_fulllite.rds`, takže druhý knit berie výsledky zo súboru.
+
+### Čo meriame — fidelity vs. accuracy
+
+- **Fidelity (ladíme toto):** `mean(predict(tree, test) == predict(rf, test))`.
+  Koľko predikcií stromu je rovnakých ako RF.
+- **Accuracy (reportujeme, ale neoptimalizujeme):** `mean(predict(tree, test) == truth)`.
+  Koľko predikcií stromu trafí pravdu.
+- **AUC stromu + Gap AUC**: koľko z AUC RF stratíme tým, že použijeme
+  jeden strom namiesto ensemble-u.
+
+**Zlatý stav:** `fidelity ≥ accuracy` — strom kopíruje RF vrátane
+prípadov, kedy sa RF mýli. To je to, čo chceme od vizualizácie
+modelu. Ak by nastalo naopak (accuracy > fidelity), znamenalo by to,
+že strom použil jednoduchšie pravidlo ako RF a **náhodou** trafil
+pravdu častejšie — červený prápor, že strom **nahrádza** RF, nie
+vizualizuje.
+
+### Ako prezentovať výsledky
+
+Tabuľka v §7.3 ukazuje fidelity saturačnú krivku per hĺbku. Kľúčové
+pozorovania pre obhajobu:
+
+- **Lexical:** fidelity typicky saturuje pri hĺbke 5-6 okolo 0.95-0.97.
+  Pod hĺbku 3 fidelity klesne pod 0.90 — strom nevie reprodukovať
+  druhú vrstvu interakcií (dĺžka URL × počet číslic × počet
+  subdomén). Nad hĺbku 6 sa krivka vyrovnáva — dodatočné splity sa
+  zhodujú s vlastným šumom, nie so správaním RF.
+- **FullLite:** fidelity ≥ 0.99 pre akúkoľvek rozumnú hĺbku. Úloha je
+  na FullLite takmer triviálne separovateľná, takže aj plytký strom
+  dokáže kopírovať RF skoro dokonale. Toto NIE JE nález o RF, je to
+  nález o úlohe samotnej.
+- **Gap AUC:** aj pri fidelity 0.97 je AUC stromu o 0.01-0.03 nižšie
+  ako AUC RF — to je **daň za jeden strom miesto 300**. Ensemble
+  priemerovanie dáva RF hladšie hranice a lepšie kalibrované
+  pravdepodobnosti pri rozhodnej hranici.
+
+### Podobnosti a rozdiely medzi vizualizáciou a modelom
+
+**Podobnosti:**
+- Oba používajú **os-paralelné splity** (každé pravidlo má tvar
+  `feature > prah`).
+- **Root-splity surrogate stromov sedia s intuitívnou hierarchiou RF:**
+  - Na **Lexicali** je root `NoOfOtherSpecialCharsInURL < 3` a druhá
+    vrstva pokračuje cez `NoOfDegitsInURL`, `NoOfSubDomain`, `TLDLength`
+    a `CharContinuationRate` — klasický rebríček URL-lexikálnych
+    anomálií, ktorý by sme čakali aj od RF variable importance.
+  - Na **FullLite** sa root flipne na `HasSocialNet = 1` a horné tri
+    vrstvy sú **výlučne trust-tier binárky** (`IsHTTPS`,
+    `HasCopyrightInfo`, `HasDescription`, `HasSubmitButton`). URL-tier
+    features sa objavia až hlbšie, ako spresnenie listov. Toto
+    samotné je nález: akonáhle RF dostane trust-tier signály, tie
+    dominujú vrcholu rozhodovania a URL-text prvky sa stávajú iba
+    jemným doladením.
+- Oba sú non-parametrické (bez predpokladu o distribúcii dát).
+
+**Rozdiely:**
+- RF = 300 stromov × bootstrap × random feature subset → **hladké
+  priemerovanie** + zachytenie **interakcií medzi 3+ features**, ktoré
+  jeden strom fundamentálne nemôže vyjadriť.
+- Surrogate vidí celý trénset a všetky features → v jednom strome zachytí
+  **top-level rozhodnutia** RF, ale nie jemné doladenia z ensemble.
+- Interpretovateľnosť: strom ≈ 5-20 rozhodovacích pravidiel, ľudsky
+  čitateľný. RF ≈ 300 stromov × 100+ pravidiel, ľudsky nečitateľný.
+
+### Kľúčové otázky komisie
+
+**Otázka: Prečo neladíte surrogate na accuracy?**
+Lebo potom neodpovedám na zadanie. Zadanie hovorí *"which parameters
+you tuned to make the trees align as closely as possible with the
+**model behavior**"* → ladím na fidelity, lebo fidelity meria zhodu
+s modelom, nie s pravdou.
+
+**Otázka: Čo keby bola fidelity veľmi nízka, napr. 0.75?**
+Bolo by to samo osebe zistenie: RF v sebe nesie niečo, čo sa jedným
+stromom proste nevyjadrí — typicky interakcie medzi mnohými features,
+ktoré ensemble priemerovanie vie, ale rpart nie. Priznal by som to a
+uviedol to ako explicitný limit vizualizácie. Nesnažil by som sa to
+obísť hlbším stromom, lebo nad hĺbku 7 už strom overfituje na teacher
+predikcie.
+
+**Otázka: Prečo nie decision tree priamo na dátach (bez RF teacher)?**
+To by bol iný experiment — samostatný tree-based klasifikátor, nie
+vizualizácia RF. Fidelity by nebola definovaná (s čím by sa
+porovnávala?). Naše zadanie hovorí "align with model behavior", takže
+teacher musí byť model, ktorý vizualizujeme.
+
+**Otázka: Prečo `ntree = 300` pre teacher RF, keď hlavný §5.1 tiež
+používa 300?**
+Presne preto — teacher RF má byť identický režim ako v §5.1, aby bol
+surrogate verný ako ilustrácia modelu, ktorý sme v §5.1 porovnávali.
+Zdieľanie hyperparametrov je feature, nie bug.
+
+**Otázka: Prečo ste si vybrali rpart a nie napríklad ctree / conditional
+inference tree?**
+rpart je kanonická CART implementácia a je plne kompatibilný s
+rpart.plot na vizualizáciu. ctree by dal podobné výsledky (fidelity by
+bola v rámci šumu rovnaká), lebo teacher labels sú tie isté a oba
+algoritmy robia axis-aligned splity. Vybrali sme rpart kvôli
+jednoduchosti knitu a kvalitnému vizuálu.
+
+**Otázka: Čo je rpart.plot a prečo ste nepoužili base `plot.rpart`?**
+`rpart.plot::rpart.plot` je rozšírenie, ktoré farbí uzly podľa triedy
+a lepšie rozloží popisy. Base `plot.rpart + text.rpart` produkuje tiež
+graf, ale ťažko čitateľný. Pre obhajobu je dôležitý vizuálny dojem,
+preto sme zvolili rpart.plot (~30s inštalácia, pure R).
+
+**Otázka: Prečo je v §7.3 tabuľke fidelity pre `maxdepth = 7` vyššia,
+ako je fidelity zakresleného stromu v §7.4?**
+Pretože zakreslený strom **nie je** globálny víťaz fidelity — je to
+víťaz pod dodatočným obmedzením **≤ 15 listov**. Strom s 37 listmi
+(`maxdepth = 7` na Lexicali) má fidelity o ~0.009 vyššiu (0.967 vs.
+0.958), ale je vizuálne neprečítateľný — zlepené uzly, popisy sa
+prekrývajú, na snímke sa z toho nedá nič vyčítať. Celá Task 4 sa pýta
+na **vizualizáciu** modelu, takže strom, ktorý sa nedá vizuálne
+prečítať, úlohu nespĺňa — aj keby numericky kopíroval RF najvernejšie.
+Tabuľka v §7.3 je tam práve preto, aby bolo vidno aj strop (tým
+obhajujeme, že ladenie bolo poctivé) aj to, koľko fidelity stojí
+readability cap. Reálne čísla: **~0.009 na Lexicali, ~0.003 na
+FullLite** — posledné dve hĺbkové vrstvy pridávajú takmer žiadnu
+fidelity, len listy.
+
+**Otázka: Prečo je na FullLite obrázku root `HasSocialNet`, a nie
+nejaký URL-string feature ako na Lexicali?**
+Lebo FullLite má navyše 21 trust- a behavior-tier príznakov, a RF
+(rovnako ako surrogate) správne zistí, že tieto page-level flagy sú
+**silnejšie** diskriminátory ako URL-string počty. Root-split cez
+`HasSocialNet` hneď rozdelí 60 % legitímnych URL (majú sociálne linky)
+a 40 % prevažne phishingových (často nemajú). Horné tri vrstvy stromu
+sú potom dominované ďalšími trust/behavior binárkami (`IsHTTPS`,
+`HasCopyrightInfo`, `HasDescription`, `HasSubmitButton`). URL-tier
+counts (`NoOfOtherSpecialCharsInURL`, `NoOfDegitsInURL`) sa objavujú
+až v 4.–5. vrstve, ako spresnenie prípadov, ktoré trust flagy samy
+nedoriešili. **Toto je samo osebe ilustrácia toho, čo RF na FullLite
+"považuje za dôležité":** trust-tier dominuje vrcholu logiky, URL-tier
+je refinement. Keby bol root `URLLength`, bola by to podozrivá
+disonancia s tým, čo vidíme v §6.1 (kde FullLite RF bije čistý Lexical
+RF o ~0.03 AUC — práve vďaka týmto trust-tier signálom).
+
+**Otázka: Prečo práve 15 listov ako strop, a nie napr. 10 alebo 20?**
+15 listov je empiricky najviac, čo sa dá čitateľne zmestiť na jednu
+snímku 16:9 pri rpart.plot default layoute. 10 je príliš úsporné a
+stráca veľkú časť fidelity (Lexical d=4 → fidelity 0.95, gap k modelu
+skokovo rastie). 20 už má nečitateľné listové popisy. Cap 15 je
+kompromis medzi "vidieť každé pravidlo" a "udržať fidelity nad 0.95".
+
+---
+
 ## 7. Interpretácia výsledkov
 
 ### Hlavné pozorovania

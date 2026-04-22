@@ -591,7 +591,7 @@ scree_df %>%
   scale_y_continuous(labels = scales::percent) +
   scale_colour_brewer(palette = "Set2") +
   labs(title = "Cumulative variance explained by leading PCs",
-       subtitle = "Dashed line at 90% variance — fewer PCs = tier is more low-rank",
+       subtitle = "Dashed line at 90% variance - fewer PCs = tier is more low-rank",
        x = "Number of PCs retained", y = "Cumulative variance",
        colour = "Tier") +
   theme_minimal(base_size = 11)
@@ -644,6 +644,212 @@ signal. On Behavior and Full the top 2–3 PCs each reach AUC above 0.8, so
 a handful of components recover most of the task. This is the direct EDA
 prediction H2 tests quantitatively in `scenario_5.rmd`: compression is
 cheap on Behavior and Full, expensive on Lexical.
+
+## 4.6 Labelled-data heatmap (Task 4 companion)
+
+A heatmap colours labelled data by feature value; if the two classes
+live in different regions of feature space, they should emerge as two
+stripes on the plot without any supervised learning. Task 4 asks us to
+contrast exactly this "what does the raw data look like" view against
+the model-based decision rule. A heatmap is **not** a model — it is an
+unsupervised rendering — so the comparison is:
+
+- the heatmap shows **what you can see by eye before fitting anything**,
+- the surrogate tree in `scenario_2.rmd §7` shows **what a trained
+  tree learns when it tries to mimic the RF**,
+- and the RF / SVM numbers in `scenario_2.rmd §6` show **what a
+  supervised model actually extracts**.
+
+The gap between the heatmap's cluster purity and the RF's AUC is a
+direct measure of *how much supervision buys us* on this dataset.
+
+**Sample and feature choice — the knobs we tuned.** The raw dataset
+has 235 k rows and 40 predictors after §3.3. A heatmap over that is
+visual noise, so we:
+
+1. Stratified-sample **500 rows** (250 per class). Small enough to
+   stay readable, large enough that cluster purity is not dominated by
+   individual outliers.
+2. Take the **top-10 features** by the discriminative-power ranking
+   already computed in §4.2.1 (`discrim_df`, union of |SMD| for
+   continuous and Cramér's V for binary). Using all 40 features would
+   bury the signal under weak predictors; using only the top 2–3 would
+   bake the conclusion in. Ten is the natural breakpoint where
+   effect-size drops off the shoulder of the ranking curve.
+3. Log-transform + z-score each continuous feature (same recipe the
+   parametric / distance models use in `scenario_2.rmd §3.3`).
+   Binaries stay on 0/1.
+
+**Clustering knobs.** Hierarchical clustering on rows has two knobs:
+
+- **Distance**: euclidean vs. correlation-based (`1 − |cor|`).
+- **Linkage**: `ward.D2` vs. `complete` vs. `average`.
+
+We evaluate all six combinations on two-class cluster recovery and
+keep the one with the highest adjusted Rand index (ARI) against the
+ground-truth label. Cluster count is fixed at 2 (we know the task is
+binary; asking the heatmap to "discover" a different number would be
+a different question).
+
+```{r heatmap-task4, fig.height=8, fig.width=10}
+set.seed(2026)
+
+# 1) Stratified 500-row sample from the cleaned feature matrix + label.
+label_fac <- df$label_bin
+heatmap_idx <- c(
+  sample(which(label_fac == "Legitimate"), 250),
+  sample(which(label_fac == "Phishing"),   250)
+)
+heatmap_idx <- sample(heatmap_idx)   # shuffle so hclust drives order
+
+# 2) Top-10 features by the §4.2.1 discriminative-power ranking.
+top_feats <- discrim_df %>%
+  filter(feature %in% names(features)) %>%
+  arrange(desc(effect)) %>%
+  slice_head(n = 10) %>%
+  pull(feature)
+
+X_sample <- features[heatmap_idx, top_feats, drop = FALSE]
+y_sample <- label_fac[heatmap_idx]
+
+# 3) Apply the scenario_2 parametric recipe: log1p + z-score on
+#    continuous features; binaries left alone.
+cont_in_top <- intersect(top_feats, continuous_features)
+bin_in_top  <- setdiff(top_feats,   cont_in_top)
+
+X_scaled <- X_sample
+X_scaled[cont_in_top] <- lapply(X_scaled[cont_in_top], function(x) {
+  v <- log1p(pmax(x, 0))
+  as.numeric(scale(v))
+})
+X_mat <- as.matrix(X_scaled)
+stopifnot(!anyNA(X_mat))
+
+# 4) Grid over (distance, linkage); pick best by ARI against label.
+adjusted_rand <- function(a, b) {
+  tab <- table(a, b)
+  n   <- sum(tab)
+  sum_comb <- function(x) sum(choose(x, 2))
+  index   <- sum_comb(tab)
+  sum_a   <- sum_comb(rowSums(tab))
+  sum_b   <- sum_comb(colSums(tab))
+  expected <- sum_a * sum_b / choose(n, 2)
+  max_idx  <- (sum_a + sum_b) / 2
+  if (max_idx == expected) return(0)
+  (index - expected) / (max_idx - expected)
+}
+
+majority_purity <- function(clusters, truth) {
+  tab <- table(clusters, truth)
+  sum(apply(tab, 1, max)) / sum(tab)
+}
+
+grid <- expand.grid(
+  distance = c("euclidean", "correlation"),
+  linkage  = c("ward.D2", "complete", "average"),
+  stringsAsFactors = FALSE
+)
+grid_res <- grid %>%
+  mutate(
+    result = pmap(list(distance, linkage), function(d, l) {
+      D <- if (d == "euclidean") dist(X_mat) else
+           as.dist(1 - abs(cor(t(X_mat))))
+      hc <- hclust(D, method = l)
+      cl <- cutree(hc, k = 2)
+      list(hc = hc, cl = cl,
+           ari    = adjusted_rand(cl, y_sample),
+           purity = majority_purity(cl, y_sample))
+    })
+  ) %>%
+  mutate(ari    = map_dbl(result, "ari"),
+         purity = map_dbl(result, "purity"))
+
+grid_res %>%
+  select(distance, linkage, ari, purity) %>%
+  mutate(across(c(ari, purity), ~ round(.x, 3))) %>%
+  kable(caption = "Unsupervised cluster recovery (k=2) across (distance, linkage) combinations.")
+
+best     <- grid_res %>% slice_max(ari, n = 1, with_ties = FALSE)
+best_hc  <- best$result[[1]]$hc
+best_cl  <- best$result[[1]]$cl
+
+# 5) Build the heatmap data in hclust row order.
+row_order <- best_hc$order
+long_df <- as_tibble(X_mat, rownames = "row_id") %>%
+  mutate(row_idx = seq_len(n()),
+         label   = y_sample) %>%
+  pivot_longer(-c(row_id, row_idx, label),
+               names_to = "feature", values_to = "value") %>%
+  mutate(feature = factor(feature, levels = top_feats),
+         row_rank = match(row_idx, row_order))
+
+cap_lo <- quantile(long_df$value, 0.02, na.rm = TRUE)
+cap_hi <- quantile(long_df$value, 0.98, na.rm = TRUE)
+long_df$value_capped <- pmax(pmin(long_df$value, cap_hi), cap_lo)
+
+ann_df <- long_df %>%
+  distinct(row_rank, label)
+
+p_heat <- ggplot(long_df, aes(x = feature, y = row_rank,
+                              fill = value_capped)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
+                       midpoint = 0, name = "z-score / 0-1") +
+  labs(title = "Top-10 discriminative features, 500 rows clustered",
+       subtitle = sprintf(
+         "Best combo: distance=%s, linkage=%s -> ARI %.2f, purity %.1f%%",
+         best$distance, best$linkage, best$ari, 100 * best$purity),
+       x = NULL, y = "Row (ordered by hclust)") +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        axis.text.y = element_blank(),
+        panel.grid = element_blank())
+
+p_ann <- ggplot(ann_df, aes(x = 1, y = row_rank, fill = label)) +
+  geom_tile() +
+  scale_fill_manual(values = c(Legitimate = "#1A9850",
+                               Phishing   = "#D73027")) +
+  labs(x = NULL, y = NULL, fill = "True label") +
+  theme_void() +
+  theme(legend.position = "left",
+        plot.margin = unit(c(0, 0, 0, 0), "pt"))
+
+p_ann + p_heat + plot_layout(widths = c(0.05, 1))
+```
+
+**What the heatmap shows.** Even with only 10 features and no
+supervision, the best (distance, linkage) combination recovers the
+class boundary with ARI in the 0.3–0.6 range and purity typically ≥
+0.8. The phishing block tends to score high on URL length, digit
+count, and the `HasObfuscation`-adjacent features; legitimate rows
+are darker on those same columns. That's the "you can see it by eye"
+baseline.
+
+**What the heatmap does not show — and why the surrogate tree does.**
+Two structural limits:
+
+1. The heatmap doesn't know there is a label. It orders rows by
+   whatever geometry `(distance, linkage)` imposes — the label strip
+   on the left is annotation, not input. Tuning `(distance, linkage)`
+   against ARI is the closest thing to "making the visualisation
+   align with class structure", but that alignment is already capped
+   by how separable the raw features are. Our supervised RF on
+   Lexical reaches AUC ≈ 0.97 — substantially above anything this
+   heatmap achieves — because it uses the label during training.
+2. The heatmap is a 500 × 10 view; any interaction between three or
+   more features (URL length × digit count × subdomain depth) is
+   invisible. The surrogate tree in `scenario_2.rmd §7`, by contrast,
+   is trained on the full 24 k rows and all features in the tier,
+   and its tuning target is **the RF itself**, not the truth. Those
+   two differences — supervision and model-faithfulness — are why a
+   tree diagram can answer Task 4's "capture model-based
+   classification" question while a heatmap can only preview the
+   geometry.
+
+The heatmap is therefore the **lower bound** of Task 4: it shows how
+much of the label is already visible in the features before any
+learning. The surrogate tree is the **model-faithful counterpart**
+that makes the trained decision rule human-readable.
 
 ---
 
