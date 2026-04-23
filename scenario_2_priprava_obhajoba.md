@@ -991,7 +991,7 @@ na ňu padali — test bol pri malom k prakticky nemý.)
 | Tier | diff (np − p) | Wilcoxon p | Interpretácia |
 |------|--------------:|-----------:|---------------|
 | **Lexical** | **+0.102** | 0.00098 | na podlahe — každý z 10 foldov ide v smere H1, efekt masívny |
-| Trust | +0.0015 | **0.019** | **mimo podlahy** — test korektne zachytil, že signál je slabý |
+| Trust | +0.0019 | **0.019** | **mimo podlahy** — test korektne zachytil, že signál je slabý |
 | Behavior | +0.004 | 0.00098 | na podlahe, ale diff je malý (~0.4 % AUC) — štatisticky konzistentné, prakticky bezvýznamné |
 | FullLite | +0.0003 | 0.00098 | na podlahe, diff ~0 — saturované |
 
@@ -1032,7 +1032,7 @@ ako LDA zmiešavajúca variability oboch tried.
 
 **2. Na Trust úrovni: H1 konzistentný, ale prakticky zanedbateľný**
 - Všetkých 6 modelov: 0.917–0.932.
-- Diff ≈ +0.0015 → pri 10-fold CV Wilcoxon **p = 0.019** (nad podlahou
+- Diff ≈ +0.0019 → pri 10-fold CV Wilcoxon **p = 0.019** (nad podlahou
   1/1024). Smer efektu je konzistentný naprieč foldmi, ale amplitúda
   je zanedbateľná.
 - Dôvod: 7 príznakov, prevažne binárnych. Nelineárne interakcie medzi
@@ -1072,7 +1072,7 @@ ako LDA zmiešavajúca variability oboch tried.
 | Úroveň | diff (neparam − param AUC) | Veľkosť |
 |--------|---------------------------:|---------|
 | Lexical | **+0.102** | obrovský |
-| Trust | +0.0015 | zanedbateľný |
+| Trust | +0.0019 | zanedbateľný |
 | Behavior | +0.004 | malý, merateľný |
 | FullLite | +0.0003 | saturované |
 

@@ -269,8 +269,7 @@ data to a tier's features, runs 10-fold CV using the shared `fold_idx`,
 and returns per-fold AUCs plus test-set metrics.
 
 ```{r fit-utility}
-fit_one_tier <- function(tier_features, data_train, data_test,
-                         method, tuneGrid = NULL, ...) {
+fit_one_tier <- function(tier_features, data_train, data_test, method, tuneGrid = NULL, ...) {
   tr <- data_train[, c("label", tier_features)]
   te <- data_test[,  c("label", tier_features)]
 
@@ -430,7 +429,7 @@ res_lda <- run_or_load("lda", function() {
 print_tier_summary(res_lda)
 ```
 
-On **Lexical** LDA posts AUC 0.930 —
+On **Lexical** LDA posts AUC 0.931 —
 visibly better than LR — yet the threshold-0.5 operating point is
 *worse*: Sens 0.971 / Spec 0.688, i.e. ~31 % of legitimate URLs
 blocked. The Gaussian class-conditional assumption pushes the decision
@@ -467,7 +466,7 @@ res_nb <- run_or_load("nb", function() {
 print_tier_summary(res_nb)
 ```
 
-NB is the textbook case of AUC hiding
+NB is the case of AUC hiding
 operating-point pathology. On **Lexical** AUC is 0.849 — not terrible
 — but Sens 0.999 / Spec **0.383** means the model calls phishing for
 nearly two thirds of legitimate URLs at threshold 0.5. This is the
@@ -547,7 +546,7 @@ print_tier_summary(res_svm)
 SVM-RBF is the only model that is
 **proxy-deployable at threshold 0.5 without recalibration on every
 family**. On **Lexical** it posts AUC
-0.995 with Sens 0.985 / Spec 0.983 — a ~1.7 % miss rate and ~1.7 %
+0.995 with Sens 0.985 / Spec 0.983 — a ~1.5 % miss rate and ~1.7 %
 false-block rate, both directions symmetric. On Trust, Behavior and
 FullLite the same symmetric profile holds.
 Translated back to the EDA §1.1 scenario, this is what "a
@@ -826,8 +825,8 @@ and one that silently lets phish through.
 AUC treats these as equivalent; the deployment doesn't.
 
 **Practical takeaway.** A URL-only first-line phishing detector gains a
-lot from a non-parametric model (SVM-RBF or KNN gain ~0.10 AUC over
-LR / NB on Lexical, and SVM additionally keeps Precision and Recall
+lot from a non-parametric model (SVM-RBF and KNN gain ~0.13–0.15 AUC
+over LR / NB on Lexical, and SVM additionally keeps Precision and Recall
 balanced at ~0.98). Once the system can afford to fetch the page and
 compute Behavior-level features, the AUC choice of model becomes almost
 irrelevant and simpler, more explainable models (LR, LDA) are good

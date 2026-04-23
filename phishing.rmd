@@ -79,23 +79,45 @@ near-leakers (`LineOfCode`, `NoOfJS`, `NoOfCSS`, `NoOfImage`,
 stripped because they push Full to AUC ≈ 1.0 and hide every contrast H1
 is trying to measure.
 
-## H2 (Scenario 5) — The cost of dimensionality reduction is not the same on every family
+## H2 (Scenario 5) — On FullLite, a linear projection preserves the AUC ceiling, but a supervised axis does it in one dimension while an unsupervised basis needs many
 
-Every feature family can be compressed into a few new axes via PCA
-(unsupervised) or LDA projection (supervised). We claim the cost of that
-compression is not uniform across families.
+Scenario 5 asks the complementary question to Scenario 2: instead of
+varying which columns the model sees (the tier), we keep the tier fixed
+and replace the columns themselves with a smaller set of derived
+coordinates. FullLite (34 predictors) is the only tier with enough
+dimensions for "reduction" to be a meaningful question — Lexical (13),
+Trust (7) and Behavior (14) are too small to justify projection, so H2
+is tested on FullLite exclusively.
 
-On the URL-only (Lexical) tier it is high, because the phishing signal lives in interactions between features and a linear projection loses those interactions; on Behavior and FullLite it approaches zero, because the signal is additive enough that any sufficiently-large PC basis carries it.
+On FullLite the phishing signal is near-linearly separable (AUC ≈ 0.99
+in Scenario 2), so we expect a linear projection — PCA (unsupervised)
+or LDA (supervised) — to preserve the AUC ceiling. The non-trivial
+part of the claim is the asymmetry between the two projections:
+
+- **LDA** optimises class separation directly and, for a binary
+  problem, produces a single discriminant axis (LD1). If the two
+  classes are near-Gaussian along that axis, one coordinate should
+  already carry the full supervised signal.
+- **PCA** optimises variance, not separation. It needs strictly more
+  than one axis to match LDA-1, because variance directions and class
+  directions only coincide by accident.
+
+The cost of either projection is per-feature explainability: after
+projection, model coefficients read as per-component weights, not
+per-feature weights. A kernel PCA (RBF) at the same *k* as linear PCA
+is run as a sanity check — on FullLite we expect it to match, not
+beat, linear PCA, because the task is near-linearly separable.
 
 | # | Criterion | Threshold |
 |---|-----------|-----------|
-| C1 | AUC drop from raw Lexical to Lexical compressed into 3 PCs, best downstream model | **ΔAUC ≥ 0.05** |
-| C2 | AUC drop from raw FullLite to FullLite compressed into 10 PCs, same model | **ΔAUC ≤ 0.01** |
-| C3 | Gradient: drop(Lexical) > drop(FullLite) | **yes** |
+| C1 | AUC drop from raw FullLite to LDA-1 projection, best downstream model | **ΔAUC ≤ 0.01** |
+| C2 | AUC drop from raw FullLite to PCA-*k* (k = smallest index reaching ≥ 95 % cumulative variance), same model | **ΔAUC ≤ 0.01** |
+| C3 | Supervised-vs-unsupervised asymmetry: **k_pca > 1** (PCA needs more than one axis to match LDA-1) | **yes** |
 
 H2 is **supported** only if C1 **and** C2 hold on the same downstream
-classifier family. C3 turns the claim into a gradient parallel to H1's —
-the compression cost rises as the tier gets weaker.
+classifier family. C3 formalises the asymmetry — if PCA reaches the
+ceiling at k_pca = 1, there is no meaningful contrast between the
+supervised and unsupervised projection and H2's framing collapses.
 
 ---
 
@@ -417,8 +439,14 @@ per-feature signal. This supports H1's claim that the URL-only tier has less sig
 
 ## 4.3 H2 preparation
 
-H2 says the cost of linear dimensionality reduction differs sharply across
-families. A quicklook at multicollinearity tells us how much redundant dimensionality each family has to start with. If a family is already low-rank in variance, aggressive compression is cheap. If it has many independent directions of variance, compression is more expensive. The question is whether the class signal lives in those dominant variance directions or orthogonal to them.
+H2 claims that on **FullLite** a linear projection preserves AUC at
+small *k*. A quicklook at multicollinearity tells us how much redundant
+dimensionality FullLite has to start with — the more collinear the
+features, the fewer PCs we need to reach 95 % variance, and the stronger
+the case that PCA-*k* can preserve AUC at small *k*. Lexical sits inside
+FullLite, so the URL-length cluster below is the main source of
+collinearity FullLite inherits; we keep Trust and Behavior out of this
+panel because their features are largely binary and near-uncorrelated.
 
 ### 4.3.1 Lexical Correlation Matrix
 
@@ -484,10 +512,13 @@ vif_df %>%
 
 **Takeaway (H2):** `URLLength`, `NoOfLettersInURL` and `NoOfDegitsInURL`
 stay near-collinear because they measure overlapping properties of the
-same URL string. For H2 this means Lexical has far fewer independent
-directions of variance than it has features — PCA will compress it
-aggressively. The open question is whether the class signal lives in
-those dominant variance directions or orthogonal to them.
+same URL string. Because Lexical sits inside FullLite, FullLite inherits
+this collinearity bloc and therefore has fewer independent directions of
+variance than it has features. That is the precondition for C2: PCA can
+pack 95 % of FullLite's variance into a *k* well below 34. The open
+question the §4.5 scree and per-PC AUC answer is whether the class
+signal lives in those dominant variance directions or orthogonal to them
+— C2 needs both (enough variance *and* class signal in the top *k* PCs).
 
 
 ## 4.4 Skewness Assessment *(Scenario 2 preparation)*
@@ -541,15 +572,18 @@ with long outlier tails. This shapes our modeling choices:
 
 ## 4.5 H2 preparation — where the class signal lives across principal components
 
-§4.3 showed that Lexical has fewer independent directions of variance
-than it has features. That alone only tells us about variance — not
-whether any of those directions carry the *class* signal. For H2 the
-crucial question is whether the top few PCs of each family line up with
-phishing vs. legitimate separation. If they don't, any low-dimensional
-projection will drop detection accuracy. Two PCA-based diagnostics answer
-that: a scree plot (how many PCs each tier needs to capture most of its
-variance) and the univariate AUC of each leading PC (how much class
-signal sits along that direction).
+§4.3 showed that FullLite inherits a heavy collinearity bloc from the
+Lexical URL-length cluster, so it is low-rank in variance. That alone
+only tells us about variance — not whether the dominant variance
+directions carry the *class* signal. For H2 (C2) the crucial question
+is whether the top few PCs of **FullLite** line up with phishing vs.
+legitimate separation. If they don't, PCA-*k* will drop AUC even though
+it captures 95 % of the variance. We compute the same two diagnostics
+across all tiers (scree + per-PC AUC) to put FullLite's behaviour in
+context — the cross-tier comparison also explains *why* FullLite is the
+only meaningful tier to project: Trust and Behavior are too small to
+compress, and Lexical's 13 features split their variance and class
+signal across different axes.
 
 ### 4.5.1 Scree plot per tier
 
@@ -600,9 +634,12 @@ scree_df %>%
 Lexical reaches 90 % of its variance with 3–4 PCs — the URL-length
 cluster is doing most of the work. Trust spends all 7 directions because
 its features are binary and near-uncorrelated. Behavior and Full are
-spread out and need 10+ PCs to reach 90 %. That is the *variance*
-picture; it predicts that PCA compression on Lexical will look cheap.
-The class picture below tells a different story.
+spread out and need 10+ PCs to reach 90 %. FullLite sits closer to the
+Behavior/Full curve than to Lexical — it has enough independent
+variance directions to make "how many PCs do we need" a real question,
+and the 95 % variance cutoff that Scenario 5 uses for *k_pca* is
+expected to land somewhere in that 10–20 range. The class picture below
+tells us whether those axes are the right ones.
 
 ### 4.5.2 Class signal carried by each leading PC
 
@@ -636,14 +673,18 @@ pca_auc_df %>%
   theme(legend.position = "none")
 ```
 
-**Takeaway (H2):** On Lexical, PC1 captures almost all the variance but
-the class signal is smeared across several PCs with low individual AUC —
-variance directions and class directions do not line up. Trust has so few
-features that each PC carries a comparable share of the (already weak)
-signal. On Behavior and Full the top 2–3 PCs each reach AUC above 0.8, so
-a handful of components recover most of the task. This is the direct EDA
-prediction H2 tests quantitatively in `scenario_5.rmd`: compression is
-cheap on Behavior and Full, expensive on Lexical.
+**Takeaway (H2):** On Full (and by inheritance FullLite) the top 2–3
+PCs each reach AUC above 0.8, so a handful of components already
+recover most of the task and the remaining PCs fill in the residual
+signal. That is the direct EDA prediction for C2: PCA-*k* at 95 %
+variance should preserve FullLite's AUC within the 0.01 threshold. The
+Lexical panel — where PC1 captures almost all the variance but class
+signal is smeared across several low-AUC PCs — is shown as context for
+why Scenario 5 does not attempt projection on Lexical: variance and
+class directions do not line up there, so a 3-PC summary would drop
+AUC sharply. It also previews why, in §6 of `scenario_5.rmd`, KPCA is
+expected to match rather than beat linear PCA on FullLite — the
+non-linearities that KPCA could exploit live on Lexical, not here.
 
 ---
 
@@ -661,15 +702,16 @@ For H1 we therefore use the scenario_2 family layout: Lexical
 **FullLite** (34) = Lexical + Trust + reduced Behavior. H1 is tested
 primarily on the **URLOnly tier**, where the family contrast has the most
 room to show, and the family gradient (C3) is measured against **FullLite**,
-not Full. H2 is tested across the same families, because the cost of
-compression is what differs between them.
+not Full. H2 is tested on **FullLite only**, because it is the single
+tier with enough dimensions for projection to be a meaningful question
+— the cross-tier EDA in §4.5 is retained as context for that choice.
 
 ## 5.1 Implications for modeling scenarios
 
 | Finding | Scenario 2 implication (H1) | Scenario 5 implication (H2) |
 |---------|----------------------------|------------------------------|
-| Lexical SMD lowest + features must be combined | Largest parametric/non-parametric AUC gap expected on URLOnly | On Lexical the signal lives in feature combinations, so a linear projection to 3 PCs is expected to drop AUC sharply |
-| Heavy skewness in 19 of 22 continuous features | Log-transform + standardisation for LR/LDA; trees/RF unaffected | Apply the same log+standardise transform before PCA/LDA projection (both are scale-sensitive) |
-| URL-length cluster: VIF > 1000 and abs(r) > 0.84 | Use stable solvers / regularised LR for fairness | Lexical is low-rank in variance but the class signal is smeared across PCs — the strongest case for "compression is expensive here" |
-| Trust binary features: low intra-correlation | No special treatment | Trust spends all 7 PCs on variance; projection cannot shorten it without losing signal |
+| Lexical SMD lowest + features must be combined | Largest parametric/non-parametric AUC gap expected on URLOnly | Explains why Scenario 5 does not project Lexical: a linear 3-PC summary would drop AUC sharply, and KPCA's non-linear advantage also lives here, not on FullLite |
+| Heavy skewness in 19 of 22 continuous features | Log-transform + standardisation for LR/LDA; trees/RF unaffected | Apply the same log+standardise recipe before PCA / LDA / KPCA on FullLite (all three projections are scale-sensitive) |
+| URL-length cluster: VIF > 1000 and abs(r) > 0.84 | Use stable solvers / regularised LR for fairness | FullLite inherits this cluster, so it is low-rank in variance — PCA's *k_pca* at 95 % variance is expected to land well below 34 (C2 precondition) |
+| Top 2–3 PCs of Full each carry AUC > 0.8 (§4.5.2) | — | FullLite's dominant variance directions coincide with class-separation directions, so PCA-*k* should preserve AUC (C2) and LDA-1 should collapse the same signal into one axis (C1) |
 
