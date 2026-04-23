@@ -1,0 +1,687 @@
+# =============================================================================
+# Phishing Detection - Scenario 2 Shiny Application
+# Async fit via callr::r_bg() so the UI stays responsive AND can be cancelled.
+# Mirrors the workflow defined in `scenario_2.rmd`.
+# =============================================================================
+
+suppressPackageStartupMessages({
+  library(shiny)
+  library(tidyverse)
+  library(DT)
+  library(ggrepel)
+  library(shinyjs)
+  library(callr)
+})
+
+set.seed(2026)
+
+# Allow CSV uploads up to 200 MB (default Shiny limit is 5 MB).
+options(shiny.maxRequestSize = 200 * 1024^2)
+
+# Shared fit logic (also sourced by the background worker process).
+CORE_PATH <- normalizePath("fit_core.R")
+source(CORE_PATH)
+
+# -----------------------------------------------------------------------------
+# Persistence + background work directory
+# -----------------------------------------------------------------------------
+ARTIFACTS_DIR <- "artifacts"
+SESSION_FILE  <- file.path(ARTIFACTS_DIR, "app_session.rds")
+WORK_DIR      <- file.path(ARTIFACTS_DIR, "app_session")
+if (!dir.exists(ARTIFACTS_DIR)) dir.create(ARTIFACTS_DIR, showWarnings = FALSE)
+if (!dir.exists(WORK_DIR))      dir.create(WORK_DIR,      showWarnings = FALSE)
+
+save_session <- function(results) {
+  tryCatch(saveRDS(results, SESSION_FILE), error = function(e) NULL)
+}
+load_session <- function() {
+  if (file.exists(SESSION_FILE))
+    tryCatch(readRDS(SESSION_FILE), error = function(e) list())
+  else list()
+}
+clear_workdir <- function() {
+  files <- list.files(WORK_DIR, full.names = TRUE)
+  if (length(files)) unlink(files, force = TRUE)
+}
+
+# -----------------------------------------------------------------------------
+# UI
+# -----------------------------------------------------------------------------
+
+ui <- fluidPage(
+  useShinyjs(),
+  titlePanel("Phishing Detection - Scenario 2 (Parametric vs Non-parametric)"),
+
+  sidebarLayout(
+    sidebarPanel(
+      width = 4,
+
+      h4("1. Data"),
+      fileInput("csv_file", "Upload PhiUSIIL CSV (optional)",
+                accept = c(".csv")),
+      helpText("If empty, the app loads ",
+               code("PhiUSIIL_Phishing_URL_Dataset.csv"),
+               " from the working directory. Max upload: 200 MB."),
+      actionButton("load_btn", "Load & prepare data",
+                   icon = icon("download"),
+                   class = "btn-primary"),
+      br(), br(),
+      verbatimTextOutput("data_status"),
+
+      hr(),
+      h4("2. Splits"),
+      sliderInput("n_sub", "Stratified subsample size",
+                  min = 2000, max = 60000, value = 30000, step = 2000),
+      sliderInput("p_train", "Train share",
+                  min = 0.5, max = 0.9, value = 0.8, step = 0.05),
+      sliderInput("k_folds", "CV folds", min = 3, max = 10, value = 10),
+
+      hr(),
+      h4("3. Feature families (tiers)"),
+      checkboxInput("tier_all", strong("All (select every tier)"),
+                    value = TRUE),
+      checkboxGroupInput("tiers_sel", NULL,
+                         choices  = TIERS_ALL,
+                         selected = TIERS_ALL),
+
+      hr(),
+      h4("4. Models"),
+      checkboxGroupInput("models_sel", NULL,
+                         choices  = MODEL_CHOICES,
+                         selected = unname(MODEL_CHOICES)),
+      helpText("Unchecked models are hidden from all tabs immediately. ",
+               "Press Refit to (re)train the checked ones."),
+
+      hr(),
+      h4("5. Hyperparameters"),
+      tags$details(tags$summary("LogReg-Ridge"),
+        sliderInput("lr_alpha",  "alpha (0=ridge,1=lasso)",
+                    0, 1, 0, step = 0.05),
+        sliderInput("lr_lambda", "lambda",
+                    0, 1, 0.01, step = 0.005)
+      ),
+      tags$details(tags$summary("NaiveBayes"),
+        sliderInput("nb_fL",     "Laplace smoothing fL", 0, 5, 1, step = 0.5),
+        sliderInput("nb_adjust", "Kernel bandwidth adjust",
+                    0.5, 3, 1, step = 0.1)
+      ),
+      tags$details(tags$summary("RandomForest"),
+        sliderInput("rf_ntree", "ntree",  50, 800, 300, step = 50),
+        sliderInput("rf_mtry",  "mtry (capped at #features)",
+                    1, 20, 5, step = 1)
+      ),
+      tags$details(tags$summary("SVM-RBF"),
+        sliderInput("svm_C",     "Cost C",     0.1, 10, 1, step = 0.1),
+        sliderInput("svm_sigma", "RBF sigma", 0.01, 1, 0.1, step = 0.01)
+      ),
+      tags$details(tags$summary("KNN"),
+        sliderInput("knn_k", "k", 1, 75, 25, step = 2)
+      ),
+
+      hr(),
+      actionButton("refit_btn", "Refit selected models",
+                   icon = icon("play"),
+                   class = "btn-success btn-block"),
+      actionButton("cancel_btn", "Cancel running fit",
+                   icon = icon("stop"),
+                   class = "btn-warning btn-block",
+                   style = "margin-top:6px;"),
+      actionButton("clear_btn", "Clear cached results",
+                   icon = icon("trash"),
+                   class = "btn-outline-danger btn-block",
+                   style = "margin-top:6px;"),
+      helpText("Fit runs in a background R process - the UI stays responsive ",
+               "and you can hit Cancel anytime. Results persist across page ",
+               "refreshes (cached in artifacts/app_session.rds)."),
+      br(),
+      div(style = "padding:8px;background:#F4F8FB;border-left:3px solid #4C78A8;",
+          strong("Status:"), br(),
+          verbatimTextOutput("fit_status", placeholder = TRUE))
+    ),
+
+    mainPanel(
+      width = 8,
+      tabsetPanel(
+        id = "main_tabs",
+        tabPanel("Summary table",
+          br(),
+          DTOutput("summary_dt"),
+          helpText(strong("Full overview"),
+                   ": CV AUC (mean+/-SD across folds), Train vs Test AUC, ",
+                   "train-test Gap (overfit indicator), and threshold-0.5 ",
+                   "metrics. Sensitivity / Specificity highlighted - they ",
+                   "drive the corporate-proxy decision (cf. scenario_2.rmd S6.1.1).")
+        ),
+        tabPanel("AUC by tier",
+          br(),
+          plotOutput("auc_plot", height = "520px"),
+          helpText("Mean CV ROC across folds with +/- 1 SD error bars. ",
+                   "X-axis is zoomed to the data range so small differences ",
+                   "are visible.")
+        ),
+        tabPanel("Quality @ 0.5",
+          br(),
+          DTOutput("quality_dt"),
+          helpText(strong("Stripped-down view"),
+                   " of the Summary table: only the classification metrics ",
+                   "at the default 0.5 probability threshold (no AUC, no ",
+                   "training cost). Useful when you only care about the ",
+                   "operating point that would actually ship.")
+        ),
+        tabPanel("ROC curves",
+          br(),
+          plotOutput("roc_plot", height = "550px")
+        ),
+        tabPanel("Sens vs Spec",
+          br(),
+          plotOutput("sens_spec_plot", height = "550px"),
+          helpText("Top-right corner = ideal model (catches all phish AND ",
+                   "lets all legit through). Each point is one (model, tier) ",
+                   "combination at the default 0.5 threshold.")
+        ),
+        tabPanel("Wilcoxon (H1)",
+          br(),
+          helpText("Per-tier paired Wilcoxon (non-parametric > parametric) ",
+                   "across CV folds - needs >=1 model from each family selected."),
+          DTOutput("wilcox_dt")
+        ),
+        tabPanel("Data preview",
+          br(),
+          verbatimTextOutput("split_info"),
+          h5("Train head"),
+          DTOutput("train_head_dt")
+        )
+      )
+    )
+  )
+)
+
+# -----------------------------------------------------------------------------
+# Server
+# -----------------------------------------------------------------------------
+
+server <- function(input, output, session) {
+
+  rv <- reactiveValues(
+    df         = NULL,
+    splits     = NULL,
+    results    = load_session(),
+    last_err   = NULL,
+    fit_status = {
+      n0 <- length(load_session())
+      if (n0) sprintf("Loaded %d cached fit(s) from %s.", n0, SESSION_FILE)
+      else "No fitted models yet - press Refit."
+    },
+    is_fitting   = FALSE,
+    bg_proc      = NULL,
+    bg_total     = 0L,
+    bg_collected = character(0)  # absolute paths of res_*.rds already pulled
+  )
+
+  # ---- Tier <-> All sync ----------------------------------------------------
+  observeEvent(input$tier_all, {
+    if (isTRUE(input$tier_all)) {
+      updateCheckboxGroupInput(session, "tiers_sel", selected = TIERS_ALL)
+    }
+  })
+  observeEvent(input$tiers_sel, {
+    is_all <- setequal(input$tiers_sel, TIERS_ALL)
+    if (is_all != isTRUE(input$tier_all)) {
+      updateCheckboxInput(session, "tier_all", value = is_all)
+    }
+  }, ignoreNULL = FALSE)
+
+  # ---- Cache controls ------------------------------------------------------
+  observeEvent(input$clear_btn, {
+    rv$results    <- list()
+    rv$fit_status <- "Cache cleared. Press Refit to retrain."
+    save_session(list())
+    clear_workdir()
+    showNotification("Cleared cached fit results.", type = "message")
+  })
+
+  # ---- Data load -----------------------------------------------------------
+  observeEvent(input$load_btn, {
+    rv$last_err <- NULL
+    path <- if (!is.null(input$csv_file))
+      input$csv_file$datapath else default_dataset_path()
+    if (is.na(path) || !file.exists(path)) {
+      rv$last_err <- "Dataset CSV not found. Upload one or place it in the project root."
+      return()
+    }
+    withProgress(message = "Loading & cleaning dataset...", value = 0.3, {
+      rv$df <- load_and_clean(path)
+      incProgress(0.5, detail = sprintf("%d rows loaded", nrow(rv$df)))
+      rv$splits <- make_splits(rv$df, input$n_sub, input$p_train, input$k_folds)
+    })
+    rv$results <- list()
+    save_session(list()); clear_workdir()
+  })
+
+  observeEvent(list(input$n_sub, input$p_train, input$k_folds), {
+    if (is.null(rv$df)) return()
+    withProgress(message = "Re-splitting...", value = 0.5, {
+      rv$splits  <- make_splits(rv$df, input$n_sub, input$p_train, input$k_folds)
+      rv$results <- list()
+      save_session(list()); clear_workdir()
+    })
+  }, ignoreInit = TRUE)
+
+  output$data_status <- renderText({
+    if (!is.null(rv$last_err)) return(paste("ERROR:", rv$last_err))
+    if (is.null(rv$df))        return("No data loaded yet.")
+    sprintf("Loaded %d rows x %d cols (after EDA exclusions: %d predictors).",
+            nrow(rv$df), ncol(rv$df), ncol(rv$df) - 1)
+  })
+
+  output$split_info <- renderText({
+    s <- rv$splits
+    if (is.null(s)) return("Load data first.")
+    sprintf(paste(
+      "Train: %d rows", "Test: %d rows", "CV folds: %d",
+      "Continuous features: %d  |  Binary features: %d", sep = "\n"),
+      nrow(s$train_raw), nrow(s$test_raw), length(s$fold_idx),
+      length(s$continuous_features), length(s$binary_features))
+  })
+
+  output$train_head_dt <- renderDT({
+    s <- rv$splits
+    if (is.null(s)) return(NULL)
+    datatable(head(s$train_raw, 50), options = list(scrollX = TRUE, dom = "tip"))
+  })
+
+  # ---- REFIT (spawns background worker) ------------------------------------
+  observeEvent(input$refit_btn, {
+    if (isTRUE(rv$is_fitting)) {
+      showNotification("Already fitting - press Cancel first.", type = "warning")
+      return()
+    }
+    if (is.null(rv$splits)) {
+      showNotification("Load data first.", type = "warning")
+      return()
+    }
+    tiers_active  <- intersect(input$tiers_sel, TIERS_ALL)
+    models_active <- intersect(input$models_sel, unname(MODEL_CHOICES))
+    if (!length(tiers_active) || !length(models_active)) {
+      showNotification("Select at least one tier AND one model.", type = "warning")
+      return()
+    }
+
+    combos <- expand.grid(model = models_active, tier = tiers_active,
+                          stringsAsFactors = FALSE)
+    params <- list(
+      lr_alpha  = input$lr_alpha,  lr_lambda = input$lr_lambda,
+      nb_fL     = input$nb_fL,     nb_adjust = input$nb_adjust,
+      rf_ntree  = input$rf_ntree,  rf_mtry   = input$rf_mtry,
+      svm_C     = input$svm_C,     svm_sigma = input$svm_sigma,
+      knn_k     = input$knn_k
+    )
+
+    # Wipe stale per-combo result files so polling only picks up THIS run's.
+    clear_workdir()
+    saveRDS(
+      list(splits = rv$splits, combos = combos, params = params,
+           tiers_def = build_tiers()),
+      file.path(WORK_DIR, "inputs.rds")
+    )
+
+    # Spawn the background process. r_bg returns immediately.
+    proc <- callr::r_bg(
+      func = run_fits_bg,
+      args = list(work_dir  = normalizePath(WORK_DIR),
+                  core_path = CORE_PATH),
+      stdout = file.path(WORK_DIR, "stdout.log"),
+      stderr = file.path(WORK_DIR, "stderr.log"),
+      supervise = TRUE
+    )
+
+    rv$bg_proc      <- proc
+    rv$bg_total     <- nrow(combos)
+    rv$bg_collected <- character(0)
+    rv$is_fitting   <- TRUE
+    rv$fit_status   <- sprintf(
+      "Started background fit: 0/%d combos. UI stays responsive; press Cancel to stop.",
+      nrow(combos))
+
+    shinyjs::disable("refit_btn")
+    shinyjs::html("refit_btn",
+                  '<i class="fa fa-spinner fa-spin"></i> Fitting in background...')
+    showNotification(sprintf("Background fit started (%d combos).", nrow(combos)),
+                     type = "message")
+  })
+
+  # ---- CANCEL --------------------------------------------------------------
+  observeEvent(input$cancel_btn, {
+    if (!isTRUE(rv$is_fitting) || is.null(rv$bg_proc)) {
+      showNotification("Nothing to cancel.", type = "message")
+      return()
+    }
+    tryCatch(rv$bg_proc$kill(), error = function(e) NULL)
+    rv$is_fitting <- FALSE
+    rv$bg_proc    <- NULL
+    rv$fit_status <- sprintf(
+      "CANCELLED. Kept %d partial result(s) collected so far.",
+      length(rv$bg_collected))
+    save_session(reactiveValuesToList(rv)$results)
+    shinyjs::enable("refit_btn")
+    shinyjs::html("refit_btn",
+                  '<i class="fa fa-play"></i> Refit selected models')
+    showNotification("Background fit cancelled.", type = "warning")
+  })
+
+  # ---- POLLING: runs every 1.5s while a bg fit is alive --------------------
+  observe({
+    if (!isTRUE(rv$is_fitting)) return()
+    invalidateLater(1500, session)
+
+    proc <- rv$bg_proc
+    if (is.null(proc)) return()
+
+    # 1) Read progress file -------------------------------------------------
+    prog_file <- file.path(WORK_DIR, "progress.rds")
+    if (file.exists(prog_file)) {
+      prog <- tryCatch(readRDS(prog_file), error = function(e) NULL)
+      if (!is.null(prog)) {
+        elapsed <- round(as.numeric(difftime(prog$t_now, prog$t_start,
+                                             units = "secs")), 1)
+        rv$fit_status <- sprintf(
+          "Fitting %d/%d (%s). %.1fs elapsed. %d results collected.",
+          prog$i, prog$n, prog$current, elapsed, length(rv$bg_collected))
+      }
+    }
+
+    # 2) Pick up newly written per-combo result files ----------------------
+    res_files <- list.files(WORK_DIR, pattern = "^res_.*\\.rds$",
+                            full.names = TRUE)
+    new_keys <- character(0)
+    for (f in res_files) {
+      if (f %in% rv$bg_collected) next
+      payload <- tryCatch(readRDS(f), error = function(e) NULL)
+      if (is.null(payload)) next
+      key <- paste(payload$model, payload$tier, sep = "::")
+      if (is.list(payload$res) && !is.null(payload$res$error)) {
+        showNotification(sprintf("FAILED: %s / %s - %s",
+                                 payload$model, payload$tier,
+                                 payload$res$error),
+                         type = "error", duration = 10)
+      } else if (is.list(payload$res)) {
+        rv$results[[key]] <- payload$res
+        new_keys <- c(new_keys, key)
+      }
+      rv$bg_collected <- c(rv$bg_collected, f)
+    }
+    if (length(new_keys)) {
+      save_session(reactiveValuesToList(rv)$results)
+    }
+
+    # 3) Detect completion --------------------------------------------------
+    if (!proc$is_alive()) {
+      rv$is_fitting <- FALSE
+      rv$bg_proc    <- NULL
+      rv$fit_status <- sprintf(
+        "Done. Collected %d / %d combos. %d results in memory.",
+        length(rv$bg_collected), rv$bg_total, length(rv$results))
+      save_session(reactiveValuesToList(rv)$results)
+      shinyjs::enable("refit_btn")
+      shinyjs::html("refit_btn",
+                    '<i class="fa fa-play"></i> Refit selected models')
+      showNotification(sprintf("Refit finished (%d/%d).",
+                               length(rv$bg_collected), rv$bg_total),
+                       type = "message")
+    }
+  })
+
+  # ---- Outputs --------------------------------------------------------------
+  output$fit_status <- renderText({ rv$fit_status })
+
+  selected_model_labels <- reactive({
+    ids <- intersect(input$models_sel, unname(MODEL_CHOICES))
+    names(MODEL_CHOICES)[match(ids, MODEL_CHOICES)]
+  })
+
+  results_long <- reactive({
+    if (!length(rv$results)) return(NULL)
+    map_dfr(names(rv$results), function(key) {
+      r <- rv$results[[key]]
+      if (is.null(r)) return(NULL)
+      parts <- strsplit(key, "::", fixed = TRUE)[[1]]
+      m_id <- parts[1]; tier <- parts[2]
+      tibble(
+        model       = names(MODEL_CHOICES)[match(m_id, MODEL_CHOICES)],
+        model_id    = m_id,
+        family      = MODEL_FAMILY[[m_id]],
+        tier        = tier,
+        cv_auc_mean = mean(r$cv_per_fold$ROC),
+        cv_auc_sd   = sd(r$cv_per_fold$ROC),
+        train_auc   = r$train_auc,
+        test_auc    = r$test_auc,
+        gap         = r$train_auc - r$test_auc,
+        accuracy    = r$test_acc,
+        f1          = r$test_f1,
+        precision   = r$test_prec,
+        sensitivity = r$test_sens,
+        specificity = r$test_spec,
+        train_secs  = r$train_secs
+      )
+    }) %>%
+      filter(tier %in% input$tiers_sel,
+             model %in% selected_model_labels()) %>%
+      mutate(tier = factor(tier, levels = TIERS_ALL)) %>%
+      arrange(tier, family, desc(cv_auc_mean))
+  })
+
+  folds_long <- reactive({
+    if (!length(rv$results)) return(NULL)
+    map_dfr(names(rv$results), function(key) {
+      r <- rv$results[[key]]
+      if (is.null(r)) return(NULL)
+      parts <- strsplit(key, "::", fixed = TRUE)[[1]]
+      m_id <- parts[1]; tier <- parts[2]
+      r$cv_per_fold %>%
+        transmute(
+          model    = names(MODEL_CHOICES)[match(m_id, MODEL_CHOICES)],
+          family   = MODEL_FAMILY[[m_id]],
+          tier     = tier,
+          fold     = Resample,
+          auc      = ROC
+        )
+    }) %>%
+      filter(tier %in% input$tiers_sel,
+             model %in% selected_model_labels()) %>%
+      mutate(tier = factor(tier, levels = TIERS_ALL))
+  })
+
+  empty_table <- function(rv_results) {
+    msg <- if (!length(rv_results))
+      "No fitted models yet - press Refit."
+    else
+      "No results match current tier/model filter."
+    datatable(data.frame(Note = msg),
+              options = list(dom = "t"), rownames = FALSE)
+  }
+
+  output$summary_dt <- renderDT({
+    d <- results_long()
+    if (is.null(d) || !nrow(d)) return(empty_table(rv$results))
+    d %>%
+      transmute(Model = model, Family = family, Tier = tier,
+                `CV AUC mean` = round(cv_auc_mean, 4),
+                `CV AUC sd`   = round(cv_auc_sd,   4),
+                `Train AUC`   = round(train_auc,   4),
+                `Test AUC`    = round(test_auc,    4),
+                Gap           = round(gap,         4),
+                Accuracy      = round(accuracy,    4),
+                F1            = round(f1,          4),
+                Sensitivity   = round(sensitivity, 4),
+                Specificity   = round(specificity, 4),
+                `Train (s)`   = round(train_secs,  1)) %>%
+      datatable(options = list(pageLength = 25, dom = "tip", scrollX = TRUE),
+                rownames = FALSE) %>%
+      formatStyle(c("Sensitivity", "Specificity"),
+                  fontWeight = "bold",
+                  backgroundColor = "#FFF7E6")
+  })
+
+  output$quality_dt <- renderDT({
+    d <- results_long()
+    if (is.null(d) || !nrow(d)) return(empty_table(rv$results))
+    d %>%
+      transmute(Model = model, Family = family, Tier = tier,
+                Accuracy    = round(accuracy,    4),
+                F1          = round(f1,          4),
+                Precision   = round(precision,   4),
+                Sensitivity = round(sensitivity, 4),
+                Specificity = round(specificity, 4)) %>%
+      datatable(options = list(pageLength = 25, dom = "tip"),
+                rownames = FALSE)
+  })
+
+  output$auc_plot <- renderPlot({
+    d <- results_long()
+    if (is.null(d) || !nrow(d)) return(NULL)
+
+    d <- d %>%
+      group_by(tier) %>%
+      mutate(model = forcats::fct_reorder(model, cv_auc_mean)) %>%
+      ungroup()
+
+    family_palette <- c("parametric"     = "#4C78A8",
+                        "non-parametric" = "#E45756")
+    x_min <- max(0.4, min(d$cv_auc_mean - d$cv_auc_sd, na.rm = TRUE) - 0.01)
+
+    ggplot(d, aes(x = cv_auc_mean, y = model, colour = family)) +
+      geom_errorbarh(aes(xmin = pmax(cv_auc_mean - cv_auc_sd, 0),
+                         xmax = pmin(cv_auc_mean + cv_auc_sd, 1)),
+                     height = 0.25, linewidth = 0.6) +
+      geom_point(size = 3.5) +
+      geom_text(aes(label = sprintf("%.4f", cv_auc_mean)),
+                hjust = -0.2, size = 3.2, colour = "grey25",
+                show.legend = FALSE) +
+      scale_colour_manual(values = family_palette) +
+      facet_wrap(~ tier, ncol = 2, scales = "free_y") +
+      coord_cartesian(xlim = c(x_min, 1.01)) +
+      labs(x = "CV ROC (mean +/- SD across folds)",
+           y = NULL, colour = "Family",
+           title = "Per-tier CV AUC, models ranked within each tier",
+           subtitle = "X-axis zoomed to data range so tight differences stay visible") +
+      theme_minimal(base_size = 13) +
+      theme(panel.grid.major.y = element_blank(),
+            strip.text = element_text(face = "bold", hjust = 0),
+            legend.position = "top")
+  })
+
+  output$roc_plot <- renderPlot({
+    if (!length(rv$results)) return(NULL)
+    sel_models <- selected_model_labels()
+    pts <- map_dfr(names(rv$results), function(key) {
+      r <- rv$results[[key]]
+      if (is.null(r)) return(NULL)
+      parts <- strsplit(key, "::", fixed = TRUE)[[1]]
+      m_id <- parts[1]; tier <- parts[2]
+      r$roc_points %>%
+        mutate(model = names(MODEL_CHOICES)[match(m_id, MODEL_CHOICES)],
+               tier  = tier)
+    }) %>%
+      filter(tier %in% input$tiers_sel,
+             model %in% sel_models) %>%
+      mutate(tier = factor(tier, levels = TIERS_ALL))
+
+    if (!nrow(pts)) return(NULL)
+
+    auc_lab <- results_long() %>%
+      transmute(tier, model,
+                lab = sprintf("%-12s %.4f", model, test_auc)) %>%
+      group_by(tier) %>%
+      summarise(text = paste(lab, collapse = "\n"), .groups = "drop")
+
+    ggplot(pts, aes(fpr, tpr, colour = model)) +
+      geom_abline(slope = 1, intercept = 0,
+                  linetype = "dashed", colour = "grey70") +
+      geom_line(linewidth = 0.8) +
+      geom_text(data = auc_lab,
+                aes(x = 0.55, y = 0.18, label = text),
+                inherit.aes = FALSE, hjust = 0, vjust = 0,
+                family = "mono", size = 3.2, colour = "grey25") +
+      scale_x_continuous(breaks = c(0, 0.05, 0.1, 0.25, 0.5, 1)) +
+      facet_wrap(~ tier, scales = "fixed") +
+      coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+      labs(x = "False positive rate (1 - Specificity)",
+           y = "True positive rate (Sensitivity)",
+           colour = "Model",
+           title = "Held-out test ROC curves",
+           subtitle = "Numbers = test-set AUC per model.") +
+      theme_minimal(base_size = 13) +
+      theme(strip.text = element_text(face = "bold"))
+  })
+
+  output$wilcox_dt <- renderDT({
+    d <- folds_long()
+    if (is.null(d) || !nrow(d)) return(NULL)
+    families_present <- unique(d$family)
+    if (length(families_present) < 2) {
+      return(datatable(data.frame(
+        Note = "Need at least one parametric AND one non-parametric model fitted."
+      ), options = list(dom = "t"), rownames = FALSE))
+    }
+    res <- d %>%
+      group_by(tier, fold, family) %>%
+      summarise(auc = mean(auc), .groups = "drop") %>%
+      pivot_wider(names_from = family, values_from = auc) %>%
+      group_by(tier) %>%
+      summarise(
+        mean_param   = mean(parametric, na.rm = TRUE),
+        mean_nonparm = mean(`non-parametric`, na.rm = TRUE),
+        diff         = mean(`non-parametric` - parametric, na.rm = TRUE),
+        wilcox_p     = tryCatch(
+          wilcox.test(`non-parametric`, parametric, paired = TRUE,
+                      alternative = "greater")$p.value,
+          error = function(e) NA_real_),
+        .groups = "drop"
+      ) %>%
+      mutate(across(c(mean_param, mean_nonparm, diff), ~ round(.x, 4)),
+             wilcox_p = signif(wilcox_p, 3))
+    datatable(res, options = list(dom = "t"), rownames = FALSE)
+  })
+
+  output$sens_spec_plot <- renderPlot({
+    d <- results_long()
+    if (is.null(d) || !nrow(d)) return(NULL)
+    tier_palette <- c("Lexical"  = "#E45756",
+                      "Trust"    = "#F58518",
+                      "Behavior" = "#54A24B",
+                      "FullLite" = "#4C78A8")
+    ggplot(d, aes(x = specificity, y = sensitivity,
+                  colour = tier, shape = family)) +
+      geom_hline(yintercept = 0.95, linetype = "dotted", colour = "grey60") +
+      geom_vline(xintercept = 0.95, linetype = "dotted", colour = "grey60") +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+                  colour = "grey80") +
+      geom_point(size = 4, alpha = 0.9, stroke = 1.2) +
+      ggrepel::geom_text_repel(aes(label = model),
+                               size = 3.3, max.overlaps = 50,
+                               box.padding = 0.4, show.legend = FALSE) +
+      scale_colour_manual(values = tier_palette, drop = FALSE) +
+      scale_shape_manual(values = c("parametric" = 16,
+                                    "non-parametric" = 17)) +
+      coord_cartesian(xlim = c(0.3, 1.01), ylim = c(0.3, 1.01)) +
+      labs(x = "Specificity (legit not blocked)",
+           y = "Sensitivity (phish caught)",
+           colour = "Tier", shape = "Family",
+           title = "Operating point at threshold 0.5",
+           subtitle = "Dotted lines = 95% target on each axis; dashed line = symmetry") +
+      theme_minimal(base_size = 13)
+  })
+
+  # On disconnect: kill orphan background process so it doesn't keep burning CPU.
+  session$onSessionEnded(function() {
+    isolate({
+      if (!is.null(rv$bg_proc) && inherits(rv$bg_proc, "process") &&
+          rv$bg_proc$is_alive()) {
+        try(rv$bg_proc$kill(), silent = TRUE)
+      }
+    })
+  })
+}
+
+shinyApp(ui, server)
+
