@@ -308,6 +308,97 @@ použijú pre všetkých 6 modelov × 4 úrovne.
 2. **Eliminácia variability foldov:** keby mal každý model vlastné
    foldy, jeden by mohol náhodou dostať "ľahší" split a vyzerať lepší.
 
+### 3.2.1 Prečo iba train/test (80/20) a nie train/validation/test?
+
+**Otázka, ktorá padne skoro vždy:** "Nemali ste dáta rozdeliť na train,
+validation a test?"
+
+**Krátka odpoveď:** tretí split (validation set) má zmysel iba ak by CV
+vyberala **hyperparametre** alebo ak by sme robili **model selection na
+základe hold-out metrík**. Ani jedno nerobíme — `tuneGrid` má pre každý
+model jeden riadok (žiadne tuning) a štatistické rozhodnutie H1/H2
+robíme na CV foldoch train setu cez párový Wilcoxon. Test set tak slúži
+iba na reportovanie finálnych metrík pri pevnom modeli.
+
+**Detailné zdôvodnenie:**
+
+1. **`tuneGrid` je pre každý model jednoriadkový** (`scenario_2.rmd:398,
+   463, 505, 540, 587`). `caret::train` teda **nevyberá** najlepšiu
+   konfiguráciu — iba spočíta per-fold AUC pre jednu pevnú kombináciu
+   hyperparametrov:
+
+   | Model     | Pevná konfigurácia               |
+   |-----------|----------------------------------|
+   | LR-Ridge  | `α=0, λ=0.01`                    |
+   | LDA       | žiadne HP                        |
+   | NB        | `fL=1, usekernel=TRUE, adjust=1` |
+   | RF        | `mtry=⌊√p⌋, ntree=300`           |
+   | SVM-RBF   | `C=1, σ=0.1`                     |
+   | KNN       | `k=25`                           |
+
+   Toto je vedomé rozhodnutie (§4.1 *Prečo λ = 0.01 a nie CV-tuning?*,
+   §5.1 *Viac hyperparametrov = väčšia plocha na cherry-picking*) — HP
+   fixujeme, aby kontrast **parametrické vs. neparametrické** nebol
+   kontaminovaný rozdielnym tuning úsilím.
+
+2. **Štatistické rozhodnutie H1/H2 sa robí na CV foldoch train setu**
+   (§6.2), nie na test sete. Párový Wilcoxonov test porovnáva
+   **priemerný fold-AUC neparametrickej rodiny vs. parametrickej
+   rodiny** na 10 zdieľaných foldoch — testuje *rodinový kontrast* per
+   tier (H1: neparametrické > parametrické na Lexical). Test berie
+   CV AUC z train setu, test-set hodnoty doň nevstupujú.
+
+   *Pozor na hranicu tohto argumentu:* Wilcoxon **neporovnáva
+   jednotlivé modely proti sebe** — netestuje napr. SVM-RBF vs. RF.
+   Identifikácia konkrétneho best-in-class modelu (SVM-RBF ako
+   proxy-deployable na Lexical) je **deskriptívny záver** z tabuliek
+   CV ROC + test-set Sens/Spec, nie formálna štatistická selekcia.
+   Rozhodnutie ktorý model označiť za "víťaza" sa teda neriadi
+   Wilcoxonom — Wilcoxon rozhoduje iba o **rodinách**.
+
+3. **Test set sa používa iba raz** — na výpočet finálnych metrík
+   (`Test AUC`, `Accuracy`, `F1`, `Sens`, `Spec`) pri **pevnom modeli
+   s pevnými HP**. Žiadne rozhodnutie o hyperparametroch ani o featuroch
+   nie je podmienené číslami z test setu. Jediný aspekt, kde test-set
+   čísla vstupujú do záverečnej interpretácie, je deskriptívny opis
+   správania modelov pri threshold 0.5 (Sens/Spec) — ale žiadny model
+   sa na základe toho nepretrénuje ani neladí, takže test set zostáva
+   nestranný pre generalizačnú chybu.
+
+4. **Preprocessing neleakuje:** `preProcess` (log + centre/scale) je
+   fit-nutý **iba na train** (`scenario_2.rmd:255`) a aplikovaný na
+   test. Žiadna informácia z test setu sa nedostáva do tréningového
+   pipeline.
+
+**Kedy by sme validačnú sadu potrebovali?**
+
+- Keby sme robili **multi-stage selekciu** (napr. najprv výber
+  featurových tierov na jednej sade, potom tuning HP na druhej, nakoniec
+  kalibrácia prahu na tretej) → každá fáza potrebuje vlastnú čerstvú
+  sadu, aby ďalšia fáza nejedla jej zvyšky. U nás je **tiers pevne
+  definovaný z EDA** (`phishing.rmd` §2), HP sú pevné, prah = 0.5,
+  takže multi-stage selekcia neexistuje.
+- Keby sme chceli **nestranný CV-like odhad generalizácie po tunovaní**
+  (nie jednu test-set hodnotu) — vtedy by sa riešilo nested CV alebo
+  samostatným val setom. My reportujeme jednu test-set AUC pri pevnom
+  modeli, takže tento problém nevzniká.
+- Keby sme víťazný model vyberali podľa **test-set metrík** (napr.
+  *"SVM má najvyššie test AUC = 0.995, vyhráva"*) → test set by sa
+  stal model-selection kritériom a potrebovali by sme ešte jednu sadu
+  na finálne nestranné čísla. U nás sa víťaz (SVM-RBF) čita z CV ROC
+  a test-set Sens/Spec **deskriptívne**, ale žiadny formálny výber
+  víťaza podľa test čísel sa nerobí — žiadny HP ani žiaden feature sa
+  nemení na základe test-set hodnôt.
+
+Ani jeden z týchto prípadov u nás nenastáva.
+
+**Jednovetová obhajoba:** *"Test set u nás neslúži ako kritérium
+výberu — hyperparametre sú pevné (jednoriadkové `tuneGrid`) a
+štatistické rozhodnutie H1/H2 robíme paired Wilcoxonom na CV foldoch
+rodín v rámci train setu. Test set sa preto používa iba raz, na
+reportovanie finálnych metrík pri pevnom modeli, takže tretí split by
+bol navyše."*
+
 ### 3.3 Preprocessing — dva paralelné recepty
 
 #### Prečo dva?
