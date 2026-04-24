@@ -11,6 +11,7 @@ suppressPackageStartupMessages({
   library(ggrepel)
   library(shinyjs)
   library(callr)
+  library(rpart)
 })
 
 set.seed(2026)
@@ -184,6 +185,41 @@ ui <- fluidPage(
           helpText("Per-tier paired Wilcoxon (non-parametric > parametric) ",
                    "across CV folds - needs >=1 model from each family selected."),
           DTOutput("wilcox_dt")
+        ),
+        tabPanel("Surrogate tree (Task 4)",
+          br(),
+          helpText(strong("Task 4 - visualising the RF decision rule."),
+                   " A single rpart tree trained on the RF's own predictions ",
+                   "(not the ground-truth label). The metric we optimise is ",
+                   strong("fidelity = share of test rows on which the tree ",
+                          "and the RF agree"),
+                   "; it is decomposed into ",
+                   code("Sens vs RF"), " / ", code("Spec vs RF"),
+                   " so the per-class agreement is visible - same Sens/Spec ",
+                   "framing we use everywhere else."),
+          fluidRow(
+            column(4,
+              selectInput("task4_tier", "Tier",
+                          choices  = c("Lexical", "FullLite"),
+                          selected = "Lexical")
+            ),
+            column(4,
+              sliderInput("task4_maxdepth", "Max depth (upper bound)",
+                          min = 3, max = 7, value = 7, step = 1)
+            ),
+            column(4,
+              sliderInput("task4_max_leaves", "Readability cap (leaves)",
+                          min = 5, max = 30, value = 15, step = 1)
+            )
+          ),
+          verbatimTextOutput("task4_status"),
+          plotOutput("task4_tree_plot", height = "520px"),
+          br(),
+          h5("Selected tree vs RF (per-class agreement + deployment Sens/Spec)"),
+          DTOutput("task4_metrics_dt"),
+          br(),
+          h5("Fidelity saturation - best (cp, minbucket) per depth"),
+          DTOutput("task4_depth_dt")
         ),
         tabPanel("Data preview",
           br(),
@@ -670,6 +706,119 @@ server <- function(input, output, session) {
            title = "Operating point at threshold 0.5",
            subtitle = "Dotted lines = 95% target on each axis; dashed line = symmetry") +
       theme_minimal(base_size = 13)
+  })
+
+  # ---- Task 4: surrogate tree tab -----------------------------------------
+  # Reads the cached surrogate grid produced by scenario_2.rmd S7.2
+  # (scenario_2/artifacts/surrogate_<tier>.rds). No re-fitting in the app:
+  # the notebook is the single source of truth for Task 4.
+
+  SURROGATE_DIR <- "scenario_2/artifacts"
+
+  surrogate_cache <- reactive({
+    tier <- input$task4_tier
+    path <- file.path(SURROGATE_DIR,
+                      sprintf("surrogate_%s.rds", tolower(tier)))
+    if (!file.exists(path)) return(NULL)
+    tryCatch(readRDS(path)$data, error = function(e) NULL)
+  })
+
+  output$task4_status <- renderText({
+    tier <- input$task4_tier
+    path <- file.path(SURROGATE_DIR,
+                      sprintf("surrogate_%s.rds", tolower(tier)))
+    cache <- surrogate_cache()
+    if (is.null(cache)) {
+      return(sprintf(paste(
+        "No cached surrogate for '%s'.",
+        "Knit scenario_2.rmd (section 7) to generate '%s';",
+        "it runs the rpart grid and writes the .rds the app reads here.",
+        sep = "\n"), tier, path))
+    }
+    n_leaves <- max(cache$results$leaves)
+    sprintf("Loaded %d grid rows for '%s'. Max leaves in grid: %d.",
+            nrow(cache$results), tier, n_leaves)
+  })
+
+  # Picks the same winner scenario_2.rmd S7.4 plots: the highest-fidelity
+  # tree in the whole grid subject to (depth <= slider, leaves <= cap).
+  # Using "<=" (not "==") on depth means the default (depth=7, cap=15)
+  # reproduces the RMD winner; lowering the slider then restricts the
+  # search to shallower trees if the user wants a more readable one.
+  task4_selected_tree <- reactive({
+    cache <- surrogate_cache()
+    if (is.null(cache)) return(NULL)
+    md_cap <- input$task4_maxdepth
+    cap    <- input$task4_max_leaves
+    pick <- cache$results %>%
+      filter(maxdepth <= md_cap, leaves <= cap) %>%
+      arrange(desc(fidelity), leaves) %>%
+      slice_head(n = 1)
+    if (!nrow(pick)) return(NULL)
+    key <- sprintf("md=%d_cp=%.0e_mb=%d",
+                   pick$maxdepth, pick$cp, pick$minbucket)
+    list(row = pick, tree = cache$trees[[key]])
+  })
+
+  output$task4_tree_plot <- renderPlot({
+    sel <- task4_selected_tree()
+    if (is.null(sel)) {
+      plot.new()
+      title(main = "No tree matches the current maxdepth / leaves cap.")
+      return()
+    }
+    if (requireNamespace("rpart.plot", quietly = TRUE)) {
+      rpart.plot::rpart.plot(
+        sel$tree, type = 2, extra = 104, fallen.leaves = TRUE,
+        box.palette = c("#D73027", "#1A9850"),
+        main = sprintf("%s surrogate - depth %d, %d leaves, fidelity %.3f",
+                       input$task4_tier, sel$row$maxdepth,
+                       sel$row$leaves, sel$row$fidelity)
+      )
+    } else {
+      plot(sel$tree, uniform = TRUE, margin = 0.12,
+           main = sprintf("%s surrogate tree", input$task4_tier))
+      text(sel$tree, use.n = TRUE, cex = 0.65)
+    }
+  })
+
+  output$task4_metrics_dt <- renderDT({
+    sel <- task4_selected_tree()
+    if (is.null(sel)) return(NULL)
+    r <- sel$row
+    tibble(
+      Tier          = input$task4_tier,
+      MaxDepth      = r$maxdepth,
+      cp            = formatC(r$cp, format = "e", digits = 0),
+      minbucket     = r$minbucket,
+      Leaves        = r$leaves,
+      Fidelity      = round(r$fidelity,   4),
+      `Sens vs RF`  = round(r$sens_vs_rf, 4),
+      `Spec vs RF`  = round(r$spec_vs_rf, 4),
+      `Tree Sens`   = round(r$tree_sens,  4),
+      `Tree Spec`   = round(r$tree_spec,  4),
+      `RF Sens`     = round(r$rf_sens,    4),
+      `RF Spec`     = round(r$rf_spec,    4),
+      `Tree AUC`    = round(r$auc,        4)
+    ) %>%
+      datatable(options = list(dom = "t", scrollX = TRUE), rownames = FALSE)
+  })
+
+  output$task4_depth_dt <- renderDT({
+    cache <- surrogate_cache()
+    if (is.null(cache)) return(NULL)
+    cache$results %>%
+      group_by(maxdepth) %>%
+      slice_max(fidelity, n = 1, with_ties = FALSE) %>%
+      ungroup() %>%
+      arrange(maxdepth) %>%
+      transmute(MaxDepth     = maxdepth,
+                Leaves       = leaves,
+                Fidelity     = round(fidelity,   4),
+                `Sens vs RF` = round(sens_vs_rf, 4),
+                `Spec vs RF` = round(spec_vs_rf, 4),
+                `Tree AUC`   = round(auc,        4)) %>%
+      datatable(options = list(dom = "t"), rownames = FALSE)
   })
 
   # On disconnect: kill orphan background process so it doesn't keep burning CPU.

@@ -326,7 +326,7 @@ run_or_load <- function(name, fn) {
                       names(cached$by_tier[[1]]))
     fp_ok      <- isTRUE(cached$tiers_fp == fp)
     if (tiers_ok && schema_ok && fp_ok) return(cached)
-    cat(sprintf("  [%s] cache stale (tiers_ok=%s, schema_ok=%s, fp_ok=%s) — refitting\n",
+    cat(sprintf("  [%s] cache stale (tiers_ok=%s, schema_ok=%s, fp_ok=%s) - refitting\n",
                 name, tiers_ok, schema_ok, fp_ok))
   }
   res <- fn()
@@ -342,7 +342,7 @@ print_tier_summary <- function(res) {
     tibble(
       Tier        = tier,
       `Train AUC` = sprintf("%.4f", r$train_auc),
-      `CV ROC`    = sprintf("%.4f ± %.4f",
+      `CV ROC`    = sprintf("%.4f +/- %.4f",
                             mean(r$cv_per_fold$ROC), sd(r$cv_per_fold$ROC)),
       `Test AUC`  = sprintf("%.4f", r$test_auc),
       `Gap`       = sprintf("%+.4f", gap),
@@ -357,7 +357,7 @@ print_tier_summary <- function(res) {
   knitr::kable(
     tbl,
     align   = "lrrrrrrrrrr",
-    caption = sprintf("%s — %s",
+    caption = sprintf("%s - %s",
                       res$model, res$family)
   )
 }
@@ -778,9 +778,13 @@ We run the exercise on two tiers: **Lexical** (where RF beats the
 parametric models by ≥ 0.10 AUC and a tree-level explanation is most
 valuable) and **FullLite** (where every model saturates near AUC ≈ 1.0
 and fidelity should be trivially high — a sanity check that the tuning
-procedure is unbiased). Trust and Behavior are omitted: Trust has only 7
-features, mostly binary, so an rpart tree is near-trivial to inspect
-already; Behavior sits between the two interesting cases.
+procedure is unbiased). Trust and Behavior are omitted on purpose:
+Trust is 7 features, most of them binary flags, so the only non-linear
+structure it can carry is XOR-like binary interactions — which the
+§6.2 numbers rule out (every model on Trust lands at AUC ≈ 0.93 in a
+tight band, so there is no interaction pattern left for a tree to
+visualise). Behavior sits between the two interesting cases and would
+not add a new observation.
 
 ## 7.1 Teacher RF and surrogate utility
 
@@ -844,13 +848,22 @@ predictions. With 5 × 3 × 3 = 45 combinations per tier and `rpart` at
 ~1 s per fit on 24 k rows, the whole sweep takes under three minutes
 and is cached per tier.
 
-**Fidelity** is the metric we optimise on the held-out test set:
+**Fidelity** is the overall metric we optimise on the held-out test set:
 
   $$\text{fidelity} = \frac{1}{n_\text{test}} \sum_i \mathbf{1}\bigl[\hat{y}^{\text{tree}}_i = \hat{y}^{\text{RF}}_i\bigr].$$
 
-Accuracy-against-truth and AUC are reported alongside but are **not**
-the optimisation targets — a surrogate that corrects the RF's mistakes
-isn't the visualisation we want.
+The rest of this report (§6.1.1, §8) judges classifiers on
+**Sensitivity / Specificity**, not on overall accuracy, because a
+phishing-blocker's two error types have asymmetric cost. For the same
+reason we decompose fidelity the same way: `Sens vs RF` is the share
+of RF-called phishing that the tree also calls phishing, `Spec vs RF`
+is the share of RF-called legit the tree also calls legit. These are
+the two numbers that tell us *how the visualisation's agreement with
+the model breaks down by class* — the per-class analogues of
+fidelity. We also report tree and RF Sens/Spec against the ground
+truth so the deployment-level operating point is visible. Accuracy is
+**not** reported here — it would hide the exact class-asymmetry the
+rest of the project is built to expose.
 
 ```{r task4-grid}
 tune_surrogate_tree <- function(tier, rf_fit,
@@ -864,6 +877,10 @@ tune_surrogate_tree <- function(tier, rf_fit,
   teacher_train <- predict(rf_fit, tr_x)
   teacher_test  <- predict(rf_fit, te_x)
   truth_test    <- test_raw$label
+
+  # RF reference Sens/Spec on the test set - constant across the grid.
+  rf_sens <- mean(teacher_test[truth_test == "Phishing"]   == "Phishing")
+  rf_spec <- mean(teacher_test[truth_test == "Legitimate"] == "Legitimate")
 
   tr_data <- tr_x
   tr_data$teacher_label <- teacher_train
@@ -882,20 +899,36 @@ tune_surrogate_tree <- function(tier, rf_fit,
     pr_class <- predict(tree, te_x, type = "class")
     pr_prob  <- predict(tree, te_x, type = "prob")[, "Phishing"]
     n_leaves <- sum(tree$frame$var == "<leaf>")
+
+    # Overall agreement - Task 4's fidelity metric.
     fidelity <- mean(pr_class == teacher_test)
-    accuracy <- mean(pr_class == truth_test)
-    auc      <- as.numeric(pROC::roc(truth_test, pr_prob,
-                                     levels = c("Legitimate", "Phishing"),
-                                     direction = "<", quiet = TRUE)$auc)
+
+    # Per-class agreement: the Sens/Spec decomposition of fidelity,
+    # treating the RF prediction as the tree's training target.
+    sens_vs_rf <- mean(pr_class[teacher_test == "Phishing"]   == "Phishing")
+    spec_vs_rf <- mean(pr_class[teacher_test == "Legitimate"] == "Legitimate")
+
+    # Deployment-level operating point: tree vs. actual truth.
+    tree_sens <- mean(pr_class[truth_test == "Phishing"]   == "Phishing")
+    tree_spec <- mean(pr_class[truth_test == "Legitimate"] == "Legitimate")
+
+    auc <- as.numeric(pROC::roc(truth_test, pr_prob,
+                                levels = c("Legitimate", "Phishing"),
+                                direction = "<", quiet = TRUE)$auc)
     rows[[key]] <- tibble(
       tier = tier, maxdepth = md, cp = cpv, minbucket = mb,
-      leaves = n_leaves, fidelity = fidelity,
-      accuracy = accuracy, auc = auc
+      leaves = n_leaves,
+      fidelity   = fidelity,
+      sens_vs_rf = sens_vs_rf, spec_vs_rf = spec_vs_rf,
+      tree_sens  = tree_sens,  tree_spec  = tree_spec,
+      rf_sens    = rf_sens,    rf_spec    = rf_spec,
+      auc        = auc
     )
     trees[[key]] <- tree
   }
   list(results = bind_rows(rows), trees = trees,
-       teacher_test = teacher_test, truth_test = truth_test)
+       teacher_test = teacher_test, truth_test = truth_test,
+       rf_sens = rf_sens, rf_spec = rf_spec)
 }
 
 load_surrogate <- function(tier, rf_fit) {
@@ -906,7 +939,8 @@ load_surrogate <- function(tier, rf_fit) {
     features   = sort(tiers[[tier]]),
     n_train    = nrow(train_raw),
     rf_ntree   = rf_fit$ntree,
-    tree_store = "model=TRUE"
+    tree_store = "model=TRUE",
+    schema     = "v2_sens_spec"
   ))
   if (file.exists(path)) {
     cached <- readRDS(path)
@@ -940,6 +974,14 @@ rf_ref <- tibble(
   rf_auc  = c(
     res_rf$by_tier[["Lexical"]]$test_auc,
     res_rf$by_tier[["FullLite"]]$test_auc
+  ),
+  rf_sens = c(
+    res_rf$by_tier[["Lexical"]]$test_sens,
+    res_rf$by_tier[["FullLite"]]$test_sens
+  ),
+  rf_spec = c(
+    res_rf$by_tier[["Lexical"]]$test_spec,
+    res_rf$by_tier[["FullLite"]]$test_spec
   )
 )
 
@@ -948,30 +990,38 @@ depth_tbl <- all_surr %>%
   slice_max(fidelity, n = 1, with_ties = FALSE) %>%
   ungroup() %>%
   left_join(rf_ref, by = "tier") %>%
-  mutate(tier = factor(tier, levels = c("Lexical", "FullLite")),
-         gap_to_rf_auc = rf_auc - auc) %>%
+  mutate(tier = factor(tier, levels = c("Lexical", "FullLite"))) %>%
   arrange(tier, maxdepth) %>%
   transmute(Tier = tier, MaxDepth = maxdepth, Leaves = leaves,
-            Fidelity = round(fidelity, 4),
-            Accuracy = round(accuracy, 4),
-            `Tree AUC` = round(auc, 4),
-            `RF AUC`   = round(rf_auc, 4),
-            `Gap AUC`  = round(gap_to_rf_auc, 4))
+            Fidelity     = round(fidelity,   4),
+            `Sens vs RF` = round(sens_vs_rf, 4),
+            `Spec vs RF` = round(spec_vs_rf, 4),
+            `Tree AUC`   = round(auc,        4),
+            `RF AUC`     = round(rf_auc,     4))
 
 kable(depth_tbl,
-      caption = "Best surrogate per (tier, maxdepth) on the §6 test set. Winning (cp, minbucket) picked by fidelity; ties broken by fewer leaves.")
+      caption = "Best surrogate per (tier, maxdepth) on the S6 test set. Fidelity = overall tree/RF agreement; Sens vs RF / Spec vs RF = its per-class decomposition (treating RF prediction as target). Winning (cp, minbucket) picked by fidelity; ties broken by fewer leaves.")
 ```
 
 The §7.3 table reports the **fidelity ceiling** — the best rpart can do
-at each depth, regardless of readability. For the plotted diagrams in
-§7.4 we pick a different tree: the surrogate with the highest fidelity
-under a readability cap of ≤ 15 leaves. A 37-leaf tree technically has
-a higher fidelity number, but it is visually unparseable on a slide, so
-it cannot serve the "visualisation" role the task asks for. The cap is
-cheap: it costs ~0.009 fidelity on Lexical (0.967 → 0.958 with 14
-leaves) and ~0.003 on FullLite (0.990 → 0.987 with 15 leaves). In
-other words, the last two depth levels buy almost no fidelity — they
-only buy leaves.
+at each depth, regardless of readability. The `Sens vs RF` / `Spec vs RF`
+columns show *how* the remaining disagreement splits across the two
+classes: a fidelity of 0.96 with Sens-vs-RF 0.97 and Spec-vs-RF 0.95
+means the tree disagrees with the RF mostly on the legit side, which
+is a very different story from 0.95 / 0.97 — and the same story we
+read off §6.1.1 for the supervised models. Picking the optimisation
+target consistently with the rest of the report (Sens/Spec, not
+overall accuracy) keeps Task 4's interpretation aligned with how we
+judge the RF itself.
+
+For the plotted diagrams in §7.4 we pick a different tree: the
+surrogate with the highest fidelity under a readability cap of ≤ 15
+leaves. A 37-leaf tree technically has a higher fidelity number, but
+it is visually unparseable on a slide, so it cannot serve the
+"visualisation" role the task asks for. The cap is cheap: it costs
+~0.009 fidelity on Lexical (0.967 → 0.958 with 14 leaves) and ~0.003
+on FullLite (0.990 → 0.987 with 15 leaves). In other words, the last
+two depth levels buy almost no fidelity — they only buy leaves.
 
 ```{r task4-winners}
 MAX_PLOT_LEAVES <- 15L
@@ -984,10 +1034,13 @@ winners <- all_surr %>%
   ungroup()
 
 winners %>%
-  mutate(across(c(fidelity, accuracy, auc), ~ round(.x, 4))) %>%
+  mutate(across(c(fidelity, sens_vs_rf, spec_vs_rf,
+                  tree_sens, tree_spec, rf_sens, rf_spec, auc),
+                ~ round(.x, 4))) %>%
   select(tier, maxdepth, cp, minbucket, leaves,
-         fidelity, accuracy, auc) %>%
-  kable(caption = sprintf("Plotted surrogate tree per tier: highest fidelity subject to leaves <= %d. Ties broken by fewer leaves.", MAX_PLOT_LEAVES))
+         fidelity, sens_vs_rf, spec_vs_rf,
+         tree_sens, tree_spec, rf_sens, rf_spec, auc) %>%
+  kable(caption = sprintf("Plotted surrogate tree per tier: highest fidelity subject to leaves <= %d. Ties broken by fewer leaves. `tree_sens`/`tree_spec` are vs. ground truth; `rf_sens`/`rf_spec` are the RF reference - the closer they are, the less the surrogate changes the operating point.", MAX_PLOT_LEAVES))
 ```
 
 ## 7.4 Winning trees
@@ -1032,6 +1085,40 @@ if (has_rpart_plot) {
 }
 ```
 
+### RF variable importance cross-check
+
+The surrogate's root split is a claim about what the RF thinks is the
+most discriminative single feature. To see whether that claim is
+faithful to the teacher — rather than an artefact of the one tree we
+plotted — we read the RF's own variable importance (mean decrease in
+Gini) for the same teacher and compare the ordering against the tree's
+top few splits.
+
+```{r task4-varimp, fig.height=5, fig.width=11}
+# base-R title() goes through utf8towcs() which chokes on em-dashes
+# in non-UTF-8 Windows locales - we keep the surrounding prose
+# em-dashes intact but use a plain hyphen in the plot titles here.
+op <- par(mfrow = c(1, 2), mar = c(4, 7, 3, 1))
+randomForest::varImpPlot(
+  rf_teachers[["Lexical"]],
+  n.var = min(10, length(tiers[["Lexical"]])),
+  main  = "RF variable importance - Lexical"
+)
+randomForest::varImpPlot(
+  rf_teachers[["FullLite"]],
+  n.var = 10,
+  main  = "RF variable importance - FullLite (top 10)"
+)
+par(op)
+```
+
+If the feature at the tree's root is also in the top few rows of the
+RF importance plot for the same tier, the surrogate isn't improvising
+— it's picking up the same signal ranking the RF itself assigns. That
+is the evidence that lets us read the tree diagram as a visualisation
+of RF behaviour rather than a parallel classifier that happens to agree
+on the test set.
+
 ## 7.5 What the surrogate does and doesn't capture
 
 **Similarities with RF.** Both models use the same vocabulary: every
@@ -1070,9 +1157,10 @@ each trained on a different bootstrap sample and seeing only
 smooths the decision boundary into something **a single tree cannot
 express** — specifically, interactions among 3+ features that only
 emerge when the bagging vote combines partially overlapping splits.
-That's where the `Gap AUC` column comes from: even when fidelity is
-0.97+, the RF's probability estimates are better-calibrated near the
-decision boundary than any single surrogate can match.
+That's the gap between `Tree AUC` and `RF AUC` in §7.3: even when
+fidelity is 0.97+, the RF's probability estimates are better-calibrated
+near the decision boundary than any single surrogate's listwise class
+proportions can match.
 
 **Parameter tuning — what we actually changed and why.** `maxdepth` is
 the dominant lever; everything else plays a secondary role. Below a
@@ -1096,15 +1184,24 @@ and it is honest to say so. The surrogate's whole purpose is to be
 ~0.009 fidelity on Lexical and ~0.003 on FullLite, which is a fair
 price for a diagram a reviewer can follow branch-by-branch.
 
-**Fidelity vs. accuracy gap.** On both tiers the surrogate's fidelity
-slightly exceeds its accuracy-against-truth. This is expected and is
-the **success case** for the exercise: the surrogate isn't "correcting"
-the RF — it's copying the RF's full behaviour, including the handful
-of genuinely hard URLs where RF happens to be wrong. If the numbers
-had gone the other way (accuracy > fidelity) it would mean the
-surrogate had stumbled onto a simpler rule than the RF uses but
-happens to agree with the truth more often — a red flag that the
-surrogate is a *replacement* for the RF, not a *visualisation* of it.
+**Per-class fidelity — the Sens/Spec decomposition.** Overall fidelity
+averages over both classes, but the rest of this report (§6.1.1, §8)
+treats the two error types separately because they have asymmetric
+cost in the proxy setting. The surrogate inherits that framing: we
+also report `Sens vs RF` (the share of RF-called phishing the tree
+also calls phishing) and `Spec vs RF` (the share of RF-called legit
+the tree also calls legit). On both tiers these two agreement numbers
+land within a few tenths of a percent of each other — the surrogate
+tracks RF symmetrically in both directions, not by picking up the
+easy class. The deployment-level columns (`tree_sens` vs. `rf_sens`,
+`tree_spec` vs. `rf_spec`) say the same thing differently: the
+surrogate preserves the RF's operating point on the ground truth, so
+a reader who actually uses the tree instead of the RF would block and
+allow almost the same URLs. If Sens-vs-RF and Spec-vs-RF had diverged
+substantially, it would mean the tree copied RF well on one class and
+not on the other — a warning that the "visualisation" was hiding a
+class-specific failure mode. They don't, so the visualisation is
+balanced.
 
 **FullLite sanity check.** On FullLite every decent model sits at AUC
 ≈ 0.999 (§6.1), so a tree of any non-trivial depth trivially matches

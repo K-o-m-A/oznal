@@ -1117,12 +1117,15 @@ nie je accuracy proti pravde, ale **fidelity** = percento zhody medzi
 predikciou stromu a predikciou RF na test-sete.
 
 **Prečo práve na Lexical a FullLite?** Lexical je tier, kde RF reálne
-vyhráva (gap ~0.10 AUC nad parametrickými) a teda ma čo vysvetľovať.
+vyhráva (gap ~0.10 AUC nad parametrickými) a teda má čo vysvetľovať.
 FullLite je sanity check — všetky modely tam sú pri AUC ≈ 0.999, takže
 fidelity musí byť vysoká automaticky a overí, že naša tuning pipeline
-nie je zaujatá. Trust a Behavior sme vynechali: Trust je príliš úzky
-(7 features, väčšinou binárne) a Behavior je prechodový tier medzi
-oboma.
+nie je zaujatá. Trust a Behavior sme vynechali zámerne: Trust má 7
+features, väčšinou binárne, takže jediné nelineárne správanie, ktoré
+tam môže byť, je XOR medzi binárkami — a §6.2 (všetky modely Trust ≈
+0.93 v úzkom pásme) ukazuje, že žiadne takéto interakcie v dátach
+nie sú. Nie je čo surrogate stromom „vizualizovať". Behavior sedí
+medzi dvoma zaujímavými prípadmi a nepridal by nové pozorovanie.
 
 **Prečo nie jeden z 300 RF stromov?** Každý strom v RF je zámerne
 **nedokonalý** — trénovaný na bootstrap vzorke (~63 % trénsetu) a vidí
@@ -1147,21 +1150,44 @@ Tri parametre `rpart.control`, každý s inou rolou:
 cachované v `scenario_2/artifacts/surrogate_lexical.rds` a
 `surrogate_fulllite.rds`, takže druhý knit berie výsledky zo súboru.
 
-### Čo meriame — fidelity vs. accuracy
+### Čo meriame — fidelity a jej Sens/Spec rozklad
 
-- **Fidelity (ladíme toto):** `mean(predict(tree, test) == predict(rf, test))`.
-  Koľko predikcií stromu je rovnakých ako RF.
-- **Accuracy (reportujeme, ale neoptimalizujeme):** `mean(predict(tree, test) == truth)`.
-  Koľko predikcií stromu trafí pravdu.
-- **AUC stromu + Gap AUC**: koľko z AUC RF stratíme tým, že použijeme
-  jeden strom namiesto ensemble-u.
+Celý projekt (§6.1.1, §8) **neporovnáva modely cez Accuracy, ale cez
+Sensitivity a Specificity** — lebo v bankovej/proxy aplikácii majú dve
+typy chýb asymetrickú cenu. Aby bol Task 4 s týmto frame-om
+konzistentný, ladíme primárnu metriku **fidelity** a jej rozklad po
+triedach — nie accuracy proti pravde.
 
-**Zlatý stav:** `fidelity ≥ accuracy` — strom kopíruje RF vrátane
-prípadov, kedy sa RF mýli. To je to, čo chceme od vizualizácie
-modelu. Ak by nastalo naopak (accuracy > fidelity), znamenalo by to,
-že strom použil jednoduchšie pravidlo ako RF a **náhodou** trafil
-pravdu častejšie — červený prápor, že strom **nahrádza** RF, nie
-vizualizuje.
+- **Fidelity (primárny cieľ):** `mean(predict(tree, test) == predict(rf, test))`.
+  Celková zhoda stromu s RF na test sete.
+- **Sens vs RF:** `P(tree = Phishing | rf = Phishing)` — z URL, ktoré
+  RF označí ako phishing, koľko aj strom označí rovnako. Per-class
+  rozklad fidelity na „phish strane".
+- **Spec vs RF:** `P(tree = Legitimate | rf = Legitimate)` — analogicky
+  na „legit strane".
+- **Tree Sens / Tree Spec + RF Sens / RF Spec (proti pravde):** dvojice
+  (tree vs truth) a (rf vs truth). Keď sú blízko seba, strom zachováva
+  prevádzkový bod RF — čiže ak niekto nasadí strom miesto RF, bude
+  blokovať a prepúšťať skoro rovnaké URL.
+
+**Prečo nie accuracy:** accuracy = (TP+TN)/N averaguje cez obe triedy,
+takže za totožnou hodnotou sa môže skrývať úplne iná Sens/Spec. Náš
+Naive Bayes §6.1.1 je kanonický príklad — Accuracy vyzerá OK, ale
+Sens/Spec ukazuje ostrú asymetriu. Rovnakým okom musíme merať aj
+surrogate, inak by Task 4 obchádzal ten rozklad, ktorý celý projekt
+obhajuje.
+
+**Zlatý stav:**
+1. **Fidelity vysoká** (≥ 0.95 pri čitateľnom strome) — celková zhoda.
+2. **Sens vs RF ≈ Spec vs RF** — strom kopíruje RF symetricky, nie iba
+   na tej „ľahšej" triede.
+3. **Tree Sens ≈ RF Sens a Tree Spec ≈ RF Spec** — strom zachováva
+   prevádzkový bod RF, takže aj v nasadení by pracoval rovnako.
+
+Ak by nastala disonancia — napr. Sens vs RF 0.99 ale Spec vs RF 0.82 —
+bolo by to signál, že surrogate kopíruje RF iba na phish strane a na
+legit strane ho „vylepšuje" vlastným hacky pravidlom. To by znamenalo,
+že strom nie je verná vizualizácia, ale skrytý paralelný klasifikátor.
 
 ### Ako prezentovať výsledky
 
@@ -1177,10 +1203,11 @@ pozorovania pre obhajobu:
   na FullLite takmer triviálne separovateľná, takže aj plytký strom
   dokáže kopírovať RF skoro dokonale. Toto NIE JE nález o RF, je to
   nález o úlohe samotnej.
-- **Gap AUC:** aj pri fidelity 0.97 je AUC stromu o 0.01-0.03 nižšie
-  ako AUC RF — to je **daň za jeden strom miesto 300**. Ensemble
-  priemerovanie dáva RF hladšie hranice a lepšie kalibrované
-  pravdepodobnosti pri rozhodnej hranici.
+- **Tree AUC vs RF AUC:** aj pri fidelity 0.97 je AUC stromu o
+  0.01-0.03 nižšie ako AUC RF — to je **daň za jeden strom miesto
+  300**. Ensemble priemerovanie dáva RF hladšie hranice a lepšie
+  kalibrované pravdepodobnosti pri rozhodnej hranici; surrogate vracia
+  listové class-proporcie, ktoré majú hrubšiu rozlišovaciu schopnosť.
 
 ### Podobnosti a rozdiely medzi vizualizáciou a modelom
 
@@ -1217,6 +1244,26 @@ Lebo potom neodpovedám na zadanie. Zadanie hovorí *"which parameters
 you tuned to make the trees align as closely as possible with the
 **model behavior**"* → ladím na fidelity, lebo fidelity meria zhodu
 s modelom, nie s pravdou.
+
+**Otázka: Prečo reportujete Sens vs RF a Spec vs RF namiesto accuracy
+proti pravde?**
+Konzistencia s celým projektom. §6.1.1 a §8 obhajujú modely cez
+Sensitivity a Specificity, nie cez accuracy — lebo FN a FP majú inú
+cenu v bezpečnostnej aplikácii. Keby sme Task 4 hodnotili iba cez
+accuracy, prekryli by sme presne ten class-asymetrický rozklad, ktorý
+sme vo zvyšku obhajoby zvýraznili. `Sens vs RF` = per-class rozklad
+fidelity (ako verne strom kopíruje RF na phish strane), `Spec vs RF`
+= to isté na legit strane. `Tree Sens / Tree Spec vs RF Sens / RF
+Spec` = porovnanie prevádzkových bodov, ktoré komisia očakáva
+podobne ako v §6.1.1 tabuľke.
+
+**Otázka: Ako overíte, že root surrogate stromu zodpovedá RF-u a nie
+je artefakt jedného trénu?**
+Vedľa obrázkov stromov v §7.4 pridávame `randomForest::varImpPlot()`
+pre rovnaký teacher RF. Ak je feature v roote surrogate stromu aj
+medzi top-3 v variable-importance plote, surrogate priamo zrkadlí
+poradie, ktoré RF sám priraďuje. To je dôkaz, že strom nie je
+paralelný klasifikátor, ale vizualizácia RF logiky.
 
 **Otázka: Čo keby bola fidelity veľmi nízka, napr. 0.75?**
 Bolo by to samo osebe zistenie: RF v sebe nesie niečo, čo sa jedným
