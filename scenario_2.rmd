@@ -1191,17 +1191,46 @@ cost in the proxy setting. The surrogate inherits that framing: we
 also report `Sens vs RF` (the share of RF-called phishing the tree
 also calls phishing) and `Spec vs RF` (the share of RF-called legit
 the tree also calls legit). On both tiers these two agreement numbers
-land within a few tenths of a percent of each other — the surrogate
-tracks RF symmetrically in both directions, not by picking up the
-easy class. The deployment-level columns (`tree_sens` vs. `rf_sens`,
-`tree_spec` vs. `rf_spec`) say the same thing differently: the
-surrogate preserves the RF's operating point on the ground truth, so
-a reader who actually uses the tree instead of the RF would block and
-allow almost the same URLs. If Sens-vs-RF and Spec-vs-RF had diverged
+land within a few tenths of a percent of each other — Lexical
+0.957 / 0.962 (diff 0.005), FullLite 0.987 / 0.985 (diff 0.002) — the
+surrogate tracks RF symmetrically in both directions, not by picking
+up the easy class. If Sens-vs-RF and Spec-vs-RF had diverged
 substantially, it would mean the tree copied RF well on one class and
 not on the other — a warning that the "visualisation" was hiding a
 class-specific failure mode. They don't, so the visualisation is
 balanced.
+
+The depth saturation table is worth re-reading with that in mind: at
+depth 3 on Lexical the surrogate's `Spec vs RF` collapses to ~0.87
+while `Sens vs RF` stays at ~0.98 — an 11 pp asymmetry that means
+the shallow tree only copies RF on the phish side. The asymmetry
+shrinks monotonically with depth and is gone by depth 6–7 (~0.97 on
+both axes). That is the empirical justification for picking depth ≥ 5
+as the readability floor, separate from the fidelity argument:
+*shallower diagrams visualise only half of the RF's behaviour.*
+
+**Deployment operating point — and where the single-tree cost shows up.**
+The deployment-level columns (`tree_sens` vs. `rf_sens`, `tree_spec`
+vs. `rf_spec`) ask a different question: if a reader replaces the RF
+with the surrogate in production, how much does the operating point
+shift? On **FullLite** the answer is "barely" — Sens shifts from
+0.997 to 0.986 (1.1 pp), Spec from 0.996 to 0.983 (1.3 pp), both
+inside the 2 pp tolerance we set as the bar for a faithful
+visualisation. On **Lexical** the picture is less rosy: Spec is
+preserved (0.743 → 0.733, 1.0 pp) but Sens drops by **3.3 pp** (0.968
+→ 0.934). That gap is genuine, not a tuning artefact — it is the
+**single-tree cost** that §6.2 motivated: Lexical is the tier where RF
+beats every parametric model by ~0.10 AUC precisely because the
+ensemble averages partial 3+-feature interactions a single rpart tree
+cannot encode. The same effect now shows up as a 0.107 gap between
+`Tree AUC` (0.862) and `RF AUC` (0.969), and as those 3.3 pp lost
+Sens. We name it explicitly rather than smoothing it over: the
+Lexical surrogate is a faithful **structural** visualisation of RF —
+same root, same feature ordering as `varImpPlot` — but it is **not**
+an operational replacement for RF on Lexical, and that is exactly the
+finding Task 4 is supposed to surface. On FullLite, where the RF lead
+over single-decision rules has already evaporated, the surrogate is
+both faithful and operationally close.
 
 **FullLite sanity check.** On FullLite every decent model sits at AUC
 ≈ 0.999 (§6.1), so a tree of any non-trivial depth trivially matches
