@@ -51,6 +51,69 @@ clear_workdir <- function() {
 
 ui <- fluidPage(
   useShinyjs(),
+  tags$head(tags$style(HTML("
+    details.hp-section {
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      padding: 4px 10px;
+      margin-bottom: 8px;
+      background: #f9fafb;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    details.hp-section[open] {
+      background: #ffffff;
+      border-color: #4C78A8;
+      padding-bottom: 8px;
+    }
+    details.hp-section > summary {
+      cursor: pointer;
+      font-weight: 600;
+      color: #1f2937;
+      padding: 6px 2px;
+      list-style: none;
+      outline: none;
+      user-select: none;
+    }
+    details.hp-section > summary::-webkit-details-marker { display: none; }
+    details.hp-section > summary::before {
+      content: '\\25B8';
+      display: inline-block;
+      width: 14px;
+      color: #4C78A8;
+      transition: transform 0.15s;
+    }
+    details.hp-section[open] > summary::before {
+      transform: rotate(90deg);
+    }
+    details.hp-section > summary:hover { color: #4C78A8; }
+    details.hp-section .form-group { margin-bottom: 6px; }
+
+    .config-panel {
+      background: #f0f7ff;
+      border-left: 4px solid #4C78A8;
+      padding: 10px 14px;
+      margin-bottom: 14px;
+      border-radius: 4px;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .config-panel .config-meta { color: #6b7280; font-size: 12px; }
+    .config-panel .config-row  { margin-top: 4px; }
+    .config-panel .config-model {
+      display: inline-block;
+      margin-right: 14px;
+      margin-bottom: 2px;
+    }
+    .config-panel .config-model strong { color: #1f2937; }
+    .config-panel .config-model code {
+      color: #4C78A8;
+      background: #e9f0fa;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+    .config-panel .config-empty { color: #9ca3af; font-style: italic; }
+  "))),
   titlePanel("Phishing Detection - Scenario 2 (Parametric vs Non-parametric)"),
 
   sidebarLayout(
@@ -87,6 +150,8 @@ ui <- fluidPage(
 
       hr(),
       h4("4. Models"),
+      checkboxInput("model_all", strong("All (select every model)"),
+                    value = TRUE),
       checkboxGroupInput("models_sel", NULL,
                          choices  = MODEL_CHOICES,
                          selected = unname(MODEL_CHOICES)),
@@ -95,27 +160,34 @@ ui <- fluidPage(
 
       hr(),
       h4("5. Hyperparameters"),
-      tags$details(tags$summary("LogReg-Ridge"),
+      helpText("Click a model to expand its tunable parameters. ",
+               "LDA has no tunable hyperparameters."),
+      tags$details(class = "hp-section",
+        tags$summary("LogReg-Ridge"),
         sliderInput("lr_alpha",  "alpha (0=ridge,1=lasso)",
                     0, 1, 0, step = 0.05),
         sliderInput("lr_lambda", "lambda",
                     0, 1, 0.01, step = 0.005)
       ),
-      tags$details(tags$summary("NaiveBayes"),
+      tags$details(class = "hp-section",
+        tags$summary("NaiveBayes"),
         sliderInput("nb_fL",     "Laplace smoothing fL", 0, 5, 1, step = 0.5),
         sliderInput("nb_adjust", "Kernel bandwidth adjust",
                     0.5, 3, 1, step = 0.1)
       ),
-      tags$details(tags$summary("RandomForest"),
+      tags$details(class = "hp-section",
+        tags$summary("RandomForest"),
         sliderInput("rf_ntree", "ntree",  50, 800, 300, step = 50),
         sliderInput("rf_mtry",  "mtry (capped at #features)",
                     1, 20, 5, step = 1)
       ),
-      tags$details(tags$summary("SVM-RBF"),
+      tags$details(class = "hp-section",
+        tags$summary("SVM-RBF"),
         sliderInput("svm_C",     "Cost C",     0.1, 10, 1, step = 0.1),
         sliderInput("svm_sigma", "RBF sigma", 0.01, 1, 0.1, step = 0.01)
       ),
-      tags$details(tags$summary("KNN"),
+      tags$details(class = "hp-section",
+        tags$summary("KNN"),
         sliderInput("knn_k", "k", 1, 75, 25, step = 2)
       ),
 
@@ -142,6 +214,7 @@ ui <- fluidPage(
 
     mainPanel(
       width = 8,
+      uiOutput("active_config_panel"),
       tabsetPanel(
         id = "main_tabs",
         tabPanel("Summary table",
@@ -255,15 +328,37 @@ server <- function(input, output, session) {
   )
 
   # ---- Tier <-> All sync ----------------------------------------------------
+  # "All" acts as a toggle: ticking selects every tier, unticking clears all.
   observeEvent(input$tier_all, {
     if (isTRUE(input$tier_all)) {
       updateCheckboxGroupInput(session, "tiers_sel", selected = TIERS_ALL)
+    } else if (length(input$tiers_sel) == length(TIERS_ALL)) {
+      updateCheckboxGroupInput(session, "tiers_sel",
+                               selected = character(0))
     }
   })
   observeEvent(input$tiers_sel, {
     is_all <- setequal(input$tiers_sel, TIERS_ALL)
     if (is_all != isTRUE(input$tier_all)) {
       updateCheckboxInput(session, "tier_all", value = is_all)
+    }
+  }, ignoreNULL = FALSE)
+
+  # ---- Model <-> All sync ---------------------------------------------------
+  # "All" acts as a toggle: ticking selects every model, unticking clears all.
+  observeEvent(input$model_all, {
+    if (isTRUE(input$model_all)) {
+      updateCheckboxGroupInput(session, "models_sel",
+                               selected = unname(MODEL_CHOICES))
+    } else if (length(input$models_sel) == length(MODEL_CHOICES)) {
+      updateCheckboxGroupInput(session, "models_sel",
+                               selected = character(0))
+    }
+  })
+  observeEvent(input$models_sel, {
+    is_all <- setequal(input$models_sel, unname(MODEL_CHOICES))
+    if (is_all != isTRUE(input$model_all)) {
+      updateCheckboxInput(session, "model_all", value = is_all)
     }
   }, ignoreNULL = FALSE)
 
@@ -473,6 +568,55 @@ server <- function(input, output, session) {
   selected_model_labels <- reactive({
     ids <- intersect(input$models_sel, unname(MODEL_CHOICES))
     names(MODEL_CHOICES)[match(ids, MODEL_CHOICES)]
+  })
+
+  # Active-setup banner shown above every tab so the user always sees which
+  # models + hyperparameter values + split sizes the visible tables refer to.
+  output$active_config_panel <- renderUI({
+    sel_ids <- intersect(input$models_sel, unname(MODEL_CHOICES))
+    tiers   <- intersect(input$tiers_sel,  TIERS_ALL)
+
+    hp_chip <- function(m_id) {
+      label <- names(MODEL_CHOICES)[match(m_id, MODEL_CHOICES)]
+      params <- switch(m_id,
+        "lr"  = sprintf("alpha=%.2f, lambda=%.3f",
+                        input$lr_alpha, input$lr_lambda),
+        "nb"  = sprintf("fL=%.1f, adjust=%.1f",
+                        input$nb_fL, input$nb_adjust),
+        "rf"  = sprintf("ntree=%d, mtry=%d",
+                        as.integer(input$rf_ntree),
+                        as.integer(input$rf_mtry)),
+        "svm" = sprintf("C=%.2f, sigma=%.3f",
+                        input$svm_C, input$svm_sigma),
+        "knn" = sprintf("k=%d", as.integer(input$knn_k)),
+        "lda" = "no tunable hyperparameters",
+        "—"
+      )
+      span(class = "config-model",
+           strong(paste0(label, ":")), " ", tags$code(params))
+    }
+
+    meta <- if (length(sel_ids) && length(tiers)) {
+      sprintf(paste0("%d model(s) x %d tier(s) | n_sub=%s, train=%.0f%%, ",
+                     "k=%d folds"),
+              length(sel_ids), length(tiers),
+              format(input$n_sub, big.mark = ","),
+              100 * input$p_train, input$k_folds)
+    } else {
+      "Select at least one model and one tier in the sidebar."
+    }
+
+    chips <- if (length(sel_ids)) {
+      div(class = "config-row", lapply(sel_ids, hp_chip))
+    } else {
+      div(class = "config-row",
+          span(class = "config-empty", "No models selected."))
+    }
+
+    div(class = "config-panel",
+        strong("Active setup "),
+        span(class = "config-meta", paste0("(", meta, ")")),
+        chips)
   })
 
   results_long <- reactive({
