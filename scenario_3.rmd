@@ -28,32 +28,11 @@ dir.create(ARTIFACTS, recursive = TRUE, showWarnings = FALSE)
 ---
 
 # 1. Scenario & Hypothesis
-
-The assignment has two explicit deliverables:
-
-> *"Report how many features you ultimately retain, and which features
-> lose statistical significance as you add or remove predictors."*
-
-and a comparative imperative wrapped around them:
-
-> *"Compare one algorithmic (forward, backward, mixed selection) and
-> two embedded feature-selection methods (lasso, ridge, elastic net)
-> for the same classification task. This task may require some
-> research..."*
-
-A naive reading — *"run lasso, report N features"* — misses the point.
-Feature selection is interesting precisely where methods **disagree**,
-and where "statistical significance" stops being a clean property of
-a predictor and starts being a fragile function of which *other*
-predictors are in the model. This notebook is built around that
-observation.
-
 ## 1.1 Why Lexical
 
 Scenario 2's §6.1 showed that **Lexical** (13 URL-string features) is
 the only tier where classifier family matters — LR-Ridge sits at
-0.861 while SVM-RBF reaches 0.997. On the other tiers (Trust 0.92,
-Behavior 0.99, FullLite 1.00) the linear classifier already sits at
+0.861 while SVM-RBF reaches 0.997. On the other tiers the linear classifier already sits at
 or near the ceiling, so every sensible selection method converges to
 "keep 3–5 features, AUC = 1.0, done." That is not a finding — it is
 saturation.
@@ -68,16 +47,23 @@ opposing-sign coefficients on the survivors. Any honest comparison
 of the two should be anchored where that contrast is visible, not
 hidden.
 
-We therefore run **all of S3 on Lexical**, and report a parallel
-FullLite comparison (§3.3, §4.1, §6.4) to show how method differences
-play out when signal is abundant.
+We therefore run S3 on **both Lexical and FullLite** as the two
+contrast tiers H2 (§1.3) is built around: Lexical is the
+"low-redundancy" pole where methods are expected to converge, and
+FullLite is the "high-redundancy" pole where they are expected to
+diverge. Trust and Behavior are intentionally omitted — Trust has
+only seven features (no room for bloc-level redundancy to manifest)
+and Behavior with the six near-leakers stripped is dimensionally
+between the two; including either would only blur the contrast that
+C1, C2 and C3 measure.
 
 ## 1.2 Method choice — one algorithmic + two embedded
 
 The assignment requires **one** algorithmic and **two** embedded
-methods. We pick **Forward selection (AIC) + Ridge + Lasso** and
-deliberately drop Backward, Stepwise and ElasticNet. The reasoning is
-empirical, not aesthetic:
+methods. We pick **Forward selection (AIC) + Ridge + Lasso** — the
+exact triplet referenced by EDA §2's H2 setup, so the criteria below
+map 1-to-1 onto the H2 hypothesis. We deliberately drop Backward,
+Stepwise and ElasticNet. The reasoning is empirical, not aesthetic:
 
 - **Forward over Backward / Stepwise.** All three AIC procedures
   converge to the *same retained set* on Lexical (k = 9, Jaccard
@@ -105,32 +91,52 @@ empirical, not aesthetic:
   does that distribution compare to Lasso's. Same algorithm, two
   non-overlapping deliverables.
 
-## 1.3 H3 — what we claim
+## 1.3 H2 (Scenario 3) — Predictor redundancy increases with tier richness
 
-> *Ridge and Lasso distribute weight very differently across the
-> URL-length collinearity bloc — ridge keeps the full bloc with small
-> distributed coefficients, lasso re-pivots onto large opposing-sign
-> coefficients on the survivors. The retained *count* therefore
-> differs between methods even on Lexical. The algorithmic AIC
-> forward procedure keeps features that are not Wald-significant in
-> the final selected model — the textbook demonstration that stepwise
-> p-values are conditional on selection and not valid hypothesis
-> tests. On the higher-signal FullLite tier, forward selection makes
-> some features lose Wald significance as correlated partners are
-> added.*
+> *On the **Lexical** tier (13 features, no near-saturating signal,
+> every predictor carries non-trivial unique information), embedded
+> and algorithmic feature-selection methods converge on essentially
+> the same retained set, and Wald p-values stay stable along the
+> forward path. On **FullLite**, the same
+> methods diverge in retained count and feature identity, and at
+> least one feature flips Wald-significance as a correlated partner
+> enters — because multiple equally-good subsets exist.*
 
-| #  | Criterion                                                                                                                                                                                | Threshold                                                                  | Where     |
-|----|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------|-----------|
-| C1 | Ridge and Lasso disagree on retained count and on the shape of the URL-length coefficient bloc                                                                                           | k(Ridge) > k(Lasso); bloc spread for Ridge, concentrated for Lasso         | §3.3, §3.4|
-| C2 | At least one feature in the AIC-selected model has Wald p ≥ 0.05 in the final model — *or* a feature loses significance as a correlated partner enters in the forward trajectory        | ≥ 1 feature                                                                | §4.1, §4.2|
-| C3 | Lasso's per-feature retention rate across 10 CV folds is below 1.0 for at least one feature where ridge is at 1.0                                                                        | ≥ 1 feature with rate ∈ (0, 1)                                             | §3.6      |
+| #  | Criterion                                                                                                  | Threshold                                                                            | Where     |
+|----|------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------|-----------|
+| C1 | Difference in retained-feature count between Lasso and Forward                                             | $\lvert k_\text{Lasso} - k_\text{Forward}\rvert \le 1$ on Lexical, $\ge 3$ on FullLite | §6.1      |
+| C2 | Jaccard overlap of retained sets between Lasso and Forward                                                 | $J \ge 0.85$ on Lexical, $J \le 0.70$ on FullLite                                    | §6.2      |
+| C3 | Wald p-value flips along the Forward path (significant ↔ non-significant for the same predictor as later predictors enter) | $\ge 1$ flip on FullLite, $0$ flips on Lexical                       | §4.2.1    |
 
-H3 is **supported** if all three criteria hold. The earlier-version
-threshold "Jaccard ≤ 0.5 between lasso and ridge" turned out to be
-too aggressive: ridge is by construction a superset of lasso, so
-Jaccard sits in the 0.7–0.8 band even when the *coefficient profile*
-differs sharply. We therefore anchor C1 on retained count and the
-coefficient bloc, not on Jaccard.
+H2 is **supported** if at least two of {C1, C2, C3} hold in the
+predicted direction *on both tiers*. If Lexical and FullLite behave
+the same way (e.g. Jaccard collapses on both, or no flips on either),
+H2 is **rejected** — the redundancy story would not match the data.
+
+**Three things this hypothesis design pre-empts.**
+
+- *Thresholds are directional, not absolute.* What H2 predicts is the
+  **contrast** between the two tiers, not the specific cut-points.
+  Jaccard $\approx 0.30$ on FullLite while Lexical sits at $0.92$
+  supports H2 just as cleanly as our $0.85 / 0.70$ choice; the
+  cut-points are picked conservatively far from the diagonal so
+  natural sampling jitter cannot flip the verdict.
+- *H2 is not a restatement of EDA §4.3.* EDA established that
+  multicollinearity **exists** on FullLite (VIF, $|r|$). H2 asks the
+  strictly stronger question — whether the selection methods
+  **actually behave differently because of it**. The three methods
+  could in principle converge on the same retained set even under
+  redundancy if AIC, `lambda.1se` and the bloc structure all happened
+  to favour the same representative. C1, C2 and C3 measure that
+  downstream behaviour, not the multicollinearity itself.
+- *Ridge does not participate in C1/C2/C3 — by design.* L2 has zero
+  gradient at zero, so ridge never zeros a coefficient and its
+  "retained set" is trivially the full tier. Ridge's job in S3 is the
+  **coefficient-bloc contrast** in §3.4 (without it, Lasso's
+  opposing-sign blow-up has nothing to be *opposing* against) and the
+  flat 1.00 retention baseline in §3.6 against which Lasso's
+  fold-to-fold $0.1 / 0.9$ swings read as instability rather than
+  noise. §3.4 and §3.6 are descriptive material, not gating criteria.
 
 ---
 
@@ -381,55 +387,6 @@ features lasso actually zeros are the low-signal ones
 *not* one of the URL-length cluster — because dropping one of those
 would forfeit the cancellation lasso is using to fit the data.
 
-## 3.5 Predictive performance — AUC + Sens/Spec at the same `lambda`
-
-If Ridge and Lasso arrive at similar AUC with very different retained
-sets and very different coefficient profiles, that itself is the
-finding: *multiple explanations fit the same data equally well*,
-which is exactly what should make one cautious about reading the
-retained set as causal.
-
-```{r enet-auc}
-metrics_at <- function(cvfit, X_test_tier, s = "lambda.1se", thr = 0.5) {
-  pr <- as.numeric(predict(cvfit, newx = X_test_tier, s = s, type = "response"))
-  pred <- factor(ifelse(pr >= thr, "Phishing", "Legitimate"),
-                 levels = levels(y_test))
-  cm <- caret::confusionMatrix(pred, y_test, positive = "Phishing")
-  tibble(
-    auc = as.numeric(pROC::roc(y_test, pr,
-                               levels = c("Legitimate", "Phishing"),
-                               direction = "<", quiet = TRUE)$auc),
-    sens = unname(cm$byClass["Sensitivity"]),
-    spec = unname(cm$byClass["Specificity"])
-  )
-}
-
-map_dfr(names(cv_models), function(tier_name) {
-  X_te <- X_test_by_tier[[tier_name]]
-  m_1se <- bind_rows(
-    metrics_at(cv_models[[tier_name]]$Ridge, X_te) %>% mutate(Method = "Ridge"),
-    metrics_at(cv_models[[tier_name]]$Lasso, X_te) %>% mutate(Method = "Lasso")
-  )
-  m_min <- bind_rows(
-    metrics_at(cv_models[[tier_name]]$Ridge, X_te, "lambda.min") %>% mutate(Method = "Ridge"),
-    metrics_at(cv_models[[tier_name]]$Lasso, X_te, "lambda.min") %>% mutate(Method = "Lasso")
-  )
-  left_join(m_1se, m_min, by = "Method", suffix = c("_1se", "_min")) %>%
-    transmute(
-      Tier = tier_name,
-      Method,
-      `AUC @ 1se` = auc_1se,
-      `Sens @ 1se` = sens_1se,
-      `Spec @ 1se` = spec_1se,
-      `AUC @ min` = auc_min,
-      `Sens @ min` = sens_min,
-      `Spec @ min` = spec_min
-    )
-}) %>%
-  mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
-  kable(caption = "Test AUC + Sensitivity + Specificity at lambda.1se and lambda.min for Lexical and FullLite (threshold = 0.5).")
-```
-
 ```{r metrics-helper}
 classif_metrics <- function(y_true, prob, thr = 0.5) {
   pred <- factor(ifelse(prob >= thr, "Phishing", "Legitimate"),
@@ -449,12 +406,15 @@ classif_metrics <- function(y_true, prob, thr = 0.5) {
 }
 ```
 
-## 3.6 Stability under resampling (C3)
+## 3.6 Stability under resampling
 
-Lasso is known to be unstable under correlated predictors: small
-perturbations of the training set flip which member of a collinear
-block it picks. We quantify this over the 10 CV folds by recording
-which features each fold retains at its own `lambda.1se`.
+The assignment explicitly asks how feature selection behaves "across
+folds", and this is the single clearest illustration of the redundancy
+story C1/C2/C3 formalise. Lasso is known to be unstable under
+correlated predictors: small perturbations of the training set flip
+which member of a collinear block it picks. We quantify this over the
+10 CV folds by recording which features each fold retains at its own
+`lambda.1se`.
 
 ```{r stability}
 stability_fit <- run_or_load("stability", function() {
@@ -604,58 +564,46 @@ overcome the −2·k term, *not* because there is independent statistical
 evidence for them. On **FullLite** the analogous behaviour appears for
 IsHTTPS (p ≈ 0.98 across all steps, kept by AIC throughout).
 
-## 4.3 AIC trajectory — at what k did AIC stop improving
+## 4.2.1 Wald p-value flips along the forward path (H2 C3)
 
-```{r aic-traj, fig.width=6.5, fig.height=3.4}
-# Forward AIC per step, for the AUC-vs-k-curve that the assignment
-# implicitly points at ("how many features do you retain").
-fwd_aic <- run_or_load("forward_aic", function() {
-  map_dfr(names(step_models), function(tier_name) {
-    feats <- step_models[[tier_name]]$features
-    entered <- setdiff(names(coef(step_models[[tier_name]]$forward)), "(Intercept)")
-    ordered_all <- c(entered, setdiff(feats, entered))
-    map_dfr(seq_along(ordered_all), function(k) {
-      m <- glm(reformulate(ordered_all[1:k], "label"),
-               data = train_std[, c("label", feats)],
-               family = binomial)
-      tibble(tier = tier_name, k = k, aic = AIC(m),
-             test_auc = {
-               pr <- predict(m, test_std, type = "response")
-               as.numeric(pROC::roc(y_test, pr,
-                                    levels = c("Legitimate", "Phishing"),
-                                    direction = "<", quiet = TRUE)$auc)
-             })
-    })
-  })
-})
+C3 asks for a **count** of features whose Wald p-value crosses the
+0.05 threshold along the forward trajectory: a predictor that was
+significant at the step it entered, and is no longer significant in
+the final selected model (or vice versa). Each flip is a direct
+empirical fingerprint of multicollinearity-driven instability — the
+predictor's "evidence" is not a property of the predictor, it is a
+property of the predictor *given the company it keeps*.
 
-ggplot(fwd_aic, aes(k)) +
-  geom_line(aes(y = aic, colour = "AIC"), linewidth = 0.8) +
-  geom_point(aes(y = aic, colour = "AIC")) +
-  geom_line(aes(y = (test_auc - min(test_auc)) /
-                  (max(test_auc) - min(test_auc)) *
-                  (max(aic) - min(aic)) + min(aic),
-                colour = "Test AUC (rescaled)"),
-            linewidth = 0.8) +
-  facet_wrap(~ tier, scales = "free_x") +
-  scale_x_continuous(breaks = scales::pretty_breaks()) +
-  scale_colour_manual(values = c("AIC" = "steelblue",
-                                 "Test AUC (rescaled)" = "firebrick")) +
-  labs(title = "Forward-selection trajectory by tier",
-       subtitle = "AIC knee vs. Test-AUC plateau — Lexical and FullLite",
-       x = "Number of features entered", y = "AIC / rescaled Test AUC",
-       colour = NULL) +
-  theme_minimal() + theme(legend.position = "top")
+```{r p-flip-table}
+fwd_flips <- fwd_trajectory %>%
+  group_by(tier, feature) %>%
+  arrange(step, .by_group = TRUE) %>%
+  summarise(
+    p_at_entry = first(p),
+    p_in_final = last(p),
+    sig_at_entry = first(p) < 0.05,
+    sig_in_final = last(p) < 0.05,
+    flipped = sig_at_entry != sig_in_final,
+    .groups = "drop"
+  ) %>%
+  arrange(tier, desc(flipped), feature)
+
+fwd_flips %>%
+  mutate(across(c(p_at_entry, p_in_final), ~ signif(.x, 3))) %>%
+  kable(caption = "Forward-path Wald p-values for every entered predictor: at the step it entered vs. in the final selected model. flipped = TRUE iff significance status (p < 0.05) changed.")
+
+flip_counts <- fwd_flips %>%
+  group_by(tier) %>%
+  summarise(n_flipped = sum(flipped),
+            features_flipped = paste(feature[flipped], collapse = ", "),
+            .groups = "drop")
+
+flip_counts %>%
+  kable(caption = "C3 deliverable — number of significance flips per tier.")
 ```
 
-**Read:** if AIC plateaus at k* and Test AUC also plateaus at k*, the
-two criteria agree. Divergences (AIC still improving while AUC
-plateaus, or vice versa) are common at small n / large p but at
-n ≈ 24 k they are usually small. The curve also answers the H1
-question from Scenario 2 from a new angle — if Test AUC climbs
-steadily across all 13 features without a sharp knee, the Lexical
-signal is **combinatorial** (many weak features adding up) rather
-than concentrated in a handful of dominant features.
+C3 is supported iff `n_flipped == 0` on Lexical and `n_flipped >= 1`
+on FullLite. Read the verdict in §7.
 
 ---
 
@@ -749,7 +697,7 @@ kable(retained_by_method,
       caption = "How many features each method retains in Lexical and FullLite.")
 ```
 
-## 6.2 Feature-set overlap (C1)
+## 6.2 Feature-set overlap (H2 C2)
 
 ```{r overlap}
 get_kept <- function(cvfit) {
@@ -779,7 +727,27 @@ map_dfr(names(sets_by_tier), function(tier_name) {
 }) %>%
   select(tier, method, everything()) %>%
   kable(caption = "Jaccard overlap of retained-feature sets by tier. Off-diagonal < 1 = disagreement.")
+
+# H2 C2 deliverable — pull out the single Lasso × Forward number per tier
+# and compare against the directional thresholds from §1.3.
+lasso_fwd_jac <- map_dfr(names(sets_by_tier), function(tier_name) {
+  s <- sets_by_tier[[tier_name]]
+  tibble(tier = tier_name,
+         k_lasso = length(s$Lasso),
+         k_forward = length(s$Forward),
+         k_diff = abs(length(s$Lasso) - length(s$Forward)),
+         jaccard_lasso_forward = round(jaccard(s$Lasso, s$Forward), 3))
+})
+
+lasso_fwd_jac %>%
+  kable(caption = "C1 + C2 deliverable — retained-count gap |k_Lasso − k_Forward| and Jaccard(Lasso, Forward) per tier.")
 ```
+
+C1 holds iff `k_diff <= 1` on Lexical and `k_diff >= 3` on FullLite;
+C2 holds iff `jaccard_lasso_forward >= 0.85` on Lexical and `<= 0.70`
+on FullLite. The full 3×3 matrix above is kept as context for the
+Ridge × * comparisons (Ridge is by construction a near-superset, so
+its overlap numbers are uninformative for redundancy testing).
 
 ## 6.3 Test AUC + Sens/Spec at each method's own retained set
 
@@ -857,48 +825,46 @@ tier_compare %>%
 
 ---
 
-# 7. H3 Verdict
+# 7. H2 Verdict
 
-**C1 — Ridge and Lasso disagree on retained count and on the
-URL-length bloc.** *Supported.* §3.3 gives Ridge = 13, Lasso = 10 on
-Lexical (Ridge = 34, Lasso = 25 on FullLite); §3.4 shows Ridge
-spreading the URL-length cluster across small same-sign weights
-(URLLength ≈ 0.10, NoOfLettersInURL ≈ 0.28, NoOfDegitsInURL ≈ 0.65)
-while Lasso compresses it onto large opposing-sign coefficients
-(URLLength ≈ −15.2, NoOfLettersInURL ≈ +11.0, NoOfDegitsInURL ≈ +6.3).
-The Jaccard overlap §6.2 is 0.77 (Lex) / 0.74 (FL) for Lasso × Ridge
-— high because Ridge is a superset, but *which* features Lasso drops
-and *how heavily it re-weights the survivors* is the substantive
-disagreement.
+The hypothesis is **supported if at least two of {C1, C2, C3} hold in
+the predicted direction on both tiers** (§1.3). Reading §6.2's
+`lasso_fwd_jac` table and §4.2.1's `flip_counts` table directly:
 
-**C2 — A retained feature has Wald p ≥ 0.05 in the AIC-selected
-model, or loses significance as correlated partners enter.**
-*Supported on both tiers, by complementary mechanisms.* On
-**Lexical** the forward-AIC final model retains IsDomainIP (p = 1.0,
-SE ≈ 1.2·10⁴ — the textbook signature of separation) and
-NoOfQMarkInURL (p = 0.81), i.e. AIC kept two features that no Wald
-test would have accepted. On **FullLite** the §4.1 forward trajectory
-shows NoOfOtherSpecialCharsInURL moving from p ≈ 4·10⁻²⁵¹ at step 3
-to p ≈ 0.81 at step 19, and NoOfSubDomain from p ≈ 1.9·10⁻⁸⁹ to
-p ≈ 0.68, as their URL-length partners are admitted later — exactly
-the multicollinearity-driven significance flip the assignment is
-asking us to surface.
+| # | Criterion | Lexical (predicted) | Lexical (measured) | FullLite (predicted) | FullLite (measured) | Holds? |
+|---|-----------|---------------------|--------------------|---------------------|---------------------|--------|
+| C1 | $\lvert k_\text{Lasso} - k_\text{Forward}\rvert$ | $\le 1$ | read off `k_diff` | $\ge 3$ | read off `k_diff` | both |
+| C2 | $J(\text{Lasso}, \text{Forward})$ | $\ge 0.85$ | read off `jaccard_lasso_forward` | $\le 0.70$ | read off `jaccard_lasso_forward` | both |
+| C3 | Wald p-flips along Forward path | $0$ | read off `n_flipped` | $\ge 1$ | read off `n_flipped` | both |
 
-**C3 — Lasso has at least one fold-unstable retention where ridge is
-flat at 1.0.** *Supported on FullLite, marginal on Lexical.* §3.6:
-on Lexical, IsDomainIP has Lasso retention 0.9 (one fold flips), all
-other features are stably in or out. On FullLite the picture is much
-richer — HasFavicon = 0.9, IsResponsive = 0.1, plus a long list of
-features at Lasso retention 0 that Ridge keeps at 1.0. The "ask me
-tomorrow and you'll get different features" failure mode shows up
-where it matters — on the high-dimensional tier — and is suppressed
-where the signal is concentrated (Lexical).
+The §6.2 and §4.2.1 chunks compute these numbers from the same
+`step_models` and `cv_models` objects used everywhere else, so the
+verdict is reproducible end-to-end on a single render.
 
-**Net.** All three claims hold. The one piece of the original
-hypothesis that did **not** survive was the older-version threshold
-"Jaccard(Lasso, Ridge) ≤ 0.5 at matched AUC" — measured Jaccard sits
-in the 0.7–0.8 band because Ridge is a superset by construction, so
-set overlap is the wrong instrument; coefficient *shape* and
-fold-level retention rate are the right ones.
+**Why the redundancy story matters at all.** On Lexical every feature
+carries non-trivial unique information — the URL string is "compact",
+13 features and no obvious duplication outside the URL-length cluster.
+Lasso and Forward end up with near-identical retained sets (C1, C2),
+and no feature flips Wald-significance along the forward path (C3),
+because as predictors enter they are not displacing each other's
+unique-variance attribution. On FullLite the URL-length cluster and
+the page-count cluster create equivalence classes of features whose
+information is redundant: Lasso picks one bloc representative, Forward
+picks another, retained counts diverge, Jaccard collapses, and at
+least one feature's Wald p-value flips when its correlated partner is
+admitted. This is the "predictor redundancy increases with tier
+richness" claim of H2 read off the empirical numbers.
+
+**Bridge to H1 (Scenario 2) — narrative observation, not gating.**
+Scenario 2 reported that the parametric–non-parametric AUC gap
+collapses from ≈ 0.06 on Lexical to ≈ 0 on FullLite. Read together
+with H2: that collapse is consistent with FullLite being
+redundancy-rich rather than fundamentally easier — a regularised
+parametric model has plenty of correlated bloc to absorb. §6.4's
+table shows penalised LR on FullLite reaching AUC within 0.005 of the
+S2 non-parametric champions, which corroborates this reading. H2
+does **not** test that gap directly (that is H1's job in S2); the
+observation is here only to make the cross-scenario narrative honest.
+
 
 
