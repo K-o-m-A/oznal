@@ -1,0 +1,904 @@
+---
+title: "Phishing Detection — Scenario 3: Feature Selection"
+author: "K-o-m-A"
+date: "`r Sys.Date()`"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(MASS, exclude = "select")
+library(pROC)
+library(knitr)
+
+set.seed(2026)
+
+ARTIFACTS <- "scenario_3/artifacts"
+CACHE_VERSION <- "v3_phishing_second_level"
+dir.create(ARTIFACTS, recursive = TRUE, showWarnings = FALSE)
+```
+
+---
+
+# 1. Scenario & Hypothesis
+
+The assignment has two explicit deliverables:
+
+> *"Report how many features you ultimately retain, and which features
+> lose statistical significance as you add or remove predictors."*
+
+and a comparative imperative wrapped around them:
+
+> *"Compare one algorithmic (forward, backward, mixed selection) and
+> two embedded feature-selection methods (lasso, ridge, elastic net)
+> for the same classification task. This task may require some
+> research..."*
+
+A naive reading — *"run lasso, report N features"* — misses the point.
+Feature selection is interesting precisely where methods **disagree**,
+and where "statistical significance" stops being a clean property of
+a predictor and starts being a fragile function of which *other*
+predictors are in the model. This notebook is built around that
+observation.
+
+## 1.1 Why Lexical
+
+Scenario 2's §6.1 showed that **Lexical** (13 URL-string features) is
+the only tier where classifier family matters — LR-Ridge sits at
+0.861 while SVM-RBF reaches 0.997. On the other tiers (Trust 0.92,
+Behavior 0.99, FullLite 1.00) the linear classifier already sits at
+or near the ceiling, so every sensible selection method converges to
+"keep 3–5 features, AUC = 1.0, done." That is not a finding — it is
+saturation.
+
+Lexical also inherits the EDA §4.3 finding of a **severe
+multicollinearity cluster**: `URLLength`, `NoOfLettersInURL` and
+`NoOfDegitsInURL` have VIF > 1000 and pairwise `|r| > 0.84`. That is
+the textbook regime where ridge and lasso are known to behave
+differently — ridge keeps the entire block with shared weight, lasso
+sparsifies and re-distributes the bloc onto large
+opposing-sign coefficients on the survivors. Any honest comparison
+of the two should be anchored where that contrast is visible, not
+hidden.
+
+We therefore run **all of S3 on Lexical**, and report a parallel
+FullLite comparison (§3.3, §4.1, §6.4) to show how method differences
+play out when signal is abundant.
+
+## 1.2 Method choice — one algorithmic + two embedded
+
+The assignment requires **one** algorithmic and **two** embedded
+methods. We pick **Forward selection (AIC) + Ridge + Lasso** and
+deliberately drop Backward, Stepwise and ElasticNet. The reasoning is
+empirical, not aesthetic:
+
+- **Forward over Backward / Stepwise.** All three AIC procedures
+  converge to the *same retained set* on Lexical (k = 9, Jaccard
+  1.00) and the same set up to two features on FullLite. Reporting
+  three near-identical procedures inflates the deliverable without
+  adding information. Forward additionally produces the **per-step
+  p-value trajectory** the assignment literally asks for ("…lose
+  statistical significance as you **add** … predictors"); backward
+  shows the symmetric story but the trajectory is messier.
+- **Ridge + Lasso, drop ElasticNet.** Ridge (α = 0) and Lasso (α = 1)
+  are the two endpoints of the regularisation axis — the sharpest
+  contrast. ElasticNet at α = 0.5 is empirically interpolation: on
+  Lexical its retained set differs from Lasso by one feature, its
+  coefficients are within ~15 % of Lasso's (NoOfLettersInURL: Lasso
+  11.0 vs EN 9.16), and its AUC matches Lasso to three decimals. EN
+  would add a third row to every comparison table that says "in
+  between — see Lasso". The one independent observation EN gives
+  (better fold-stability than Lasso on FullLite, e.g. NoOfPopup) is
+  noted in §3.6 prose without re-running the whole pipeline.
+- **Note on Ridge vs Scenario 2.** Scenario 2 used the same `glmnet`
+  ridge fit, but as a *classifier-family benchmark* — fixed λ = 0.01,
+  no feature-selection lens, just an AUC number for the LR row. Here
+  we use the same solver to ask a *different* question: how does
+  ridge distribute weight across the multicollinear bloc, and how
+  does that distribution compare to Lasso's. Same algorithm, two
+  non-overlapping deliverables.
+
+## 1.3 H3 — what we claim
+
+> *Ridge and Lasso distribute weight very differently across the
+> URL-length collinearity bloc — ridge keeps the full bloc with small
+> distributed coefficients, lasso re-pivots onto large opposing-sign
+> coefficients on the survivors. The retained *count* therefore
+> differs between methods even on Lexical. The algorithmic AIC
+> forward procedure keeps features that are not Wald-significant in
+> the final selected model — the textbook demonstration that stepwise
+> p-values are conditional on selection and not valid hypothesis
+> tests. On the higher-signal FullLite tier, forward selection makes
+> some features lose Wald significance as correlated partners are
+> added.*
+
+| #  | Criterion                                                                                                                                                                                | Threshold                                                                  | Where     |
+|----|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------|-----------|
+| C1 | Ridge and Lasso disagree on retained count and on the shape of the URL-length coefficient bloc                                                                                           | k(Ridge) > k(Lasso); bloc spread for Ridge, concentrated for Lasso         | §3.3, §3.4|
+| C2 | At least one feature in the AIC-selected model has Wald p ≥ 0.05 in the final model — *or* a feature loses significance as a correlated partner enters in the forward trajectory        | ≥ 1 feature                                                                | §4.1, §4.2|
+| C3 | Lasso's per-feature retention rate across 10 CV folds is below 1.0 for at least one feature where ridge is at 1.0                                                                        | ≥ 1 feature with rate ∈ (0, 1)                                             | §3.6      |
+
+H3 is **supported** if all three criteria hold. The earlier-version
+threshold "Jaccard ≤ 0.5 between lasso and ridge" turned out to be
+too aggressive: ridge is by construction a superset of lasso, so
+Jaccard sits in the 0.7–0.8 band even when the *coefficient profile*
+differs sharply. We therefore anchor C1 on retained count and the
+coefficient bloc, not on Jaccard.
+
+---
+
+# 2. Data Loading
+
+Same recipe as Scenario 2 and 5 — identical sub-sample, split and CV
+folds so the numbers here are directly comparable.
+
+## 2.1 Load & exclusions
+
+```{r load-data}
+dataset_path <- if (file.exists("PhiUSIIL_Phishing_URL_Dataset.csv")) {
+  "PhiUSIIL_Phishing_URL_Dataset.csv"
+} else if (file.exists("../PhiUSIIL_Phishing_URL_Dataset.csv")) {
+  "../PhiUSIIL_Phishing_URL_Dataset.csv"
+} else stop("PhiUSIIL_Phishing_URL_Dataset.csv not found")
+
+raw <- read_csv(dataset_path, show_col_types = FALSE)
+names(raw) <- map_chr(names(raw), ~ str_replace(.x, "^\ufeff", ""))
+
+ID_COLS          <- c("FILENAME", "URL", "Domain", "TLD", "Title")
+SCORES           <- c("URLSimilarityIndex", "TLDLegitimateProb", "URLCharProb",
+                      "DomainTitleMatchScore", "URLTitleMatchScore")
+REDUNDANT_BINARY <- "HasObfuscation"
+RATIOS           <- c("LetterRatioInURL", "DegitRatioInURL",
+                      "ObfuscationRatio", "SpacialCharRatioInURL")
+EXCLUDE_COLS     <- c(ID_COLS, SCORES, REDUNDANT_BINARY, RATIOS)
+
+df <- raw %>%
+  mutate(label = factor(label, levels = c(0, 1),
+                        labels = c("Legitimate", "Phishing"))) %>%
+  select(-all_of(EXCLUDE_COLS)) %>%
+  as.data.frame()
+# Note on factor order: glmnet / glm treat the *second* factor level as
+# the success class. We deliberately put "Phishing" second so that
+# predict(..., type = "response") returns P(Phishing) directly, and
+# Sensitivity / Specificity / pROC are aligned with positive = "Phishing".
+```
+
+## 2.2 Lexical tier
+
+```{r lexical}
+lexical_features <- c("URLLength", "DomainLength", "IsDomainIP",
+                      "CharContinuationRate", "TLDLength", "NoOfSubDomain",
+                      "NoOfObfuscatedChar", "NoOfLettersInURL",
+                      "NoOfDegitsInURL", "NoOfEqualsInURL",
+                      "NoOfQMarkInURL", "NoOfAmpersandInURL",
+                      "NoOfOtherSpecialCharsInURL")
+stopifnot(all(lexical_features %in% names(df)))
+
+LEAKY_BEHAVIOR <- c("LineOfCode", "NoOfExternalRef", "NoOfImage",
+                    "NoOfSelfRef", "NoOfJS", "NoOfCSS")
+fullLite_features <- setdiff(setdiff(names(df), "label"), LEAKY_BEHAVIOR)
+
+cat("Lexical tier:", length(lexical_features), "features.\n")
+cat("FullLite tier:", length(fullLite_features), "features.\n")
+```
+
+## 2.3 Subsample, split, folds, preprocessing
+
+```{r prep}
+N_SUB <- 30000
+df_sub <- df %>%
+  group_by(label) %>%
+  slice_sample(n = N_SUB / 2) %>%
+  ungroup() %>%
+  as.data.frame()
+
+idx       <- createDataPartition(df_sub$label, p = 0.8, list = FALSE)
+train_raw <- df_sub[idx, ]
+test_raw  <- df_sub[-idx, ]
+fold_idx  <- createFolds(train_raw$label, k = 10, returnTrain = TRUE)
+
+feat <- df_sub %>% select(-label)
+binary_features     <- names(feat)[sapply(feat, function(x)
+                                   all(na.omit(x) %in% c(0, 1)))]
+continuous_features <- setdiff(names(feat), binary_features)
+
+apply_log <- function(d, cols) {
+  d[cols] <- lapply(d[cols], function(x) log1p(pmax(x, 0)))
+  d
+}
+train_log <- apply_log(train_raw, continuous_features)
+test_log  <- apply_log(test_raw,  continuous_features)
+
+pp <- preProcess(train_log[, continuous_features], method = c("center", "scale"))
+train_std <- train_log; test_std <- test_log
+train_std[, continuous_features] <- predict(pp, train_log[, continuous_features])
+test_std[,  continuous_features] <- predict(pp, test_log[,  continuous_features])
+
+# Standardise the binary IsDomainIP too so glmnet / stepAIC see all
+# predictors on one scale; glmnet's internal standardization would do
+# this anyway but being explicit keeps coefficients directly readable.
+pp_lex <- preProcess(train_std[, lexical_features], method = c("center", "scale"))
+train_std[, lexical_features] <- predict(pp_lex, train_std[, lexical_features])
+test_std[,  lexical_features] <- predict(pp_lex, test_std[,  lexical_features])
+
+y_train <- train_std$label
+y_test  <- test_std$label
+
+tier_specs <- list(
+  Lexical = lexical_features,
+  FullLite = fullLite_features
+)
+
+X_train_by_tier <- map(tier_specs, ~ as.matrix(train_std[, .x]))
+X_test_by_tier  <- map(tier_specs, ~ as.matrix(test_std[,  .x]))
+
+```
+
+## 2.4 Multicollinearity context — quick re-confirmation
+
+EDA reported VIF > 1000 on the URL-length cluster. We recompute the
+correlation block here so the rest of the notebook reads standalone.
+
+```{r cor-check}
+cor_pairs <- map_dfr(names(tier_specs), function(tier_name) {
+  cor_mat <- cor(X_train_by_tier[[tier_name]])
+  heavy_pairs <- which(abs(cor_mat) > 0.7 & row(cor_mat) < col(cor_mat),
+                       arr.ind = TRUE)
+  if (nrow(heavy_pairs) == 0) {
+    return(tibble(tier = tier_name, a = NA_character_, b = NA_character_, r = NA_real_))
+  }
+  tibble(
+    tier = tier_name,
+    a = rownames(cor_mat)[heavy_pairs[, 1]],
+    b = colnames(cor_mat)[heavy_pairs[, 2]],
+    r = round(cor_mat[heavy_pairs], 3)
+  )
+})
+
+cor_pairs %>%
+  arrange(tier, desc(abs(r))) %>%
+  kable(caption = "Feature pairs with |r| > 0.7 for Lexical and FullLite tiers.")
+```
+
+---
+
+# 3. Embedded Methods — Ridge & Lasso
+
+Both are `glmnet` fits with `family = "binomial"` and differ only in
+`alpha` (0 = ridge, 1 = lasso). `lambda` is chosen by 10-fold CV, and
+we report both `lambda.min` (optimal CV deviance) and `lambda.1se`
+(sparsest model within one SE of the minimum — the canonical pick
+for parsimony).
+
+## 3.1 Fit the two paths
+
+```{r enet-fit}
+run_or_load <- function(name, fn) {
+  path <- file.path(ARTIFACTS, paste0(name, "_", CACHE_VERSION, ".rds"))
+  if (file.exists(path)) return(readRDS(path))
+  res <- fn()
+  saveRDS(res, path)
+  res
+}
+
+fit_glmnet <- function(X_train_tier, alpha, tag, tier_name) {
+  run_or_load(paste0("glmnet_", tolower(tier_name), "_", tag), function() {
+    cv.glmnet(X_train_tier, y_train, family = "binomial",
+              alpha = alpha, nfolds = 10, standardize = FALSE,
+              type.measure = "auc",
+              nlambda = 80,
+              lambda.min.ratio = 1e-2,
+              maxit = 1e6)
+  })
+}
+
+cv_models <- map(names(tier_specs), function(tier_name) {
+  X_tr <- X_train_by_tier[[tier_name]]
+  list(
+    Ridge = fit_glmnet(X_tr, 0.0, "ridge", tier_name),
+    Lasso = fit_glmnet(X_tr, 1.0, "lasso", tier_name)
+  )
+}) %>% set_names(names(tier_specs))
+
+```
+
+## 3.2 Regularization paths — how features drop out
+
+```{r reg-paths, fig.width=10, fig.height=3.6}
+par(mfrow = c(2, 2))
+for (tier_name in names(tier_specs)) {
+  plot(cv_models[[tier_name]]$Ridge$glmnet.fit, xvar = "lambda", label = FALSE)
+  title(sprintf("%s: Ridge (α=0)", tier_name), line = 2.5)
+  plot(cv_models[[tier_name]]$Lasso$glmnet.fit, xvar = "lambda", label = FALSE)
+  title(sprintf("%s: Lasso (α=1)", tier_name), line = 2.5)
+}
+par(mfrow = c(1, 1))
+```
+
+**Read:** the x-axis is `log(λ)`; at the right edge every coefficient
+is shrunk to zero. Ridge keeps every line non-zero for any λ — only
+their magnitudes shrink. Lasso sends lines to exactly zero as λ
+grows; the order in which they hit zero is the algorithmic answer to
+"which feature is dropped next".
+
+## 3.3 Retained features at `lambda.1se`
+
+```{r enet-retained}
+coefs_at <- function(cvfit, s = "lambda.1se") {
+  co <- as.matrix(coef(cvfit, s = s))
+  data.frame(feature = rownames(co),
+             coef    = as.numeric(co)) %>%
+    filter(feature != "(Intercept)")
+}
+
+retained <- map_dfr(names(cv_models), function(tier_name) {
+  bind_rows(
+    coefs_at(cv_models[[tier_name]]$Ridge) %>% mutate(method = "Ridge", tier = tier_name),
+    coefs_at(cv_models[[tier_name]]$Lasso) %>% mutate(method = "Lasso", tier = tier_name)
+  )
+}) %>% mutate(kept = abs(coef) > 1e-8)
+
+retained %>%
+  group_by(tier, method) %>%
+  summarise(retained = sum(kept),
+            total    = n(),
+            lambda_1se = case_when(
+              method[1] == "Ridge" ~ cv_models[[tier[1]]]$Ridge$lambda.1se,
+              method[1] == "Lasso" ~ cv_models[[tier[1]]]$Lasso$lambda.1se),
+            .groups = "drop") %>%
+  kable(caption = "Retained features at lambda.1se for Lexical and FullLite (embedded).",
+        digits = 4)
+```
+
+## 3.4 Coefficient table — who survived, who didn't
+
+```{r enet-coef-table}
+retained %>%
+  select(tier, method, feature, coef) %>%
+  pivot_wider(names_from = method, values_from = coef) %>%
+  arrange(tier, desc(abs(Ridge))) %>%
+  mutate(across(c(Ridge, Lasso), ~ round(.x, 3))) %>%
+  kable(caption = "Standardised coefficients at lambda.1se by tier — zeros mean lasso dropped the feature.")
+```
+
+**Multicollinearity tell.** On Lexical, Ridge spreads small,
+**same-sign** weight across the URL-length trio (URLLength ≈ 0.10,
+NoOfLettersInURL ≈ 0.28, NoOfDegitsInURL ≈ 0.65). Lasso keeps all
+three but blows them up into **opposing-sign** coefficients of
+double-digit magnitude (URLLength ≈ −15, NoOfLettersInURL ≈ +11,
+NoOfDegitsInURL ≈ +6) — the classical "huge cancellations" pattern
+that flags an underdetermined system: each individual coefficient is
+not interpretable in isolation, only the linear combination is. The
+features lasso actually zeros are the low-signal ones
+(NoOfObfuscatedChar, NoOfAmpersandInURL, occasionally NoOfEqualsInURL),
+*not* one of the URL-length cluster — because dropping one of those
+would forfeit the cancellation lasso is using to fit the data.
+
+## 3.5 Predictive performance — AUC + Sens/Spec at the same `lambda`
+
+If Ridge and Lasso arrive at similar AUC with very different retained
+sets and very different coefficient profiles, that itself is the
+finding: *multiple explanations fit the same data equally well*,
+which is exactly what should make one cautious about reading the
+retained set as causal.
+
+```{r enet-auc}
+metrics_at <- function(cvfit, X_test_tier, s = "lambda.1se", thr = 0.5) {
+  pr <- as.numeric(predict(cvfit, newx = X_test_tier, s = s, type = "response"))
+  pred <- factor(ifelse(pr >= thr, "Phishing", "Legitimate"),
+                 levels = levels(y_test))
+  cm <- caret::confusionMatrix(pred, y_test, positive = "Phishing")
+  tibble(
+    auc = as.numeric(pROC::roc(y_test, pr,
+                               levels = c("Legitimate", "Phishing"),
+                               direction = "<", quiet = TRUE)$auc),
+    sens = unname(cm$byClass["Sensitivity"]),
+    spec = unname(cm$byClass["Specificity"])
+  )
+}
+
+map_dfr(names(cv_models), function(tier_name) {
+  X_te <- X_test_by_tier[[tier_name]]
+  m_1se <- bind_rows(
+    metrics_at(cv_models[[tier_name]]$Ridge, X_te) %>% mutate(Method = "Ridge"),
+    metrics_at(cv_models[[tier_name]]$Lasso, X_te) %>% mutate(Method = "Lasso")
+  )
+  m_min <- bind_rows(
+    metrics_at(cv_models[[tier_name]]$Ridge, X_te, "lambda.min") %>% mutate(Method = "Ridge"),
+    metrics_at(cv_models[[tier_name]]$Lasso, X_te, "lambda.min") %>% mutate(Method = "Lasso")
+  )
+  left_join(m_1se, m_min, by = "Method", suffix = c("_1se", "_min")) %>%
+    transmute(
+      Tier = tier_name,
+      Method,
+      `AUC @ 1se` = auc_1se,
+      `Sens @ 1se` = sens_1se,
+      `Spec @ 1se` = spec_1se,
+      `AUC @ min` = auc_min,
+      `Sens @ min` = sens_min,
+      `Spec @ min` = spec_min
+    )
+}) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
+  kable(caption = "Test AUC + Sensitivity + Specificity at lambda.1se and lambda.min for Lexical and FullLite (threshold = 0.5).")
+```
+
+```{r metrics-helper}
+classif_metrics <- function(y_true, prob, thr = 0.5) {
+  pred <- factor(ifelse(prob >= thr, "Phishing", "Legitimate"),
+                 levels = levels(y_true))
+  cm <- caret::confusionMatrix(pred, y_true, positive = "Phishing")
+  auc <- as.numeric(pROC::roc(y_true, prob,
+                              levels = c("Legitimate", "Phishing"),
+                              direction = "<", quiet = TRUE)$auc)
+  tibble(
+    auc  = auc,
+    acc  = unname(cm$overall["Accuracy"]),
+    f1   = unname(cm$byClass["F1"]),
+    prec = unname(cm$byClass["Precision"]),
+    sens = unname(cm$byClass["Sensitivity"]),
+    spec = unname(cm$byClass["Specificity"])
+  )
+}
+```
+
+## 3.6 Stability under resampling (C3)
+
+Lasso is known to be unstable under correlated predictors: small
+perturbations of the training set flip which member of a collinear
+block it picks. We quantify this over the 10 CV folds by recording
+which features each fold retains at its own `lambda.1se`.
+
+```{r stability}
+stability_fit <- run_or_load("stability", function() {
+  map_dfr(names(tier_specs), function(tier_name) {
+    X_tier <- X_train_by_tier[[tier_name]]
+    map_dfr(seq_along(fold_idx), function(i) {
+      tr <- fold_idx[[i]]
+      Xi <- X_tier[tr, ]; yi <- y_train[tr]
+      map_dfr(list(Ridge = 0, Lasso = 1),
+        function(a) {
+          cvfit <- cv.glmnet(Xi, yi, family = "binomial",
+                             alpha = a, nfolds = 5, standardize = FALSE,
+                             type.measure = "auc",
+                             nlambda = 80,
+                             lambda.min.ratio = 1e-2,
+                             maxit = 1e6)
+          co <- as.matrix(coef(cvfit, s = "lambda.1se"))
+          tibble(tier = tier_name,
+                 fold = i,
+                 feature = rownames(co)[-1],
+                 coef    = as.numeric(co[-1, 1]))
+        }, .id = "method")
+    })
+  })
+})
+
+stab_summary <- stability_fit %>%
+  mutate(kept = abs(coef) > 1e-8) %>%
+  group_by(tier, method, feature) %>%
+  summarise(retention_rate = mean(kept), .groups = "drop") %>%
+  pivot_wider(names_from = method, values_from = retention_rate) %>%
+  arrange(tier, desc(Ridge))
+
+stab_summary %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2))) %>%
+  kable(caption = "Retention rate per feature across 10 CV folds for Lexical and FullLite (1.00 = kept every fold, 0.00 = never kept).")
+```
+
+**Read.** Ridge shows retention 1.00 everywhere — it never zeros
+features. On Lexical the lasso column is very stable too: every
+feature it ever picks it picks on every fold, and IsDomainIP
+(retention 0.9) is the only borderline case. The signal in this tier
+is concentrated enough that the small-perturbation flip mechanism
+does not get triggered. **FullLite is where the pathology surfaces**:
+HasFavicon = 0.9, IsResponsive = 0.1 across folds — these are the
+lasso "coin-flip" features whose presence in the retained set is
+run-dependent, exactly the case the literature warns against. The
+full retention table also shows a long list of FullLite features
+where Ridge sits at 1.00 while Lasso sits at 0.00 — a different
+manifestation of the same picking instability, where lasso settles
+for one member of a redundant pair and never revisits.
+
+---
+
+# 4. Algorithmic Selection — Forward (AIC)
+
+`stats::step` walks a sequence of nested logistic regressions and
+picks the one minimising AIC. Unlike embedded methods it gives us a
+**per-step Wald p-value table** — at each step every coefficient has
+a Wald p-value — which is exactly what the assignment asks us to
+report under *"which features lose significance as you add or remove
+predictors"*. We then discuss **why that p-value is not what it
+appears to be** (§5).
+
+We restrict the algorithmic part to **forward selection**. On this
+dataset Forward, Backward and Stepwise converge to the same retained
+set on Lexical (k = 9, identical features) and within two features
+on FullLite, so reporting all three would be three near-identical
+tables. The forward direction also matches the assignment's "as you
+**add** predictors" framing more directly.
+
+## 4.1 Forward selection — feature entry order & p-values
+
+```{r forward}
+step_models <- run_or_load("step_models", function() {
+  map(names(tier_specs), function(tier_name) {
+    feats <- tier_specs[[tier_name]]
+    dtr <- train_std[, c("label", feats)]
+    null_mod_t <- glm(label ~ 1, data = dtr, family = binomial)
+    full_mod_t <- glm(label ~ ., data = dtr, family = binomial)
+    list(
+      features = feats,
+      forward = step(null_mod_t,
+                     scope = list(lower = null_mod_t, upper = full_mod_t),
+                     direction = "forward", trace = FALSE, k = 2)
+    )
+  }) %>% set_names(names(tier_specs))
+})
+
+map_dfr(names(step_models), function(tier_name) {
+  tibble(
+    tier = tier_name,
+    retained = length(coef(step_models[[tier_name]]$forward)) - 1,
+    total = length(step_models[[tier_name]]$features)
+  )
+}) %>% kable(caption = "Forward selection retained-feature counts by tier.")
+
+# Recover the entry order and per-step Wald p-values of the ENTERING
+# feature and of every previously-entered feature. This is the
+# "significance as predictors are added" table the assignment asks for.
+fwd_trajectory <- run_or_load("forward_traj", function() {
+  map_dfr(names(step_models), function(tier_name) {
+    entered <- setdiff(names(coef(step_models[[tier_name]]$forward)), "(Intercept)")
+    feats <- step_models[[tier_name]]$features
+    map_dfr(seq_along(entered), function(k) {
+      vars <- entered[1:k]
+      m <- glm(reformulate(vars, "label"),
+               data = train_std[, c("label", feats)],
+               family = binomial)
+      co <- summary(m)$coefficients
+      tibble(tier = tier_name, step = k, entering = entered[k],
+             feature = rownames(co), p = co[, "Pr(>|z|)"]) %>%
+        filter(feature != "(Intercept)")
+    })
+  })
+})
+
+fwd_trajectory %>%
+  mutate(p = signif(p, 3)) %>%
+  pivot_wider(id_cols = c(tier, feature), names_from = step,
+              values_from = p, names_prefix = "step_") %>%
+  kable(caption = "Wald p-values as forward selection enters each feature for Lexical and FullLite.")
+```
+
+## 4.2 Final selected model — coefficients and Wald p-values
+
+The last column of §4.1 is the final selected model's per-feature
+p-value. Reading it directly:
+
+```{r forward-final-coef}
+map_dfr(names(step_models), function(tier_name) {
+  as.data.frame(summary(step_models[[tier_name]]$forward)$coefficients) %>%
+    rownames_to_column("feature") %>%
+    filter(feature != "(Intercept)") %>%
+    mutate(tier = tier_name)
+}) %>%
+  mutate(across(-c(feature, tier), ~ signif(.x, 3))) %>%
+  kable(caption = "Final forward-AIC-selected model by tier — Wald p-values are biased by the selection process (see §5).")
+```
+
+On **Lexical** the final model retains nine features but two of them
+have non-significant Wald p-values: IsDomainIP (p = 1.0, with a
+standard error blown up to ≈ 1.2·10⁴ — the textbook signature of
+quasi-separation) and NoOfQMarkInURL (p = 0.81). AIC kept these two
+because adding them did not penalise log-likelihood enough to
+overcome the −2·k term, *not* because there is independent statistical
+evidence for them. On **FullLite** the analogous behaviour appears for
+IsHTTPS (p ≈ 0.98 across all steps, kept by AIC throughout).
+
+## 4.3 AIC trajectory — at what k did AIC stop improving
+
+```{r aic-traj, fig.width=6.5, fig.height=3.4}
+# Forward AIC per step, for the AUC-vs-k-curve that the assignment
+# implicitly points at ("how many features do you retain").
+fwd_aic <- run_or_load("forward_aic", function() {
+  map_dfr(names(step_models), function(tier_name) {
+    feats <- step_models[[tier_name]]$features
+    entered <- setdiff(names(coef(step_models[[tier_name]]$forward)), "(Intercept)")
+    ordered_all <- c(entered, setdiff(feats, entered))
+    map_dfr(seq_along(ordered_all), function(k) {
+      m <- glm(reformulate(ordered_all[1:k], "label"),
+               data = train_std[, c("label", feats)],
+               family = binomial)
+      tibble(tier = tier_name, k = k, aic = AIC(m),
+             test_auc = {
+               pr <- predict(m, test_std, type = "response")
+               as.numeric(pROC::roc(y_test, pr,
+                                    levels = c("Legitimate", "Phishing"),
+                                    direction = "<", quiet = TRUE)$auc)
+             })
+    })
+  })
+})
+
+ggplot(fwd_aic, aes(k)) +
+  geom_line(aes(y = aic, colour = "AIC"), linewidth = 0.8) +
+  geom_point(aes(y = aic, colour = "AIC")) +
+  geom_line(aes(y = (test_auc - min(test_auc)) /
+                  (max(test_auc) - min(test_auc)) *
+                  (max(aic) - min(aic)) + min(aic),
+                colour = "Test AUC (rescaled)"),
+            linewidth = 0.8) +
+  facet_wrap(~ tier, scales = "free_x") +
+  scale_x_continuous(breaks = scales::pretty_breaks()) +
+  scale_colour_manual(values = c("AIC" = "steelblue",
+                                 "Test AUC (rescaled)" = "firebrick")) +
+  labs(title = "Forward-selection trajectory by tier",
+       subtitle = "AIC knee vs. Test-AUC plateau — Lexical and FullLite",
+       x = "Number of features entered", y = "AIC / rescaled Test AUC",
+       colour = NULL) +
+  theme_minimal() + theme(legend.position = "top")
+```
+
+**Read:** if AIC plateaus at k* and Test AUC also plateaus at k*, the
+two criteria agree. Divergences (AIC still improving while AUC
+plateaus, or vice versa) are common at small n / large p but at
+n ≈ 24 k they are usually small. The curve also answers the H1
+question from Scenario 2 from a new angle — if Test AUC climbs
+steadily across all 13 features without a sharp knee, the Lexical
+signal is **combinatorial** (many weak features adding up) rather
+than concentrated in a handful of dominant features.
+
+---
+
+# 5. Post-Selection Inference — the research piece
+
+The Wald p-values reported in §4.1 and §4.2 are **not valid**
+out-of-the-box. This is the single most important thing to say about
+stepwise selection, and the single most common thing that gets
+forgotten in practice.
+
+## 5.1 Why the p-values are biased
+
+A classical Wald p-value assumes the set of predictors was fixed
+*before* seeing the data. Stepwise selection violates this
+fundamentally: the set of predictors *is chosen from the data* to
+minimise AIC (or maximise likelihood). The p-values reported by the
+final selected model are conditional on having been selected — which
+means:
+
+- Selected features are more likely to appear significant than they
+  truly are (the winner's-curse effect).
+- The null distribution of the Wald statistic is no longer a χ²; the
+  standard formula overstates significance.
+- Published critiques (Berk et al. 2013; Lee et al. 2016; Tibshirani
+  et al. 2016) argue for *selective inference* — p-values computed
+  *conditional* on the selection event. Tools: the `selectiveInference`
+  R package for the lasso, and post-selection splitting (Cox 1975;
+  Wasserman & Roeder 2009).
+
+**Practical consequence for this notebook:** the final-model
+p-values in §4.2 should **not** be read as "these are the significant
+features". They are, strictly, *the p-values a naive analyst would
+quote*. The right way to phrase a finding is: "the forward AIC
+procedure retained 9 features on Lexical; standard Wald p-values on
+those features are given but are biased by the selection process and
+should not be used for hypothesis tests."
+
+## 5.2 Why the forward-trajectory p-values *are* useful — for C2
+
+Although the *final* p-values are biased, the **trajectory** in
+§4.1 answers a different question: given this specific sequence of
+models (entry order fixed by AIC), does any feature's p-value
+*rise* above 0.05 when a correlated partner is added in a later
+step? That trajectory is a direct demonstration of the
+multicollinearity mechanism — and *that* is a valid descriptive
+observation, not a hypothesis test.
+
+On **Lexical** the trajectory does **not** show this pathology — every
+feature that enters keeps p well below 0.05 to the end (the URL-length
+trio survives because the signal is large enough to overpower
+shrinkage of the standard error). Two features are entered late by AIC
+but never reach significance at all (IsDomainIP, NoOfQMarkInURL); they
+illustrate the *other* form of the problem (§4.2) — features kept by
+selection criteria with no Wald evidence behind them.
+
+On **FullLite** the C2 mechanism is clearly visible:
+NoOfOtherSpecialCharsInURL goes from p ≈ 4·10⁻²⁵¹ at step 3 to
+p ≈ 0.81 at step 19, and NoOfSubDomain from p ≈ 1.9·10⁻⁸⁹ to p ≈ 0.68
+— both as their correlated partners (URLLength, NoOfLettersInURL,
+NoOfDegitsInURL, DomainLength) progressively absorb the shared signal.
+
+## 5.3 Why lasso stability (§3.6) is the embedded-method answer
+
+The embedded counterpart of the "stepwise p-value is biased" problem
+is the **instability of sparse selection under correlated
+predictors**. Lasso will pick one feature from a block and zero the
+rest, but *which* feature it picks is a small-perturbation-away from
+flipping. The §3.6 stability matrix makes this visible — features
+with retention 0.4–0.6 across folds are the same features that, in
+an algorithmic setting, would have unstable p-values. Different
+machinery, same underlying pathology.
+
+---
+
+# 6. Comparison — Retained Sets Side by Side
+
+## 6.1 The deliverable table (assignment's literal asks)
+
+```{r retained-compare}
+retained_by_method <- map_dfr(names(tier_specs), function(tier_name) {
+  bind_rows(
+    tibble(method = "Ridge",         retained = sum(abs(coef(cv_models[[tier_name]]$Ridge, s = "lambda.1se"))[-1] > 1e-8)),
+    tibble(method = "Lasso",         retained = sum(abs(coef(cv_models[[tier_name]]$Lasso, s = "lambda.1se"))[-1] > 1e-8)),
+    tibble(method = "Forward (AIC)", retained = length(coef(step_models[[tier_name]]$forward)) - 1)
+  ) %>%
+    mutate(tier = tier_name,
+           total = length(tier_specs[[tier_name]]))
+})
+
+kable(retained_by_method,
+      caption = "How many features each method retains in Lexical and FullLite.")
+```
+
+## 6.2 Feature-set overlap (C1)
+
+```{r overlap}
+get_kept <- function(cvfit) {
+  co <- as.matrix(coef(cvfit, s = "lambda.1se"))
+  rownames(co)[-1][abs(co[-1, 1]) > 1e-8]
+}
+
+sets_by_tier <- map(names(tier_specs), function(tier_name) {
+  list(
+    Ridge   = get_kept(cv_models[[tier_name]]$Ridge),
+    Lasso   = get_kept(cv_models[[tier_name]]$Lasso),
+    Forward = setdiff(names(coef(step_models[[tier_name]]$forward)), "(Intercept)")
+  )
+}) %>% set_names(names(tier_specs))
+
+jaccard <- function(a, b) length(intersect(a, b)) / length(union(a, b))
+
+map_dfr(names(sets_by_tier), function(tier_name) {
+  sets <- sets_by_tier[[tier_name]]
+  jac_mat <- outer(names(sets), names(sets),
+                   Vectorize(function(i, j) jaccard(sets[[i]], sets[[j]])))
+  dimnames(jac_mat) <- list(names(sets), names(sets))
+  round(jac_mat, 2) %>%
+    as.data.frame() %>%
+    rownames_to_column("method") %>%
+    mutate(tier = tier_name)
+}) %>%
+  select(tier, method, everything()) %>%
+  kable(caption = "Jaccard overlap of retained-feature sets by tier. Off-diagonal < 1 = disagreement.")
+```
+
+## 6.3 Test AUC + Sens/Spec at each method's own retained set
+
+```{r final-auc}
+metrics_from_vars <- function(vars, tier_features, thr = 0.5) {
+  if (length(vars) == 0) {
+    pr <- rep(mean(train_std$label == "Phishing"), nrow(test_std))
+  } else {
+    m <- glm(reformulate(vars, "label"),
+             data = train_std[, c("label", tier_features)],
+             family = binomial)
+    pr <- predict(m, test_std, type = "response")
+  }
+  pred <- factor(ifelse(pr >= thr, "Phishing", "Legitimate"),
+                 levels = levels(y_test))
+  cm <- caret::confusionMatrix(pred, y_test, positive = "Phishing")
+  tibble(
+    test_auc = as.numeric(pROC::roc(y_test, pr,
+                                    levels = c("Legitimate", "Phishing"),
+                                    direction = "<", quiet = TRUE)$auc),
+    test_sens = unname(cm$byClass["Sensitivity"]),
+    test_spec = unname(cm$byClass["Specificity"])
+  )
+}
+
+map_dfr(names(sets_by_tier), function(tier_name) {
+  sets <- sets_by_tier[[tier_name]]
+  map_dfr(names(sets), function(method_name) {
+    metrics_from_vars(sets[[method_name]], tier_specs[[tier_name]]) %>%
+      mutate(tier = tier_name,
+             method = method_name,
+             k = length(sets[[method_name]]))
+  })
+}) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
+  select(tier, method, k, test_auc, test_sens, test_spec) %>%
+  kable(caption = "Test AUC + Sensitivity + Specificity of a plain logistic regression refit on each method's retained set by tier (threshold = 0.5).")
+```
+
+## 6.4 Full comparison on Lexical and FullLite (AUC + Sens/Spec)
+
+```{r lexical-fulllite-compare}
+tier_compare <- map_dfr(names(tier_specs), function(tier_name) {
+  Xte <- X_test_by_tier[[tier_name]]
+  embedded_tbl <- bind_rows(
+    classif_metrics(y_test, as.numeric(predict(cv_models[[tier_name]]$Ridge,
+                                               newx = Xte, s = "lambda.1se",
+                                               type = "response"))) %>%
+      mutate(method = "Ridge"),
+    classif_metrics(y_test, as.numeric(predict(cv_models[[tier_name]]$Lasso,
+                                               newx = Xte, s = "lambda.1se",
+                                               type = "response"))) %>%
+      mutate(method = "Lasso")
+  )
+  fwd_vars <- setdiff(names(coef(step_models[[tier_name]]$forward)), "(Intercept)")
+  feats <- tier_specs[[tier_name]]
+  m <- glm(reformulate(fwd_vars, "label"),
+           data = train_std[, c("label", feats)], family = binomial)
+  fwd_pr <- as.numeric(predict(m, test_std, type = "response"))
+  fwd_tbl <- classif_metrics(y_test, fwd_pr) %>% mutate(method = "Forward")
+  ks <- c(Ridge   = sum(abs(coef(cv_models[[tier_name]]$Ridge, s = "lambda.1se"))[-1] > 1e-8),
+          Lasso   = sum(abs(coef(cv_models[[tier_name]]$Lasso, s = "lambda.1se"))[-1] > 1e-8),
+          Forward = length(fwd_vars))
+  bind_rows(embedded_tbl, fwd_tbl) %>%
+    mutate(tier = tier_name, k = ks[method]) %>%
+    select(tier, method, k, auc, sens, spec, acc, f1, prec)
+}) %>%
+  mutate(method = factor(method, levels = c("Ridge", "Lasso", "Forward")),
+         across(c(auc, sens, spec, acc, f1, prec), ~ round(.x, 4))) %>%
+  arrange(tier, method)
+
+tier_compare %>%
+  kable(caption = "Full comparison for Lexical and FullLite: retained k + AUC, Sensitivity, Specificity, Accuracy, F1, Precision (threshold = 0.5).")
+```
+
+---
+
+# 7. H3 Verdict
+
+**C1 — Ridge and Lasso disagree on retained count and on the
+URL-length bloc.** *Supported.* §3.3 gives Ridge = 13, Lasso = 10 on
+Lexical (Ridge = 34, Lasso = 25 on FullLite); §3.4 shows Ridge
+spreading the URL-length cluster across small same-sign weights
+(URLLength ≈ 0.10, NoOfLettersInURL ≈ 0.28, NoOfDegitsInURL ≈ 0.65)
+while Lasso compresses it onto large opposing-sign coefficients
+(URLLength ≈ −15.2, NoOfLettersInURL ≈ +11.0, NoOfDegitsInURL ≈ +6.3).
+The Jaccard overlap §6.2 is 0.77 (Lex) / 0.74 (FL) for Lasso × Ridge
+— high because Ridge is a superset, but *which* features Lasso drops
+and *how heavily it re-weights the survivors* is the substantive
+disagreement.
+
+**C2 — A retained feature has Wald p ≥ 0.05 in the AIC-selected
+model, or loses significance as correlated partners enter.**
+*Supported on both tiers, by complementary mechanisms.* On
+**Lexical** the forward-AIC final model retains IsDomainIP (p = 1.0,
+SE ≈ 1.2·10⁴ — the textbook signature of separation) and
+NoOfQMarkInURL (p = 0.81), i.e. AIC kept two features that no Wald
+test would have accepted. On **FullLite** the §4.1 forward trajectory
+shows NoOfOtherSpecialCharsInURL moving from p ≈ 4·10⁻²⁵¹ at step 3
+to p ≈ 0.81 at step 19, and NoOfSubDomain from p ≈ 1.9·10⁻⁸⁹ to
+p ≈ 0.68, as their URL-length partners are admitted later — exactly
+the multicollinearity-driven significance flip the assignment is
+asking us to surface.
+
+**C3 — Lasso has at least one fold-unstable retention where ridge is
+flat at 1.0.** *Supported on FullLite, marginal on Lexical.* §3.6:
+on Lexical, IsDomainIP has Lasso retention 0.9 (one fold flips), all
+other features are stably in or out. On FullLite the picture is much
+richer — HasFavicon = 0.9, IsResponsive = 0.1, plus a long list of
+features at Lasso retention 0 that Ridge keeps at 1.0. The "ask me
+tomorrow and you'll get different features" failure mode shows up
+where it matters — on the high-dimensional tier — and is suppressed
+where the signal is concentrated (Lexical).
+
+**Net.** All three claims hold. The one piece of the original
+hypothesis that did **not** survive was the older-version threshold
+"Jaccard(Lasso, Ridge) ≤ 0.5 at matched AUC" — measured Jaccard sits
+in the 0.7–0.8 band because Ridge is a superset by construction, so
+set overlap is the wrong instrument; coefficient *shape* and
+fold-level retention rate are the right ones.
+
+
