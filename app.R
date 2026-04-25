@@ -32,13 +32,20 @@ WORK_DIR      <- file.path(ARTIFACTS_DIR, "app_session")
 if (!dir.exists(ARTIFACTS_DIR)) dir.create(ARTIFACTS_DIR, showWarnings = FALSE)
 if (!dir.exists(WORK_DIR))      dir.create(WORK_DIR,      showWarnings = FALSE)
 
-save_session <- function(results) {
-  tryCatch(saveRDS(results, SESSION_FILE), error = function(e) NULL)
+save_session <- function(results, active_config = NULL) {
+  payload <- list(results = results, active_config = active_config)
+  tryCatch(saveRDS(payload, SESSION_FILE), error = function(e) NULL)
 }
 load_session <- function() {
-  if (file.exists(SESSION_FILE))
-    tryCatch(readRDS(SESSION_FILE), error = function(e) list())
-  else list()
+  if (!file.exists(SESSION_FILE))
+    return(list(results = list(), active_config = NULL))
+  payload <- tryCatch(readRDS(SESSION_FILE), error = function(e) NULL)
+  if (is.null(payload))
+    return(list(results = list(), active_config = NULL))
+  # Backward compat: older saves stored the results list directly.
+  if (!is.list(payload) || !"results" %in% names(payload))
+    return(list(results = payload, active_config = NULL))
+  payload
 }
 clear_workdir <- function() {
   files <- list.files(WORK_DIR, full.names = TRUE)
@@ -311,13 +318,16 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
 
+  cached_session <- load_session()
   rv <- reactiveValues(
-    df         = NULL,
-    splits     = NULL,
-    results    = load_session(),
-    last_err   = NULL,
-    fit_status = {
-      n0 <- length(load_session())
+    df             = NULL,
+    splits         = NULL,
+    splits_params  = NULL,                    # params used to build rv$splits
+    results        = cached_session$results,
+    active_config  = cached_session$active_config,  # snapshot at last Refit
+    last_err       = NULL,
+    fit_status     = {
+      n0 <- length(cached_session$results)
       if (n0) sprintf("Loaded %d cached fit(s) from %s.", n0, SESSION_FILE)
       else "No fitted models yet - press Refit."
     },
@@ -364,9 +374,10 @@ server <- function(input, output, session) {
 
   # ---- Cache controls ------------------------------------------------------
   observeEvent(input$clear_btn, {
-    rv$results    <- list()
-    rv$fit_status <- "Cache cleared. Press Refit to retrain."
-    save_session(list())
+    rv$results       <- list()
+    rv$active_config <- NULL
+    rv$fit_status    <- "Cache cleared. Press Refit to retrain."
+    save_session(list(), NULL)
     clear_workdir()
     showNotification("Cleared cached fit results.", type = "message")
   })
@@ -383,20 +394,19 @@ server <- function(input, output, session) {
     withProgress(message = "Loading & cleaning dataset...", value = 0.3, {
       rv$df <- load_and_clean(path)
       incProgress(0.5, detail = sprintf("%d rows loaded", nrow(rv$df)))
-      rv$splits <- make_splits(rv$df, input$n_sub, input$p_train, input$k_folds)
+      rv$splits        <- make_splits(rv$df, input$n_sub, input$p_train,
+                                      input$k_folds)
+      rv$splits_params <- list(n_sub = input$n_sub, p_train = input$p_train,
+                               k_folds = input$k_folds)
     })
-    rv$results <- list()
-    save_session(list()); clear_workdir()
+    rv$results       <- list()
+    rv$active_config <- NULL
+    save_session(list(), NULL); clear_workdir()
   })
 
-  observeEvent(list(input$n_sub, input$p_train, input$k_folds), {
-    if (is.null(rv$df)) return()
-    withProgress(message = "Re-splitting...", value = 0.5, {
-      rv$splits  <- make_splits(rv$df, input$n_sub, input$p_train, input$k_folds)
-      rv$results <- list()
-      save_session(list()); clear_workdir()
-    })
-  }, ignoreInit = TRUE)
+  # NB: split sliders no longer auto-resplit / wipe results. Splits are
+  # rebuilt at Refit time so currently-displayed fits stay visible while the
+  # user is just exploring different settings.
 
   output$data_status <- renderText({
     if (!is.null(rv$last_err)) return(paste("ERROR:", rv$last_err))
@@ -427,7 +437,7 @@ server <- function(input, output, session) {
       showNotification("Already fitting - press Cancel first.", type = "warning")
       return()
     }
-    if (is.null(rv$splits)) {
+    if (is.null(rv$df)) {
       showNotification("Load data first.", type = "warning")
       return()
     }
@@ -438,6 +448,30 @@ server <- function(input, output, session) {
       return()
     }
 
+    # Rebuild splits if the slider values drifted from the splits we have on
+    # hand. When that happens, any cached results are stale (built on a
+    # different train/test partition) so wipe them.
+    cur_split_params <- list(n_sub  = input$n_sub,
+                             p_train = input$p_train,
+                             k_folds = input$k_folds)
+    if (is.null(rv$splits) ||
+        !identical(rv$splits_params, cur_split_params)) {
+      withProgress(message = "Re-splitting (slider values changed)...",
+                   value = 0.5, {
+        rv$splits        <- make_splits(rv$df, cur_split_params$n_sub,
+                                        cur_split_params$p_train,
+                                        cur_split_params$k_folds)
+        rv$splits_params <- cur_split_params
+      })
+      if (length(rv$results)) {
+        showNotification(paste("Splits changed - cleared previous results",
+                               "(they were trained on a different partition)."),
+                         type = "warning", duration = 6)
+      }
+      rv$results       <- list()
+      rv$active_config <- NULL
+    }
+
     combos <- expand.grid(model = models_active, tier = tiers_active,
                           stringsAsFactors = FALSE)
     params <- list(
@@ -446,6 +480,17 @@ server <- function(input, output, session) {
       rf_ntree  = input$rf_ntree,  rf_mtry   = input$rf_mtry,
       svm_C     = input$svm_C,     svm_sigma = input$svm_sigma,
       knn_k     = input$knn_k
+    )
+
+    # Snapshot the configuration this Refit will use. The header panel reads
+    # from this snapshot so it always reflects what the displayed tables were
+    # actually fit with - not whatever the sidebar sliders happen to show now.
+    rv$active_config <- list(
+      models   = models_active,
+      tiers    = tiers_active,
+      splits   = cur_split_params,
+      params   = params,
+      fit_time = Sys.time()
     )
 
     # Wipe stale per-combo result files so polling only picks up THIS run's.
@@ -493,7 +538,7 @@ server <- function(input, output, session) {
     rv$fit_status <- sprintf(
       "CANCELLED. Kept %d partial result(s) collected so far.",
       length(rv$bg_collected))
-    save_session(reactiveValuesToList(rv)$results)
+    save_session(reactiveValuesToList(rv)$results, rv$active_config)
     shinyjs::enable("refit_btn")
     shinyjs::html("refit_btn",
                   '<i class="fa fa-play"></i> Refit selected models')
@@ -542,7 +587,7 @@ server <- function(input, output, session) {
       rv$bg_collected <- c(rv$bg_collected, f)
     }
     if (length(new_keys)) {
-      save_session(reactiveValuesToList(rv)$results)
+      save_session(reactiveValuesToList(rv)$results, rv$active_config)
     }
 
     # 3) Detect completion --------------------------------------------------
@@ -552,7 +597,7 @@ server <- function(input, output, session) {
       rv$fit_status <- sprintf(
         "Done. Collected %d / %d combos. %d results in memory.",
         length(rv$bg_collected), rv$bg_total, length(rv$results))
-      save_session(reactiveValuesToList(rv)$results)
+      save_session(reactiveValuesToList(rv)$results, rv$active_config)
       shinyjs::enable("refit_btn")
       shinyjs::html("refit_btn",
                     '<i class="fa fa-play"></i> Refit selected models')
@@ -570,25 +615,40 @@ server <- function(input, output, session) {
     names(MODEL_CHOICES)[match(ids, MODEL_CHOICES)]
   })
 
-  # Active-setup banner shown above every tab so the user always sees which
-  # models + hyperparameter values + split sizes the visible tables refer to.
+  # Active-setup banner shown above every tab. Reads from the snapshot taken
+  # at the last Refit (rv$active_config), NOT from live sidebar sliders, so
+  # it always describes the configuration the visible tables were fit with.
+  # Moving a slider doesn't change this header until the user hits Refit.
   output$active_config_panel <- renderUI({
-    sel_ids <- intersect(input$models_sel, unname(MODEL_CHOICES))
-    tiers   <- intersect(input$tiers_sel,  TIERS_ALL)
+    cfg <- rv$active_config
+
+    if (is.null(cfg) && !length(rv$results)) {
+      return(div(class = "config-panel",
+                 strong("Active setup "),
+                 span(class = "config-empty",
+                      "No fit run yet - adjust the sidebar and press Refit.")))
+    }
+    if (is.null(cfg)) {
+      # Cached results loaded from an older session file with no snapshot.
+      return(div(class = "config-panel",
+                 strong("Active setup "),
+                 span(class = "config-meta",
+                      sprintf(paste0("(%d cached result(s) - configuration ",
+                                     "snapshot unavailable; press Refit to ",
+                                     "refresh)"),
+                              length(rv$results)))))
+    }
 
     hp_chip <- function(m_id) {
       label <- names(MODEL_CHOICES)[match(m_id, MODEL_CHOICES)]
+      p <- cfg$params
       params <- switch(m_id,
-        "lr"  = sprintf("alpha=%.2f, lambda=%.3f",
-                        input$lr_alpha, input$lr_lambda),
-        "nb"  = sprintf("fL=%.1f, adjust=%.1f",
-                        input$nb_fL, input$nb_adjust),
+        "lr"  = sprintf("alpha=%.2f, lambda=%.3f", p$lr_alpha, p$lr_lambda),
+        "nb"  = sprintf("fL=%.1f, adjust=%.1f",    p$nb_fL,    p$nb_adjust),
         "rf"  = sprintf("ntree=%d, mtry=%d",
-                        as.integer(input$rf_ntree),
-                        as.integer(input$rf_mtry)),
-        "svm" = sprintf("C=%.2f, sigma=%.3f",
-                        input$svm_C, input$svm_sigma),
-        "knn" = sprintf("k=%d", as.integer(input$knn_k)),
+                        as.integer(p$rf_ntree), as.integer(p$rf_mtry)),
+        "svm" = sprintf("C=%.2f, sigma=%.3f",      p$svm_C,    p$svm_sigma),
+        "knn" = sprintf("k=%d",                    as.integer(p$knn_k)),
         "lda" = "no tunable hyperparameters",
         "—"
       )
@@ -596,27 +656,20 @@ server <- function(input, output, session) {
            strong(paste0(label, ":")), " ", tags$code(params))
     }
 
-    meta <- if (length(sel_ids) && length(tiers)) {
-      sprintf(paste0("%d model(s) x %d tier(s) | n_sub=%s, train=%.0f%%, ",
-                     "k=%d folds"),
-              length(sel_ids), length(tiers),
-              format(input$n_sub, big.mark = ","),
-              100 * input$p_train, input$k_folds)
-    } else {
-      "Select at least one model and one tier in the sidebar."
-    }
+    meta <- sprintf(paste0("%d model(s) x %d tier(s) | n_sub=%s, ",
+                           "train=%.0f%%, k=%d folds"),
+                    length(cfg$models), length(cfg$tiers),
+                    format(cfg$splits$n_sub, big.mark = ","),
+                    100 * cfg$splits$p_train, cfg$splits$k_folds)
 
-    chips <- if (length(sel_ids)) {
-      div(class = "config-row", lapply(sel_ids, hp_chip))
-    } else {
-      div(class = "config-row",
-          span(class = "config-empty", "No models selected."))
-    }
+    fit_age <- if (!is.null(cfg$fit_time))
+      sprintf(" - fit at %s", format(cfg$fit_time, "%H:%M:%S"))
+    else ""
 
     div(class = "config-panel",
         strong("Active setup "),
-        span(class = "config-meta", paste0("(", meta, ")")),
-        chips)
+        span(class = "config-meta", sprintf("(%s%s)", meta, fit_age)),
+        div(class = "config-row", lapply(cfg$models, hp_chip)))
   })
 
   results_long <- reactive({
