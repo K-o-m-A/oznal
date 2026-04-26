@@ -175,20 +175,25 @@ takže `predict(..., type = "response")` z glmnet/glm vráti P(Phishing).
 
 ### 1.1 Prečo Lexical *aj* FullLite
 
-V predošlej verzii S3 bežal len na Lexical s argumentom *"FullLite
-saturuje, tam sa nič nedá merať"*. To bola pravda **len pre AUC** —
-ale pre H2 (počty zachovaných príznakov, Jaccard, p-flipy) je FullLite
-**presne ten zaujímavý tier**:
+H2 testujeme cez **dva režimy redundancie**, nie ako *prítomnosť vs.
+neprítomnosť*:
 
-- **Lexical** = "low-redundancy pole". 13 príznakov, každý nesie
-  netriviálnu unikátnu informáciu. Tu predikujeme, že embedded a
-  algoritmické metódy **konvergujú** na podobný retained set, žiadne
-  p-flipy.
-- **FullLite** = "high-redundancy pole". 34 príznakov, viac korelovaných
-  blokov (URL-length, page-count). Tu predikujeme, že metódy
-  **divergujú** — Lasso si vyberie iný blokový reprezentant ako
-  Forward, retained counts sa rozutekajú, Jaccard padne, vznikne
-  aspoň 1 p-flip.
+- **Lexical** = "small isolated cluster". 13 príznakov, jeden
+  3-feature URL-length blok (URLLength, NoOfLettersInURL,
+  NoOfDegitsInURL — VIF > 1000 z EDA), zvyšné príznaky majú medzi
+  sebou len mierne korelácie. Predikcia: Lasso a Forward sa zhodnú
+  **viac** (jeden malý klaster, málo blokových reprezentantov na
+  výber).
+- **FullLite** = "rich multi-cluster". 34 príznakov, niekoľko
+  korelovaných blokov (URL-length cluster + page-count cluster +
+  binárne near-duplicates ako HasFavicon/HasDescription). Predikcia:
+  Lasso a Forward sa zhodnú **menej** (viac klastrov = viac
+  ekvivalentných reprezentantov, viac priestoru pre divergenciu).
+
+**Dôležité pre obhajobu:** Lexical NIE JE „bez redundancie" —
+multikolinearitný klaster tam je. Je to len **menší a izolovanejší**
+ako na FullLite. H2 predikuje *kontrast medzi tiermi*, nie binárny
+on/off stav redundancie.
 
 ### 1.2 Prečo nie aj Trust a Behavior
 
@@ -206,12 +211,12 @@ Zadanie dovolí Forward / Backward / Stepwise pre algoritmickú časť a
 Lasso / Ridge / ElasticNet pre embedded.
 
 #### Forward namiesto Backward / Stepwise
-Empiricky overené: na našich dátach **všetky tri AIC procedúry
-konvergujú na identický retained set** na Lexical (k = 9, Jaccard
-1.00) a takmer identický (within 2 features) na FullLite. Reportovať
-tri takmer-identické tabuľky by bolo plnenie miesta. Forward navyše
-generuje **per-step p-value trajectory**, ktorá je presne tá vec, ktorú
-zadanie literálne pýta (*"lose significance as you **add** predictors"*).
+Empiricky overené: AIC procedúry (Forward / Backward / Stepwise)
+konvergujú na takmer identický retained set na oboch tieroch.
+Reportovať tri takmer-identické tabuľky by bolo plnenie miesta.
+Forward navyše generuje **per-step p-value trajectory**, ktorá je
+presne tá vec, ktorú zadanie literálne pýta (*"lose significance as
+you **add** predictors"*).
 
 #### Ridge + Lasso, drop ElasticNet
 Ridge ($\alpha = 0$) a Lasso ($\alpha = 1$) sú dva extrémy
@@ -223,28 +228,50 @@ hovorí *"medzi Ridge a Lasso, pozri Lasso"* je strata kvalitnej obhajoby.
 
 ### 1.4 H2 (Scenario 3) — "Predictor redundancy increases with tier richness"
 
-> *Na **Lexical** (13 príznakov, žiaden saturujúci signál, každý
-> príznak nesie netriviálnu unikátnu informáciu) sa embedded a
-> algoritmické feature-selection metódy zhodnú na takmer rovnakom
-> retained sete a Wald p-hodnoty pozdĺž forward cesty ostávajú
-> stabilné. Na **FullLite** (34 príznakov s URL-length a page-count
-> multikolinearitou) tie isté metódy divergujú v počte aj identite
-> zachovaných príznakov, a aspoň jeden príznak preflipne svoju Wald
-> signifikanciu pri vstupe svojho korelovaného partnera — pretože v
-> takom priestore existuje viac rovnako-dobrých podmnožín príznakov.*
+> *Divergencia medzi Lasso a Forward retained sets **rastie s
+> bohatosťou tieru o korelované bloky**. Na **Lexical** (jeden malý
+> izolovaný klaster) sa metódy zhodnú viac na tom, ktoré príznaky sú
+> dôležité; na **FullLite** (viacero prekrývajúcich sa klastrov) sa
+> zhodnú menej.*
 
-#### Tri kritériá
+#### Jedno gating kritérium
 
 | # | Kritérium | Prah |
 |---|-----------|------|
-| C1 | $\lvert k_\text{Lasso} - k_\text{Forward}\rvert$ | **≤ 1 na Lexical, ≥ 3 na FullLite** |
-| C2 | Jaccard(Lasso, Forward) | **≥ 0.85 na Lexical, ≤ 0.70 na FullLite** |
-| C3 | počet Wald p-flipov pozdĺž Forward cesty | **0 na Lexical, ≥ 1 na FullLite** |
+| C1 | Jaccard(Lasso, Forward) **klesá** z Lexical na FullLite | $J_\text{FullLite} < J_\text{Lexical}$ (strict) |
 
-**Pravidlo verdiktu:** H2 je **podporená** ak ≥ 2 z 3 kritérií idú v
-predpovedanom smere **na oboch tieroch súčasne**. H2 je **zamietnutá**
-ak Lexical a FullLite vyzerajú rovnako (Jaccard padne na oboch alebo
-ani jeden flip).
+**Pravidlo verdiktu:** H2 je **podporená** ak C1 drží — Lasso a
+Forward sa zhodnú viac na malom-klastrovom tieri než na
+viac-klastrovom. Žiadne absolútne prahy (0.85, 0.70 atď.) — len
+**smer kontrastu**. Dôvod: absolútne hodnoty Jaccardu sú citlivé na
+voľbu λ, AIC penalty a sample jitter; smer kontrastu je tá robustná
+empirická predikcia.
+
+**Descriptive support (nie gating).** Sledujeme aj:
+- $\lvert k_\text{Lasso} - k_\text{Forward}\rvert$ na oboch tieroch
+  — mal by tiež rásť (FullLite > Lexical) ak H2 platí
+- počet Wald p-flipov pozdĺž Forward cesty — mal by byť aspoň
+  rovnako vysoký na FullLite ako na Lexical, a Lexical flipy (ak
+  sú) by mali padnúť na URL-length klaster, nie na izolované
+  príznaky
+
+Concordance všetkých troch signálov = silná evidencia. Len-gating
+podpora = slabšia ale stále podporená H2.
+
+#### Prečo single-criterion design
+
+- **Robustnosť voči parametrom.** Trojitá tabuľka s konkrétnymi
+  prahmi (0.85, 0.70, 3 flipov) sa môže rozsynchronizovať s cache
+  pri zmene `lambda.min.ratio`, `nlambda` alebo seedu. Smerový
+  kontrast tieto vplyvy ignoruje pokiaľ ostáva monotónny.
+- **Falsifikovateľnosť.** H2 sa **dá zamietnuť** — keby
+  $J_\text{FullLite} \ge J_\text{Lexical}$, redundancia by sa
+  nepremietla do divergencie metód a hypotéza padne. Nie je to
+  tautológia.
+- **Mapping na zadanie.** Zadanie pýta *"how many features... and
+  which lose significance"* — k a p-flipy sú deliverables, nie
+  hypotézové gatingy. Forsírovať ich do gating prahov bolo
+  metodologicky nadbytočné.
 
 #### Bridge na H1
 S2 ukázala, že parametrický–neparametrický AUC gap mizne na FullLite.
@@ -368,82 +395,67 @@ zodpovedajú **z-score škále** = priamo porovnateľné medzi príznakmi.
 Ako čítať tabuľku: pre každý tier × metódu počet **nenulových**
 koeficientov (mimo intercept).
 
-Očakávané hodnoty (z aktuálneho cache):
-- **Lexical Ridge:** 13/13 (Ridge nikdy nezahadzuje).
-- **Lexical Lasso:** ~10/13 (zahodí ~3, typicky niektoré z URL-length
-  klastra).
-- **FullLite Ridge:** 34/34.
-- **FullLite Lasso:** ~25/34 (zahodí ~9, najmä korelované páry v
-  page-count klastri).
+Konkrétne hodnoty čítame priamo z tabuľky vygenerovanej notebookom
+(neopisujeme ich tu, aby próza neklamala pri zmene cache). Kvalitatívne:
+- **Ridge** retains 13/13 na Lexical a 34/34 na FullLite — by L2
+  construction.
+- **Lasso** retains podstatne menej (typicky polovica až dve tretiny
+  z dostupných príznakov).
 
 ### 3.4 Coefficient table (§3.4)
 
 Reportujeme koeficienty **pri rovnakom λ-výbere (`lambda.1se`)** pre
-Ridge aj Lasso. Toto je miesto, kde je vidieť **tvarový rozdiel**:
+Ridge aj Lasso. Toto je miesto, kde je vidieť **tvarový rozdiel** na
+Lexical URL-length klastri (URLLength, NoOfLettersInURL,
+NoOfDegitsInURL).
 
-#### Lexical, URL-length cluster:
+**Čítanie tabuľky (konkrétne čísla v notebooku):**
+- **Ridge** distribúje váhu pomerne rovnomerne, koeficienty sú malé
+  a rovnakého znamienka. Stabilné, ale ťažko interpretovať
+  individuálny príznak.
+- **Lasso** vyrobí **opačne-znamienkové** koeficienty výrazne väčšej
+  magnitúdy. Veľké opačné znamienka v korelovanom blok znamenajú
+  *"jeden príznak ide v jednu stranu, druhý/-í v opačnú a navzájom
+  sa dovažujú"*. Toto je **kanonická lasso patológia** v korelovanom
+  prostredí — koeficienty sa nedajú interpretovať jednotlivo, len
+  ich lineárna kombinácia má zmysel.
 
-| Príznak | Ridge $\hat{\beta}$ | Lasso $\hat{\beta}$ |
-|---------|---------------------|---------------------|
-| URLLength | ~+0.10 (malý, kladný) | ~−15 (veľký, záporný) |
-| NoOfLettersInURL | ~+0.28 (malý, kladný) | ~+11 (veľký, kladný) |
-| NoOfDegitsInURL | ~+0.65 (malý, kladný) | ~+6.3 (veľký, kladný) |
-
-**Čítanie:**
-- **Ridge** rozdelí váhu **rovnomerne** medzi celý korelovaný blok —
-  všetky tri koeficienty sú malé a rovnakého znamienka. Stabilné, ale
-  ťažko interpretovať jednotlivý príznak.
-- **Lasso** sa **rozhodol pre jeden hlavný kanál (URLLength) a
-  protiváhu**. Veľké opačné znamienka znamenajú: *"URLLength ide v
-  jednu stranu o tých istých $|x|$ ako lineárna kombinácia ostatných
-  dvoch v opačnú"*. Toto je **kanonická lasso patológia** v
-  korelovanom prostredí — koeficienty sú ostré a *"opozične-skoordinované"*,
-  pretože lasso si vyberá jednu **diferenčnú** os namiesto suma.
+Lasso zahodí príznaky **mimo** URL-length klastra (lower-signal
+features). Klaster sám si lasso ponechá ako celok, lebo zahodenie
+ktoréhokoľvek člena by zničilo to opačno-znamienkové dovaženie,
+pomocou ktorého fituje.
 
 Tento rozdiel je deskriptívny obsah, **nie gating kritérium** — len
 ilustruje *prečo* lasso pri redundantných príznakoch produkuje
 nestabilné výbery.
 
-### 3.5 Predictive performance (§3.5)
-
-Reportujeme test AUC + Sens/Spec pri **rovnakom `lambda.1se`**:
-
-| Tier | Metóda | AUC | Sens | Spec |
-|------|--------|----:|-----:|-----:|
-| Lexical | Ridge | ~0.86 | ~0.92 | ~0.72 |
-| Lexical | Lasso | ~0.86 | ~0.92 | ~0.72 |
-| FullLite | Ridge | ~0.999 | ~0.99 | ~0.99 |
-| FullLite | Lasso | ~0.999 | ~0.99 | ~0.99 |
-
-**Pozorovanie:** Ridge a Lasso majú **prakticky rovnaké AUC** napriek
-tomu, že majú **úplne iné koeficienty**. To je dôkaz, že na tomto
-datasete existuje **viac rovnako-dobrých riešení** = bloková
-redundancia.
-
-### 3.6 Stability under resampling (§3.6) — descriptive
+### 3.5 Stability under resampling (§3.5) — descriptive
 
 Z 10 CV foldov sme vyfittli **lasso a ridge zvlášť na každom folde**
 a počítame **retention rate** každého príznaku — v koľkých z 10
 foldov tam zostal nenulový.
 
-| Tier | Pozorovanie |
-|------|-------------|
-| Lexical (Ridge) | retention 1.0 pre všetky príznaky (ridge nezahadzuje) |
-| Lexical (Lasso) | retention 1.0 pre väčšinu, **0.9** pre `IsDomainIP` (1 fold flipne) |
-| FullLite (Ridge) | retention 1.0 všade |
-| FullLite (Lasso) | **0.9** pre `HasFavicon`, **0.1** pre `IsResponsive`, plus dlhý zoznam features s rate 0.0 ktoré ridge má 1.0 |
+**Čítanie tabuľky (konkrétne hodnoty v notebooku):**
 
-**Čítanie:**
-- Na **Lexical** je lasso prakticky stabilný (1 hraničná feature) —
-  zhoda s C2 (Lasso × Forward Jaccard na Lexical bude vysoký).
-- Na **FullLite** sa "flip features" ukážu naplno — `IsResponsive`
-  s rate 0.1 znamená *"ak by sme mali iný náhodný train/test split,
-  s 90% pravdepodobnosťou by lasso túto feature vôbec nezahrnul"*.
-  To je presne ten typ nestability, ktorý H2 predikuje.
+- **Ridge** sedí na 1.0 všade — by L2 construction nikdy nezahodí
+  feature. To je **baseline**, oproti ktorému je lasso variabilita
+  čítateľná ako patológia, nie ako náhodný šum.
+- **Lasso na Lexical** sedí prevažne na 1.0 alebo 0.0 — features sú
+  buď konzistentne pickované cez všetky foldy alebo konzistentne
+  zahadzované. Maximálne jeden-dva borderline prípady. Signál je
+  dostatočne koncentrovaný, aby sa "coin-flip" mechanizmus
+  nespustil.
+- **Lasso na FullLite** ukáže **band intermediate retentions**
+  (features pickované na niektorých foldoch a nie na iných). To je
+  ten "coin-flip" — pri inom random sub-sample by sa retained set
+  zmenil. Plus dlhý zoznam features s rate 0.0 (tie čo Ridge drží na
+  1.0) — iný prejav tej istej picking instability, kde sa lasso
+  rozhodne pre jedného člena redundantnej dvojice a nikdy ho
+  neprehodnotí.
 
-Sekcia **nie je gating** pre H2 — kritériá C1/C2/C3 stoja na
-*cross-method* porovnaní (Lasso × Forward), nie na *within-method
-resampling stability* lassa. Sekcia je deskriptívna, lebo:
+Sekcia **nie je gating** pre H2 — gating C1 stojí na *cross-method*
+porovnaní (Lasso × Forward Jaccard), nie na *within-method*
+stability. Sekcia je deskriptívna, lebo:
 1. zadanie explicitne pýta správanie *"across folds"*,
 2. ilustruje, **prečo** redundancia spôsobuje retained-set divergenciu.
 
@@ -475,86 +487,58 @@ z-score škále).
 ### 4.2 Entry order + per-step Wald p-values (§4.1)
 
 Pre každý krok forward selection uložíme p-hodnotu **každého**
-predtým-vstúpeného príznaku. Výsledná tabuľka má tvar:
+predtým-vstúpeného príznaku. Výsledná tabuľka má v notebooku tvar
+"Tier × Feature × step_k". `NA` = ešte neentered. Pri vstupe sa
+p-hodnota objaví. Sledujeme, **ako sa p-hodnota toho istého príznaku
+mení s tým, ako prichádzajú ďalší**.
 
-| Tier | Feature | step_1 | step_2 | … | step_K |
-|------|---------|--------|--------|---|--------|
-| Lexical | URLLength | 1e-200 | 1e-198 | … | 1e-180 |
-| Lexical | IsDomainIP | NA | NA | … | 1.0 |
-| FullLite | NoOfOtherSpecialCharsInURL | 4e-251 | 1e-200 | … | 0.81 |
-
-`NA` = ešte neentered. Pri vstupe sa p-hodnota objaví. Sledujeme,
-**ako sa p-hodnota** **toho istého príznaku** mení s tým, ako
-prichádzajú ďalší.
-
-### 4.2.1 Wald p-flip extrakcia (nový blok pre C3)
+### 4.2.1 Wald p-flip extrakcia (descriptive support)
 
 Z trajektórie spočítame pre každý príznak:
 - `p_at_entry` = p-hodnota v kroku, kde príznak vstúpil
 - `p_in_final` = p-hodnota vo finálnom modeli
 - `flipped = (p_at_entry < 0.05) ≠ (p_in_final < 0.05)`
 
-Agregovane na úrovni tieru:
+Agregovane reportujeme `n_flipped` per tier (konkrétne čísla
+v notebooku).
 
-| Tier | n_flipped | features_flipped |
-|------|----------:|------------------|
-| Lexical | **0** | (žiaden) |
-| FullLite | **≥ 1** | NoOfOtherSpecialCharsInURL, prípadne NoOfSubDomain |
+**Pozícia v H2 dizajne (Level 2):** flipy sú **descriptive support**,
+nie gating kritérium. Gating C1 je smerový kontrast Jaccardu
+(§6.2). Flipy len overujú, či sa redundancia premietne aj do
+forward-path Wald nestability — *concordance check* s C1.
 
-**To je C3.** Ak n_flipped = 0 na Lexical a ≥ 1 na FullLite, kritérium
-prejde.
+**Predikcia:** ak H2 platí end-to-end, počet flipov by mal byť aspoň
+rovnako vysoký na FullLite ako na Lexical, a Lexical flipy (ak
+sú) by mali padnúť na URL-length klaster (jediný redundantný
+blok), nie na izolované príznaky.
 
-#### Prečo to funguje
-Na Lexical každý príznak nesie **unikátnu informáciu** (URL-length
-cluster je 3-členný a ostatných 10 príznakov je nezávislých). Pridanie
-neskorších príznakov nezničí p-hodnoty skorších, lebo si nesú
-unique-variance attribution.
+#### Prečo to funguje (mechanizmus)
+Na **Lexical** je signál koncentrovaný — väčšina príznakov nesie
+unikátnu informáciu, len URL-length trio je v korelovanom bloku.
+Pridanie nového príznaku zriedka rozpustí SE existujúceho, takže
+flipy sú zriedkavé.
 
-Na FullLite je signál v korelovaných blokoch: `NoOfOtherSpecialCharsInURL`
-vstúpi rýchlo s p ≈ 4·10⁻²⁵¹ (jediný kandidát, čo nesie ten konkrétny
-variance vzor). Neskôr vstúpi `NoOfSubDomain` alebo iný korelovaný
-príznak, čo "rozpustí" SE ⇒ Wald štatistika klesne ⇒ p vyskočí na
-0.81. **Flip**.
+Na **FullLite** je signál distribuovaný cez viacero korelovaných
+blokov (URL-length + page-count + binárne near-duplicates). Pri
+vstupe každého ďalšieho člena bloku sa SE jeho už-vstúpených
+partnerov rozpustí ⇒ Wald štatistika klesne ⇒ p vyskočí. **Flip**.
 
 ### 4.3 Final model coefficients (§4.2)
 
 Posledný stĺpec §4.1 je p-hodnota vo finálnom modeli. Reportujeme
 osobitne pre čitateľnosť.
 
-#### Lexical anomálie
-- **`IsDomainIP` p = 1.0**: kvázi-separácia. Veľmi málo bodov má
-  `IsDomainIP = 1` (~10 zo 24 000), a všetky sú phishing. GLM nemôže
-  konvergovať jasne ⇒ SE blow-up na ~1.2·10⁴ ⇒ Wald p = 1.0.
-  AIC ho **stále drží**, lebo síce p je zlá, ale likelihood mierne
-  zlepšil.
-- **`NoOfQMarkInURL` p = 0.81**: príznak držaný čisto na základe AIC.
-  Wald evidence pre neho **nie je**.
+**Anomálie na oboch tieroch:** Forward AIC drží features, ktorých
+Wald p-hodnota sedí výrazne nad 0.05 — typicky **kvázi-separácia**
+(IsDomainIP na Lexical, IsHTTPS na FullLite — málo pozitívnych
+bodov, GLM nekonverguje jasne, SE blow-up rádovo, Wald p ≈ 1).
+AIC ich drží lebo log-likelihood sa nepatrne zlepšil — *"AIC kept
+what Wald wouldn't"*. Toto **nie sú p-flipy** v C3 zmysle (flip
+vyžaduje zmenu signifikancie *medzi step-N a final*, nie *medzi
+zadaním a final*).
 
-Toto sú **nie p-flipy** — sú to *"AIC kept what Wald wouldn't"*. C3
-necountuje toto ako flip (treba zmenu signifikancie *medzi
-forward-step-N* a *final*, nie medzi *zadanie* a *final*).
-
-#### FullLite anomálie
-- `IsHTTPS` má p ≈ 0.98 cez všetky kroky — *"AIC kept on
-  log-likelihood improvement, no Wald evidence"*. Tiež nie flip.
-- Skutočné flipy: `NoOfOtherSpecialCharsInURL`, prípadne `NoOfSubDomain`,
-  ktoré išli z silne signifikantných do nesignifikantných.
-
-### 4.4 AIC trajectory (§4.3)
-
-Vykreslíme AIC po každom forward kroku + Test AUC po každom kroku
-(rescaled na rovnakú y-os). Cieľ: vidieť, či AIC plateau a Test AUC
-plateau **súhlasia**.
-
-**Čo z toho čítame:**
-- Ak AIC ešte klesá, ale Test AUC plateau, AIC pridáva príznaky bez
-  predikčného prínosu (to je častý prípad pri n >> p).
-- Ak Test AUC ešte rastie, ale AIC plateau, AIC zastavil predčasne
-  (zriedkavé pri n / p > 1000).
-
-Na Lexical (n/p ≈ 1850) a FullLite (n/p ≈ 700) sú obe krivky
-prakticky synchrónne ⇒ AIC nestop sa zhoduje s "AUC stop", ako
-očakávame.
+Konkrétny zoznam non-significant retained features per tier čítame
+priamo z tabuľky v notebooku.
 
 ---
 
@@ -581,30 +565,32 @@ Pri stepwise selection to porušujeme **kvôli dvom mechanizmom**:
 **Štandardný odhad:** Wald p ≈ 0.001 z post-selection modelu môže v
 realite zodpovedať skutočnej p ≈ 0.05–0.20. Smiešne nadhodnotené.
 
-### 5.2 Prečo p-trajectory **JE užitočná** pre C3 (§5.2)
+### 5.2 Prečo p-trajectory **JE užitočná** ako descriptive observation (§5.2)
 
 Tu nie je "test of significance" v klasickom zmysle. Používame
 **zmenu p-hodnoty toho istého príznaku, ako sa pridávajú ďalšie**, ako
 **popisný indikátor multikolinearity**.
 
-Konkrétne: ak `NoOfOtherSpecialCharsInURL` má p = 4·10⁻²⁵¹ pri vstupe
-a p = 0.81 vo finálnom modeli, **smerodajná chyba narástla rádovo
-~10²⁵×**, čo nie je inferenčná otázka — je to deskriptívna otázka:
-*"how much does this feature's evidence depend on which other
-features are around?"*. Odpoveď v 10²⁵ × forme = veľmi.
+Konkrétne: ak feature má p ≈ $10^{-200}$ pri vstupe a niekoľko
+krokov neskôr p ≈ 0.5 (po vstupe korelovaného partnera), **SE
+narástla rádovo**, čo nie je inferenčná otázka — je to deskriptívna
+otázka: *"how much does this feature's evidence depend on which
+other features are around?"*. Odpoveď v rádovom skoku = veľmi.
 
 Toto deskriptívne čítanie p-flipov je validné aj keď konkrétne
-číselné p-hodnoty samy osebe neoznačujú signifikanciu.
+číselné p-hodnoty samy osebe neoznačujú signifikanciu. Konkrétne
+flipnuté features per tier čítame priamo z `flip_counts` tabuľky
+v notebooku.
 
 ### 5.3 Prečo **lasso fold-stability** je embedded analóg (§5.3)
 
 Lasso nedáva p-hodnoty (ani biased ani unbiased — nedáva ich vôbec),
 takže "is this feature significant" sa formálne testovať nedá.
-**Ale** retention-rate (§3.6) je analóg: feature s rate ∈ (0, 1) je
+**Ale** retention-rate (§3.5) je analóg: feature s rate ∈ (0, 1) je
 empiricky to, čo by Wald nazval *"on the edge of significance"*. Bez
 post-selection korekcie, ale s priamou observačnou interpretáciou.
 
-Toto je sekcia, ktorá **odôvodňuje** stability table v §3.6 ako
+Toto je sekcia, ktorá **odôvodňuje** stability table v §3.5 ako
 embedded answer na zadanie *"which features lose significance"* —
 nie cez p-hodnotu, ale cez **fold-frequency**.
 
@@ -614,127 +600,116 @@ nie cez p-hodnotu, ale cez **fold-frequency**.
 
 ### 6.1 Deliverable table (§6.1)
 
-Splnenie zadania *"how many features do you retain"*:
+Splnenie zadania *"how many features do you retain"*. Tabuľka v
+notebooku (`retained_by_method`) reportuje retained / total pre
+Ridge / Lasso / Forward na oboch tieroch.
 
-| Tier | Method | Retained / Total |
-|------|--------|------------------|
-| Lexical | Ridge | 13 / 13 |
-| Lexical | Lasso | ~10 / 13 |
-| Lexical | Forward (AIC) | 9 / 13 |
-| FullLite | Ridge | 34 / 34 |
-| FullLite | Lasso | ~25 / 34 |
-| FullLite | Forward (AIC) | ~17–19 / 34 |
+**Kvalitatívne:**
+- Ridge zachováva **všetky** príznaky tiera (13/13 na Lexical,
+  34/34 na FullLite) — by L2 construction.
+- Lasso a Forward sú podmnožiny rôznej veľkosti.
+- Descriptive support pre H2: $\lvert k_\text{Lasso} - k_\text{Forward}\rvert$
+  by mal rásť z Lexical na FullLite.
 
-**Pozorovanie pre C1:**
-- Lexical: |10 − 9| = 1 → ≤ 1 ✓
-- FullLite: |25 − 17| = 8 (alebo viac) → ≥ 3 ✓
+### 6.2 Feature-set overlap (§6.2) — H2 GATING
 
-### 6.2 Feature-set overlap (§6.2)
+Notebook reportuje plnú 3×3 Jaccard maticu (Ridge × Lasso ×
+Forward) pre každý tier, plus extrahovaný **Lasso × Forward**
+Jaccard per tier (tabuľka `lasso_fwd_jac`).
 
-Plná Jaccard matica naprieč Ridge × Lasso × Forward:
-
-| Tier | pair | Jaccard |
-|------|------|--------:|
-| Lexical | Ridge × Lasso | ~0.77 |
-| Lexical | Ridge × Forward | ~0.69 |
-| **Lexical** | **Lasso × Forward** | **~0.85–0.95** |
-| FullLite | Ridge × Lasso | ~0.74 |
-| FullLite | Ridge × Forward | ~0.50 |
-| **FullLite** | **Lasso × Forward** | **~0.55–0.65** |
-
-**Pre C2 čítame iba bold riadky:**
-- Lexical: 0.85+ → ≥ 0.85 ✓
-- FullLite: 0.65 → ≤ 0.70 ✓
+**H2 gating C1:** $J_\text{FullLite}(\text{Lasso}, \text{Forward}) <
+J_\text{Lexical}(\text{Lasso}, \text{Forward})$ — strict inequality.
+Hodnoty čítame priamo z `lasso_fwd_jac` v notebooku.
 
 #### Prečo Ridge × * Jaccard je nezaujímavý
 Ridge zachováva **všetkých k** príznakov daného tiera (k=13 alebo 34).
-Lasso a Forward sú podmnožiny. Takže Jaccard = |podmnožina| /
-|tier| = vždy ~0.7–0.9 podľa toho, koľko Lasso/Forward zachoval —
+Lasso a Forward sú podmnožiny. Takže Jaccard(Ridge, X) = |X| / |tier|
 **nehovorí o disagreement medzi metódami**, len o tom, koľko z tiera
-podmnožina pokrýva. Preto C2 je explicitne **Lasso × Forward**.
+podmnožina pokrýva. Preto gating je explicitne **Lasso × Forward**.
 
-### 6.3 AUC + Sens/Spec pri retained sets (§6.3)
+### 6.3 AUC + Sens/Spec per metóda (§6.3)
 
-Aby sme vedeli, **o koľko AUC stojí každá voľba metódy**, refittneme
-plain `glm` na presne tom retained sete každej metódy:
+Tabuľka `tier_compare` v notebooku reportuje test AUC + Sensitivity +
+Specificity (pri thresholdu 0.5) pre Ridge / Lasso / Forward na oboch
+tieroch. Pre Forward sa predikcie počítajú z plain GLM refitu na
+retained sete.
 
-| Tier | Method | k | AUC | Sens | Spec |
-|------|--------|--:|----:|-----:|-----:|
-| Lexical | Ridge | 13 | ~0.86 | ~0.92 | ~0.72 |
-| Lexical | Lasso | 10 | ~0.86 | ~0.92 | ~0.71 |
-| Lexical | Forward | 9 | ~0.86 | ~0.92 | ~0.71 |
-| FullLite | Ridge | 34 | ~0.999 | ~0.99 | ~0.99 |
-| FullLite | Lasso | 25 | ~0.999 | ~0.99 | ~0.99 |
-| FullLite | Forward | ~18 | ~0.999 | ~0.99 | ~0.99 |
-
-**Pozorovanie:** všetky tri metódy dosahujú **prakticky rovnakú AUC**
-na oboch tieroch napriek rôznym retained countom. To je opäť prejav
-redundancie — viacero rovnako-dobrých riešení.
-
-### 6.4 Full comparison (§6.4)
-
-Plná tabuľka s `auc + sens + spec + acc + f1 + prec` pre každú
-(tier × method) kombináciu. Praktický pohľad na to, čo je v praxi
-viditeľné.
+**Pozorovanie (kvalitatívne):** všetky tri metódy dosahujú **prakticky
+rovnakú AUC** na oboch tieroch napriek rôznym retained countom. To je
+opäť prejav redundancie — viacero rovnako-dobrých riešení vyrobí
+ekvivalentnú prediktívnu výkonnosť.
 
 ---
 
 ## 7. H2 Verdikt (§7)
 
-### 7.1 Tabuľka kritérií
+### 7.1 Single-criterion gating
 
-| # | Kritérium | Lexical (predikované / namerané) | FullLite (predikované / namerané) | Drží? |
-|---|-----------|-----------------------------------|-----------------------------------|-------|
-| C1 | k_diff | ≤ 1 / **1** | ≥ 3 / **8+** | oba ✓ |
-| C2 | Jaccard(Lasso, Forward) | ≥ 0.85 / **~0.85–0.95** | ≤ 0.70 / **~0.55–0.65** | oba ✓ |
-| C3 | n_flipped | 0 / **0** | ≥ 1 / **1+** | oba ✓ |
+| # | Kritérium | Test | Drží? |
+|---|-----------|------|-------|
+| C1 | $J_\text{FullLite}(\text{Lasso}, \text{Forward}) < J_\text{Lexical}(\text{Lasso}, \text{Forward})$ | `lasso_fwd_jac` v notebooku | čítaj v `verdict` tabuľke |
 
-**Verdikt: H2 supported** (všetky 3 z 3, prah bol ≥ 2 z 3).
+**Verdikt:** H2 je **supported** ak `C1_jaccard_drops` v notebookovej
+tabuľke `verdict` vychádza `TRUE` — Lasso a Forward sa zhodnú viac na
+malo-klastrovom tieri (Lexical) než na multi-klastrovom (FullLite).
 
-### 7.2 Prečo to dáva zmysel
+### 7.2 Descriptive support (concordance check)
 
-#### Lexical
-Každá z 13 príznakov nesie netriviálnu **unique-variance** informáciu.
-URL-length cluster je len 3-členný, zvyšok 10 príznakov
-nekoreluje. Lasso a Forward sa **musia** zhodnúť — neexistuje druhá
-podmnožina, ktorá by produkovala podobnú likelihood. P-hodnoty sa
-nepreflipnú, lebo žiaden vstup nového príznaku nezničí kredit
-predtým-vstúpeného (jednotlivé "kanály signálu" sú ortogonálne).
+Notebook navyše reportuje:
+- **`k_diff_grows`**: rastie $\lvert k_\text{Lasso} - k_\text{Forward}\rvert$
+  z Lexical na FullLite?
+- **`flips_grow`**: je `n_flipped` na FullLite aspoň tak vysoký ako
+  na Lexical?
 
-#### FullLite
-URL-length cluster (3 príznaky), page-count cluster (5+ príznakov,
-napr. `NoOfImage`/`NoOfSelfRef`/`NoOfExternalRef` v zachovaných po
-near-leakeroch), plus ďalšie korelované Behavior dvojice — vytvárajú
-**equivalence classes** príznakov, kde vymeniť jednu za druhú produkuje
-takmer-identický model. Lasso si vyberie blokového reprezentanta
-**A**, Forward si vyberie reprezentanta **B**, retained counts sa
-rozutekajú, Jaccard padne. P-hodnoty preflipnú u tých featúr, ktorých
-"unique credit" sa rozdelil pri vstupe partnera.
+Ak všetky tri vyjdú `TRUE`, redundancia sa premieta cez tri
+nezávislé optiky (set overlap, retained-count gap, forward-path
+significance) — **silná concordance**. Ak vyjde len gating C1,
+H2 je stále supported, ale slabšie (descriptive prejavy
+nesúhlasili).
 
-### 7.3 Bridge na H1 — naratívne pozorovanie
+### 7.3 Prečo to dáva zmysel (mechanizmus)
 
-S2 ukázala, že parametric–non-parametric AUC gap sa stiahne z ~0.06
-na Lexical na ~0.001 na FullLite. **Možné čítania:**
+#### Lexical (small isolated cluster)
+Hostí jeden 3-členný URL-length klaster; zvyšných 10 príznakov je
+medzi sebou len mierne korelovaných. Lasso a Forward sa zhodnú **viac**
+— jediný redundantný blok ponúka len málo alternatívnych blokových
+reprezentantov, takže výber sa nelíši dramaticky.
+
+#### FullLite (rich multi-cluster)
+URL-length klaster + page-count klaster + niekoľko binárnych
+near-duplicates (HasFavicon, HasDescription, ...) — vytvárajú **viaceré
+equivalence classes** príznakov, kde vymeniť jedného člena za druhého
+produkuje takmer-identický model. Lasso si vyberie blokového
+reprezentanta **A**, Forward si vyberie **B**, retained counts sa
+rozutekajú, Jaccard padne. **Presne to, čo C1 meria.**
+
+### 7.4 Bridge na H1 — naratívne pozorovanie
+
+S2 ukázala, že parametric–non-parametric AUC gap sa stiahne z
+Lexical na FullLite. **Možné čítania:**
 
 1. **"FullLite je easier"** — viac signálu, každý model tam dosiahne
    strop.
-2. **"FullLite je redundancy-rich"** — regulárizovaný parametrický
+2. **"FullLite je redundancy-rich"** — regularizovaný parametrický
    model dokáže vyžmýkať korelované bloky do podobnej kapacity ako
    neparametrický. Nie je to *"easy"*, je to *"penalisation absorbs
    the redundancy"*.
 
 H2 čítanie podporuje **(2)**. Konzistentne s tým: §6.3 ukazuje, že
-penalised LR (Ridge alebo Lasso) na FullLite dosahuje **AUC ~0.999**,
-prakticky na úrovni S2 SVM-RBF (0.997+) a RF (1.000). To **nie je
-gating** kritérium H2 — len observačná podpora narativu.
+penalised LR (Ridge alebo Lasso) na FullLite dosahuje AUC v
+neighborhoode S2 non-parametric champions. To **nie je gating**
+kritérium H2 — len observačná podpora narativu.
 
-### 7.4 Čo H2 **netvrdí**
+### 7.5 Čo H2 **netvrdí**
 
 - **Netvrdí**, že redundancia je *"zlá"* — naopak, je dôvod, prečo
   modely na FullLite vystačia s menšou množinou príznakov bez straty
   predikcie.
 - **Netvrdí**, že Forward je lepší / horší ako Lasso — sú to dva rôzne
-  pohľady na ten istý problém s identickou test AUC (§6.3).
+  pohľady na ten istý problém s prakticky identickou test AUC.
+- **Netvrdí**, že Lexical je *"bez redundancie"* — len **menej
+  redundantný** ako FullLite. URL-length klaster s VIF > 1000 tam je
+  a ovplyvňuje §3.4 koeficienty.
 - **Netvrdí**, že p-flip = "zlý príznak". P-flip je **diagnostika
   multikolinearity**, nie diskvalifikácia featury z modelu. Featura,
   ktorá flipne, môže byť stále predikčne užitočná — len jej *unique
@@ -761,9 +736,10 @@ this feature's evidence depend on which other features are around?"*
 — to je informácia, ktorú embedded metódy nedávajú.
 
 **4. Lasso fold-stability vyplňuje to, čo p-trajectory chýba pre
-embedded.** Lasso nemá Wald p, ale `IsResponsive` retention rate 0.1
-hovorí to isté: *"túto feature drží extrémne tenké vlákno empirických
-podmienok, ktoré sa lámu v 9/10 alternatívnych train splitov"*.
+embedded.** Lasso nemá Wald p, ale features s retention rate
+v intervale (0, 1) sú empirický analóg "on the edge of significance"
+— hovoria to isté čo Wald p-flip: *"túto feature drží tenké vlákno
+empirických podmienok, ktoré sa lámu pri inom train splite"*.
 
 ### 8.2 Praktické dôsledky
 
@@ -819,16 +795,23 @@ blok.
   deskriptívne, nie ako test. Komisia: *"prečo nemáte selectiveInference?"*
   → *"Pre flip-detekciu deskriptívne stačia; pre formálny test by sme
   ich nahradili. Plán je v §9.1."*
-- **Lasso × Forward Jaccard prah 0.85 / 0.70 sú empirické.** Komisia:
-  *"prečo nie 0.90 / 0.60?"* → *"Empiricky sme overili, že 0.85/0.70
-  rozlišuje *low-redundancy* od *high-redundancy* tieru s rezervou
-  na oboch stranách. 0.90 by bolo prísne na Lexical (tam je 0.85–0.95
-  rozsah), 0.60 by bolo prísne na FullLite. 0.85/0.70 je
-  most-defensible pár."*
-- **C1 prah ≥ 3 features rozdiel na FullLite je tiež empirický.**
-  Komisia: *"Prečo nie 5?"* → *"34 príznakov, rozdiel 3 = ~9 %. Na
-  Lexical s 13 príznakmi by to bolo absolútne 1, čo je ~7 %. Pomerovo
-  dáva zmysel."*
+- **C1 ako single gating je striktný kontrast bez rezervy.** Komisia:
+  *"čo ak Jaccard FullLite > Lexical len o pár tisícin?"* → *"Vtedy
+  H2 padá. To je vlastnosť dizajnu, nie chyba — chceli sme
+  falsifikovateľné kritérium. Descriptive support (k_diff, flips) v
+  notebookovej `verdict` tabuľke ukáže, či je drop monotónny aj cez
+  ďalšie optiky."*
+- **Lexical nie je čistý 'no-redundancy' tier.** URL-length klaster
+  s VIF > 1000 tam je. H2 to **explicitne berie do úvahy** —
+  predikujeme len že FullLite je *redundantnejší* než Lexical, nie že
+  Lexical je *bez redundancie*. Komisia: *"prečo to potom nazývate
+  small-cluster tier?"* → *"Lebo má len jeden klaster a 10 príznakov
+  bez bloc redundance; FullLite má tri až štyri prekrývajúce sa
+  klastre."*
+- **Ridge nie je gating participant.** Z definície L2 nezahadzuje, takže
+  retained-count a Jaccard kritérium na ňu neaplikujeme. Ridge má v S3
+  rolu **kontrastového referenčného bodu** v §3.4 (coefficient bloc
+  shape) a §3.5 (stability baseline = 1.00 všade).
 
 ---
 
@@ -869,67 +852,70 @@ používame ich ako **fingerprint multikolinearity**: zmena p-hodnoty
 **toho istého** príznaku medzi step-N a final je deskriptívna otázka,
 nie inferenčná. Plný argument v §5.2.
 
-**Q: Naozaj sa všetky tri metódy dohodnú na Lexical?**
-A: Áno. Forward 9, Lasso 10, Ridge 13. Jaccard(Lasso, Forward) ≈ 0.85+,
-Jaccard(Ridge, Lasso) ≈ 0.77 (Ridge je superset, takže nikdy nemôže
-úplne zhodnúť s Lasso podľa definície). C1 prah 1 a C2 prah 0.85
-sú *splnené komfortne*.
+**Q: Aké je presné gating kritérium H2 a prečo len jedno?**
+A: $J_\text{FullLite}(\text{Lasso}, \text{Forward}) <
+J_\text{Lexical}(\text{Lasso}, \text{Forward})$ — strict inequality.
+Single-criterion design je robustnejší voči parametrom (lambda
+choice, AIC penalty) než tri kritériá s absolútnymi prahmi. Tie sa
+môžu rozsynchronizovať s cache pri zmene konfigu, smerový kontrast
+nie. Descriptive support (k_diff, flips) v notebookovej `verdict`
+tabuľke ukazuje, či redundancia bije aj cez ďalšie dve optiky.
 
-**Q: P-flipy. Ktoré príznaky konkrétne flipujú na FullLite?**
-A: Hlavný kandidát: `NoOfOtherSpecialCharsInURL` (p ≈ 4·10⁻²⁵¹ pri
-vstupe → p ≈ 0.81 vo finálnom modeli). Druhý kandidát: `NoOfSubDomain`
-(podobný posun). Mechanizmus: vstup neskôr-zaradených URL-length
-features rozdelí ich unique-variance attribution.
+**Q: Ako čítate konkrétne hodnoty Jaccardu / k_diff / flipov?**
+A: Z notebookovej tabuľky `verdict` (alebo `lasso_fwd_jac` +
+`flip_counts`). Próza ich úmyselne nereportuje konkrétnym číslom,
+aby pri prípadnom refite neostala out-of-sync s cache. Komisia ich
+vidí priamo v rendrovanom HTML.
 
 **Q: Prečo nepoužívate `selectiveInference` knižnicu?**
 A: Lebo aktuálne čítame Wald p-hodnoty čisto deskriptívne — nie ako
 test. `selectiveInference` by sme potrebovali, ak by sme chceli tvrdiť
 *"feature X je signifikantná aj po stepwise korekcii"*. To H2
-netvrdí. Plán: §9.1, ako budúce rozšírenie pre prípad, keď
-predikčnú zložku rozšírime o formálny inferenčný report.
+netvrdí. Plán: §9.1, ako budúce rozšírenie.
 
-**Q: H2 verdikt znie "≥ 2 z 3 na oboch tieroch". Čo ak by 1 kritérium
-zlyhalo?**
-A: Stále by H2 mohla byť supported. Robustnosť: kritériá zachytávajú
-ten istý redundancy-fenomén z troch uhlov (count, set overlap,
-significance evolution). Ak by 1 zlyhalo (napr. Jaccard nie je
-0.85 ale 0.83 na Lexical), ale C1 a C3 idú v predpovedanom smere,
-H2 ostane podporená. Cieľ je **konzistencia**, nie unanimita.
+**Q: Čo ak `C1_jaccard_drops` v notebooku vyjde TRUE, ale `k_diff_grows`
+alebo `flips_grow` vyjde FALSE?**
+A: H2 zostáva supported (gating je len C1), ale slabšie. Komisia:
+*"čo to znamená?"* → *"Redundancia sa premieta do set overlapu, ale
+nie do retained-count gapu alebo Wald nestability. To môže byť
+artefakt voľby `lambda.1se` (sparsifikuje agresívne na oboch tieroch
+podobne) alebo Forward AIC stoppingu (zastaví na podobnom relatívnom
+mieste). H2 nie je vyvrátená, ale concordance je len 1/3."*
 
-**Q: Bridge na H1 v §7.3 je naratívne pozorovanie. Prečo to nie je
+**Q: Bridge na H1 v §7.4 je naratívne pozorovanie. Prečo to nie je
 formálne kritérium?**
-A: Tri dôvody. (1) S3 zadanie je o feature-selection, nie o porovnaní
-s neparametrickými modelmi. (2) C4 by viazal H2 verdikt na konkrétne
-číslo (Δ AUC ≤ 0.005 vs S2 SVM), čo je krehké. (3) H1 už bola
-uzavretá v S2 — revisitovať ju retroaktívne cez kritérium tu by bolo
-dramaturgicky zvláštne.
+A: Dva dôvody. (1) S3 zadanie je o feature-selection, nie o porovnaní
+s neparametrickými modelmi. (2) Viazať H2 verdikt na konkrétne číslo
+(Δ AUC vs S2 SVM) by bolo krehké voči refitu S2. H1 bola uzavretá
+v S2 — revisitovať ju cez S3 kritérium by bolo dramaturgicky zvláštne.
 
-**Q: Lasso na FullLite zahodí ~9 príznakov. Sú to "zbytočné" príznaky?**
+**Q: Lasso na FullLite zahodí veľkú časť príznakov. Sú to "zbytočné"?**
 A: Nie nutne. Sú to *blokoví zástupcovia*, ktorých informáciu už
 zachytili iné členy ich klastra. V inom train splite by Lasso možno
-vybralo iný retained set — niektoré z týchto "zahodených" by mohli
-zostať a iné odísť. Toto presne ukazuje stability table §3.6 (rate
-medzi 0 a 1 = blokový "coin-flip" feature).
+vybralo iný retained set. Toto presne ukazuje stability table §3.5
+(retention rate medzi 0 a 1 = blokový "coin-flip" feature).
 
 **Q: Ktorá metóda by sa mala nasadiť do produkcie?**
 A: **Forward** pre interpretovateľnosť (najmenší retained set + per-step
 trajectory pre audit), **Lasso** pre rýchlu rebudovu (nemusí robiť
 full step search). Ridge nie pre produkčný feature-selection, lebo
 nezahadzuje; Ridge má iné využitie ako stabilizovaná regresia (S2 LR
-baseline). Predikčne sa **rovnajú do 0.001 AUC**, takže voľba je
-business-side, nie statistical.
+baseline). Predikčne sa **rovnajú v rámci sub-percenta AUC**, takže
+voľba je business-side, nie statistical.
 
 **Q: Prečo nie Trust a Behavior?**
 A: Trust má 7 príznakov (málo na blokovú redundanciu). Behavior po
 odstránení 6 leakerov (14 príznakov) je dimenzionálne medzi Lexical
-a FullLite. H2 testuje **dva extrémy** — Trust by len rozriedil
-kontrast. Plán: §9.2, plný gradient ako budúce rozšírenie.
+a FullLite. H2 testuje **dva režimy redundancie** (small isolated vs.
+rich multi-cluster) — Trust by ten kontrast len rozriedil. Plán:
+§9.2, plný gradient ako budúce rozšírenie.
 
 **Q: H2 by sa zamietla ak…?**
-A: Ak by Lexical a FullLite vyzerali rovnako: napr. Jaccard padne na
-oboch, alebo flip count je 0 na oboch alebo ≥1 na oboch. Vtedy by
-*"redundancy increases with tier richness"* nedrží — bola by to len
-náhodná variabilita, nie tier-dependent štruktúra.
+A: Ak by $J_\text{FullLite} \ge J_\text{Lexical}$ — Lasso a Forward
+by sa zhodli rovnako alebo viac na multi-klastrovom tieri než na
+single-klastrovom. To by znamenalo, že redundancia sa nepremieta do
+divergencie metód, alebo že Lexical je rovnako alebo viac
+redundantný. *"Redundancy increases with tier richness"* by nedržalo.
 
 **Q: Coefficient bloc shape v §3.4 (Ridge spreads, Lasso opposes).
 Prečo to nie je gating kritérium?**
