@@ -764,6 +764,24 @@ p ≈ 0.001 is statistically consistent but practically irrelevant.
 
 # 7. Surrogate tree — visualising the RF decision rule (Task 4)
 
+**Reading of the task statement.** Task 4 says *"heatmaps **or**
+trees"* twice and asks us to *"compare how these visualisations differ
+**from the underlying models** and to what extent they capture
+model-based classification"* (sentence 2). We read *"the two
+approaches"* in sentence 4 as **(visualisation, model)**, not as
+(heatmap, tree): sentence 2 anchors the comparison to the
+visualisation-vs-model axis, and the disjunctive *"or"* is repeated
+across sentences 1 and 3, not replaced by *"and"*. We therefore
+commit to **one visualisation** — a surrogate `rpart` tree trained on
+the RF's own predictions — and tune it explicitly against the model.
+A heatmap variant was prototyped during EDA in earlier commits and
+dropped: hierarchical clustering visualises the geometry of the
+features, not the behaviour of any model, so under this reading it
+does not satisfy sentence 2 at all. The Sens-vs-RF / Spec-vs-RF
+decomposition in §7.3 and the `varImpPlot` cross-check in §7.4
+directly answer the *"similarities and differences between the two
+approaches"* clause along the visualisation-vs-model axis.
+
 Random Forest is accurate but opaque: Lexical predictions are the vote of
 300 unpruned trees over bootstrapped samples, and there is no single
 diagram a reader can point at. Task 4 asks us to render a model-faithful

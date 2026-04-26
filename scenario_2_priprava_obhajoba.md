@@ -1103,6 +1103,51 @@ na Lexical sú červené boxy **výrazne vyššie** než modré; na ďalších
 
 ## 6a. Náhradný rozhodovací strom — Task 4 (vizualizácia RF)
 
+### Ako čítame zadanie Task 4
+
+Zadanie obsahuje vetu, ktorá pripúšťa dve čítania, a komisia sa toho
+pravdepodobne chytí. Doslovne:
+
+1. *„you may also visualize labelled data using heatmaps **or** tree
+   diagrams"*
+2. *„Compare how these visualizations differ **from the underlying
+   models** and to what extent they capture model-based classification"*
+3. *„Specify which parameters you tuned to make the heatmaps **or**
+   trees to align as closely as possible with the model behavior"*
+4. *„discuss the key similarities and differences between **the two
+   approaches**"*
+
+**Dva spôsoby, ako čítať vetu (4):**
+
+| Čítanie | „the two approaches" znamená | Implikácia |
+|---|---|---|
+| **A (naše)** | (vizualizácia, model) | stačí jedna vizualizácia (heatmap **alebo** tree), porovnať proti modelu |
+| **B (alt.)** | (heatmap, tree) | musíš urobiť obe a porovnať ich navzájom |
+
+**Prečo voľíme A:**
+- **Veta (2) explicitne ukotvuje porovnanie na os vizualizácia-vs-model**:
+  *„visualisations differ **from the underlying models**"* — nie *„from
+  each other"*. Veta (4) zrkadlí tú istú os.
+- *„Or"* sa v zadaní opakuje (vety 1 a 3). Keby autor chcel obe, použil
+  by *„and"*. Disjunktívne čítanie je teda zámerné.
+- **Heatmap fundamentálne nevie splniť vetu (2):** unsupervised
+  hierarchické zhlukovanie pozná iba geometriu features, nie predikcie
+  modelu. Aj keby sme ju pridali, museli by sme priznať, že proti
+  modelu sa neporovnáva priamo — len cez nepriamu medzeru ARI vs AUC.
+  To by oslabilo, nie posilnilo Task 4 obhajobu.
+
+**Čítanie B by mohlo prejsť iba ak:**
+- zadanie by malo *„demonstrate two alternative visualisation
+  strategies"* alebo *„compare heatmap and tree-based visualisations"*
+  — ani jedno tam nie je.
+
+**Záver:** Robíme jednu vizualizáciu (surrogate rpart strom) a ladíme
+ju explicitne proti RF. Heatmap variant sme prototypovali v EDA a
+zahodili ho — pri čítaní A nepatrí do Task 4 vôbec, pri čítaní B by
+zase neodpovedal na vetu (2). Naša interpretácia v `scenario_2.rmd §7`
+je explicitne uvedená, takže komisia presne vie, ako sme dvojzmysel
+rozsekli.
+
 ### Čo je surrogate tree a prečo ho robíme
 
 Random Forest je presný, ale ako čierna skrinka: rozhodnutie na Lexical
@@ -1238,6 +1283,25 @@ pozorovania pre obhajobu:
   čitateľný. RF ≈ 300 stromov × 100+ pravidiel, ľudsky nečitateľný.
 
 ### Kľúčové otázky komisie
+
+**Otázka: Zadanie hovorí ‚compare the two approaches' — kde je heatmap?**
+Zámerne sme ju vynechali. Veta (2) zadania porovnáva vizualizáciu
+**proti modelu** (*„differ from the underlying models"*), nie heatmap
+proti stromu navzájom. Slovo *„or"* sa v zadaní opakuje (vety 1 a 3),
+takže disjunktívne čítanie je zámerné. *„The two approaches"* vo vete
+(4) preto čítame ako (vizualizácia, model). Heatmap by aj tak vetu (2)
+nesplnila — unsupervised clustering nevizualizuje žiaden model. Naša
+interpretácia je explicitne uvedená v `scenario_2.rmd §7` na začiatku
+— komisia vie, ako sme dvojzmysel rozsekli, a má to čierne na bielom.
+
+**Otázka: A keby komisia trvala na čítaní B (heatmap aj tree)?**
+Argumentačne: heatmap (10 features × 500 rows, hierarch. clustering)
+neporovnáva proti modelu, len proti pravde cez ARI/purity — čo nie je
+to, čo veta (2) zadania chce. Druhotne: heatmap by sme mohli pridať
+ako EDA dodatok (čo „vidno bez supervízie"), ale to by patrilo do
+`phishing.rmd §4` (discriminative power), nie do Task 4. Praktická
+ústupok: ak by sa to vyložene tlačilo, do executive summary pridáme
+vetu, že heatmap baseline je v project history — inak meníme nič.
 
 **Otázka: Prečo neladíte surrogate na accuracy?**
 Lebo potom neodpovedám na zadanie. Zadanie hovorí *"which parameters
