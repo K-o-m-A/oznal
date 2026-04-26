@@ -308,6 +308,97 @@ použijú pre všetkých 6 modelov × 4 úrovne.
 2. **Eliminácia variability foldov:** keby mal každý model vlastné
    foldy, jeden by mohol náhodou dostať "ľahší" split a vyzerať lepší.
 
+### 3.2.1 Prečo iba train/test (80/20) a nie train/validation/test?
+
+**Otázka, ktorá padne skoro vždy:** "Nemali ste dáta rozdeliť na train,
+validation a test?"
+
+**Krátka odpoveď:** tretí split (validation set) má zmysel iba ak by CV
+vyberala **hyperparametre** alebo ak by sme robili **model selection na
+základe hold-out metrík**. Ani jedno nerobíme — `tuneGrid` má pre každý
+model jeden riadok (žiadne tuning) a štatistické rozhodnutie H1/H2
+robíme na CV foldoch train setu cez párový Wilcoxon. Test set tak slúži
+iba na reportovanie finálnych metrík pri pevnom modeli.
+
+**Detailné zdôvodnenie:**
+
+1. **`tuneGrid` je pre každý model jednoriadkový** (`scenario_2.rmd:398,
+   463, 505, 540, 587`). `caret::train` teda **nevyberá** najlepšiu
+   konfiguráciu — iba spočíta per-fold AUC pre jednu pevnú kombináciu
+   hyperparametrov:
+
+   | Model     | Pevná konfigurácia               |
+   |-----------|----------------------------------|
+   | LR-Ridge  | `α=0, λ=0.01`                    |
+   | LDA       | žiadne HP                        |
+   | NB        | `fL=1, usekernel=TRUE, adjust=1` |
+   | RF        | `mtry=⌊√p⌋, ntree=300`           |
+   | SVM-RBF   | `C=1, σ=0.1`                     |
+   | KNN       | `k=25`                           |
+
+   Toto je vedomé rozhodnutie (§4.1 *Prečo λ = 0.01 a nie CV-tuning?*,
+   §5.1 *Viac hyperparametrov = väčšia plocha na cherry-picking*) — HP
+   fixujeme, aby kontrast **parametrické vs. neparametrické** nebol
+   kontaminovaný rozdielnym tuning úsilím.
+
+2. **Štatistické rozhodnutie H1/H2 sa robí na CV foldoch train setu**
+   (§6.2), nie na test sete. Párový Wilcoxonov test porovnáva
+   **priemerný fold-AUC neparametrickej rodiny vs. parametrickej
+   rodiny** na 10 zdieľaných foldoch — testuje *rodinový kontrast* per
+   tier (H1: neparametrické > parametrické na Lexical). Test berie
+   CV AUC z train setu, test-set hodnoty doň nevstupujú.
+
+   *Pozor na hranicu tohto argumentu:* Wilcoxon **neporovnáva
+   jednotlivé modely proti sebe** — netestuje napr. SVM-RBF vs. RF.
+   Identifikácia konkrétneho best-in-class modelu (SVM-RBF ako
+   proxy-deployable na Lexical) je **deskriptívny záver** z tabuliek
+   CV ROC + test-set Sens/Spec, nie formálna štatistická selekcia.
+   Rozhodnutie ktorý model označiť za "víťaza" sa teda neriadi
+   Wilcoxonom — Wilcoxon rozhoduje iba o **rodinách**.
+
+3. **Test set sa používa iba raz** — na výpočet finálnych metrík
+   (`Test AUC`, `Accuracy`, `F1`, `Sens`, `Spec`) pri **pevnom modeli
+   s pevnými HP**. Žiadne rozhodnutie o hyperparametroch ani o featuroch
+   nie je podmienené číslami z test setu. Jediný aspekt, kde test-set
+   čísla vstupujú do záverečnej interpretácie, je deskriptívny opis
+   správania modelov pri threshold 0.5 (Sens/Spec) — ale žiadny model
+   sa na základe toho nepretrénuje ani neladí, takže test set zostáva
+   nestranný pre generalizačnú chybu.
+
+4. **Preprocessing neleakuje:** `preProcess` (log + centre/scale) je
+   fit-nutý **iba na train** (`scenario_2.rmd:255`) a aplikovaný na
+   test. Žiadna informácia z test setu sa nedostáva do tréningového
+   pipeline.
+
+**Kedy by sme validačnú sadu potrebovali?**
+
+- Keby sme robili **multi-stage selekciu** (napr. najprv výber
+  featurových tierov na jednej sade, potom tuning HP na druhej, nakoniec
+  kalibrácia prahu na tretej) → každá fáza potrebuje vlastnú čerstvú
+  sadu, aby ďalšia fáza nejedla jej zvyšky. U nás je **tiers pevne
+  definovaný z EDA** (`phishing.rmd` §2), HP sú pevné, prah = 0.5,
+  takže multi-stage selekcia neexistuje.
+- Keby sme chceli **nestranný CV-like odhad generalizácie po tunovaní**
+  (nie jednu test-set hodnotu) — vtedy by sa riešilo nested CV alebo
+  samostatným val setom. My reportujeme jednu test-set AUC pri pevnom
+  modeli, takže tento problém nevzniká.
+- Keby sme víťazný model vyberali podľa **test-set metrík** (napr.
+  *"SVM má najvyššie test AUC = 0.995, vyhráva"*) → test set by sa
+  stal model-selection kritériom a potrebovali by sme ešte jednu sadu
+  na finálne nestranné čísla. U nás sa víťaz (SVM-RBF) čita z CV ROC
+  a test-set Sens/Spec **deskriptívne**, ale žiadny formálny výber
+  víťaza podľa test čísel sa nerobí — žiadny HP ani žiaden feature sa
+  nemení na základe test-set hodnôt.
+
+Ani jeden z týchto prípadov u nás nenastáva.
+
+**Jednovetová obhajoba:** *"Test set u nás neslúži ako kritérium
+výberu — hyperparametre sú pevné (jednoriadkové `tuneGrid`) a
+štatistické rozhodnutie H1/H2 robíme paired Wilcoxonom na CV foldoch
+rodín v rámci train setu. Test set sa preto používa iba raz, na
+reportovanie finálnych metrík pri pevnom modeli, takže tretí split by
+bol navyše."*
+
 ### 3.3 Preprocessing — dva paralelné recepty
 
 #### Prečo dva?
@@ -1007,6 +1098,245 @@ Každý bod na ploche = jedna CV fold. Farby: modrá = parametrický,
 červená = neparametrický. Vizuálne je to najpresvedčivejší dôkaz H1:
 na Lexical sú červené boxy **výrazne vyššie** než modré; na ďalších
 úrovniach sa farby postupne miešajú.
+
+---
+
+## 6a. Náhradný rozhodovací strom — Task 4 (vizualizácia RF)
+
+### Čo je surrogate tree a prečo ho robíme
+
+Random Forest je presný, ale ako čierna skrinka: rozhodnutie na Lexical
+úrovni vzniká z hlasu **300 nezávisle trénovaných stromov**, ktoré vidí
+iba  počítač — my to očami neprečítame. Zadanie Task 4 hovorí:
+*"vizualizuj označené dáta stromom alebo heatmapou a povedz, nakoľko
+vizualizácia zachytí správanie modelu"*. My ten cieľ napĺňame **jedným
+`rpart` stromom**, ktorý nie je trénovaný na pravdu (`label`), ale na
+**predikcie RF**. Strom sa teda doslova učí napodobňovať RF → ako
+žiak, ktorý pozoruje učiteľa a skúša kopírovať jeho odpovede. Odmenou
+nie je accuracy proti pravde, ale **fidelity** = percento zhody medzi
+predikciou stromu a predikciou RF na test-sete.
+
+**Prečo práve na Lexical a FullLite?** Lexical je tier, kde RF reálne
+vyhráva (gap ~0.10 AUC nad parametrickými) a teda má čo vysvetľovať.
+FullLite je sanity check — všetky modely tam sú pri AUC ≈ 0.999, takže
+fidelity musí byť vysoká automaticky a overí, že naša tuning pipeline
+nie je zaujatá. Trust a Behavior sme vynechali zámerne: Trust má 7
+features, väčšinou binárne, takže jediné nelineárne správanie, ktoré
+tam môže byť, je XOR medzi binárkami — a §6.2 (všetky modely Trust ≈
+0.93 v úzkom pásme) ukazuje, že žiadne takéto interakcie v dátach
+nie sú. Nie je čo surrogate stromom „vizualizovať". Behavior sedí
+medzi dvoma zaujímavými prípadmi a nepridal by nové pozorovanie.
+
+**Prečo nie jeden z 300 RF stromov?** Každý strom v RF je zámerne
+**nedokonalý** — trénovaný na bootstrap vzorke (~63 % trénsetu) a vidí
+iba `mtry = √p` features na každom splite. Vytiahnuť jeden a ukázať
+ho by nič neznamenalo; priemer 300 takýchto stromov je niečo iné ako
+každý z nich samostatne. Surrogate strom naopak vidí **celý trénset a
+všetky features**, takže je najvernejšou možnou aproximáciou
+ensemble-u v tvare jedného stromu.
+
+### Čo sme ladili a prečo
+
+Tri parametre `rpart.control`, každý s inou rolou:
+
+| Parameter | Rozsah | Rola |
+|-----------|--------|------|
+| `maxdepth` | 3..7 | **Hlavný trade-off**: hĺbka stromu = koľko úrovní rozhodovania. Plytký strom = ľahko čitateľný, ale kopíruje RF zle. Hlbší strom = vernejší, ale stráca prehľadnosť a začína sa učiť na šume. |
+| `cp` (complexity parameter) | 1e-4, 1e-3, 1e-2 | Prah pre akceptovanie nového splitu. Čím nižšie, tým viac splitov (sub-tree pruning). `1e-4` je permisívne — nechá `maxdepth` byť reálnym limitom, nie `cp`. |
+| `minbucket` | 10, 30, 100 | Minimálna veľkosť listu. Brzdí pretrénovanie na náhodných odchýlkach v predikciách RF. `10` je liberálne, `100` je konzervatívne. |
+
+5 × 3 × 3 = 45 kombinácií na tier × 2 tiery = 90 stromov. `rpart` na
+24 000 riadkoch trvá ~1 s, takže celá grid search pod 2 minúty. Všetko
+cachované v `scenario_2/artifacts/surrogate_lexical.rds` a
+`surrogate_fulllite.rds`, takže druhý knit berie výsledky zo súboru.
+
+### Čo meriame — fidelity a jej Sens/Spec rozklad
+
+Celý projekt (§6.1.1, §8) **neporovnáva modely cez Accuracy, ale cez
+Sensitivity a Specificity** — lebo v bankovej/proxy aplikácii majú dve
+typy chýb asymetrickú cenu. Aby bol Task 4 s týmto frame-om
+konzistentný, ladíme primárnu metriku **fidelity** a jej rozklad po
+triedach — nie accuracy proti pravde.
+
+- **Fidelity (primárny cieľ):** `mean(predict(tree, test) == predict(rf, test))`.
+  Celková zhoda stromu s RF na test sete.
+- **Sens vs RF:** `P(tree = Phishing | rf = Phishing)` — z URL, ktoré
+  RF označí ako phishing, koľko aj strom označí rovnako. Per-class
+  rozklad fidelity na „phish strane".
+- **Spec vs RF:** `P(tree = Legitimate | rf = Legitimate)` — analogicky
+  na „legit strane".
+- **Tree Sens / Tree Spec + RF Sens / RF Spec (proti pravde):** dvojice
+  (tree vs truth) a (rf vs truth). Keď sú blízko seba, strom zachováva
+  prevádzkový bod RF — čiže ak niekto nasadí strom miesto RF, bude
+  blokovať a prepúšťať skoro rovnaké URL.
+
+**Prečo nie accuracy:** accuracy = (TP+TN)/N averaguje cez obe triedy,
+takže za totožnou hodnotou sa môže skrývať úplne iná Sens/Spec. Náš
+Naive Bayes §6.1.1 je kanonický príklad — Accuracy vyzerá OK, ale
+Sens/Spec ukazuje ostrú asymetriu. Rovnakým okom musíme merať aj
+surrogate, inak by Task 4 obchádzal ten rozklad, ktorý celý projekt
+obhajuje.
+
+**Zlatý stav:**
+1. **Fidelity vysoká** (≥ 0.95 pri čitateľnom strome) — celková zhoda.
+2. **Sens vs RF ≈ Spec vs RF** — strom kopíruje RF symetricky, nie iba
+   na tej „ľahšej" triede.
+3. **Tree Sens ≈ RF Sens a Tree Spec ≈ RF Spec** — strom zachováva
+   prevádzkový bod RF, takže aj v nasadení by pracoval rovnako.
+
+Ak by nastala disonancia — napr. Sens vs RF 0.99 ale Spec vs RF 0.82 —
+bolo by to signál, že surrogate kopíruje RF iba na phish strane a na
+legit strane ho „vylepšuje" vlastným hacky pravidlom. To by znamenalo,
+že strom nie je verná vizualizácia, ale skrytý paralelný klasifikátor.
+
+### Ako prezentovať výsledky
+
+Tabuľka v §7.3 ukazuje fidelity saturačnú krivku per hĺbku. Kľúčové
+pozorovania pre obhajobu:
+
+- **Lexical:** fidelity typicky saturuje pri hĺbke 5-6 okolo 0.95-0.97.
+  Pod hĺbku 3 fidelity klesne pod 0.90 — strom nevie reprodukovať
+  druhú vrstvu interakcií (dĺžka URL × počet číslic × počet
+  subdomén). Nad hĺbku 6 sa krivka vyrovnáva — dodatočné splity sa
+  zhodujú s vlastným šumom, nie so správaním RF.
+- **FullLite:** fidelity ≥ 0.99 pre akúkoľvek rozumnú hĺbku. Úloha je
+  na FullLite takmer triviálne separovateľná, takže aj plytký strom
+  dokáže kopírovať RF skoro dokonale. Toto NIE JE nález o RF, je to
+  nález o úlohe samotnej.
+- **Tree AUC vs RF AUC:** aj pri fidelity 0.97 je AUC stromu o
+  0.01-0.03 nižšie ako AUC RF — to je **daň za jeden strom miesto
+  300**. Ensemble priemerovanie dáva RF hladšie hranice a lepšie
+  kalibrované pravdepodobnosti pri rozhodnej hranici; surrogate vracia
+  listové class-proporcie, ktoré majú hrubšiu rozlišovaciu schopnosť.
+
+### Podobnosti a rozdiely medzi vizualizáciou a modelom
+
+**Podobnosti:**
+- Oba používajú **os-paralelné splity** (každé pravidlo má tvar
+  `feature > prah`).
+- **Root-splity surrogate stromov sedia s intuitívnou hierarchiou RF:**
+  - Na **Lexicali** je root `NoOfOtherSpecialCharsInURL < 3` a druhá
+    vrstva pokračuje cez `NoOfDegitsInURL`, `NoOfSubDomain`, `TLDLength`
+    a `CharContinuationRate` — klasický rebríček URL-lexikálnych
+    anomálií, ktorý by sme čakali aj od RF variable importance.
+  - Na **FullLite** sa root flipne na `HasSocialNet = 1` a horné tri
+    vrstvy sú **výlučne trust-tier binárky** (`IsHTTPS`,
+    `HasCopyrightInfo`, `HasDescription`, `HasSubmitButton`). URL-tier
+    features sa objavia až hlbšie, ako spresnenie listov. Toto
+    samotné je nález: akonáhle RF dostane trust-tier signály, tie
+    dominujú vrcholu rozhodovania a URL-text prvky sa stávajú iba
+    jemným doladením.
+- Oba sú non-parametrické (bez predpokladu o distribúcii dát).
+
+**Rozdiely:**
+- RF = 300 stromov × bootstrap × random feature subset → **hladké
+  priemerovanie** + zachytenie **interakcií medzi 3+ features**, ktoré
+  jeden strom fundamentálne nemôže vyjadriť.
+- Surrogate vidí celý trénset a všetky features → v jednom strome zachytí
+  **top-level rozhodnutia** RF, ale nie jemné doladenia z ensemble.
+- Interpretovateľnosť: strom ≈ 5-20 rozhodovacích pravidiel, ľudsky
+  čitateľný. RF ≈ 300 stromov × 100+ pravidiel, ľudsky nečitateľný.
+
+### Kľúčové otázky komisie
+
+**Otázka: Prečo neladíte surrogate na accuracy?**
+Lebo potom neodpovedám na zadanie. Zadanie hovorí *"which parameters
+you tuned to make the trees align as closely as possible with the
+**model behavior**"* → ladím na fidelity, lebo fidelity meria zhodu
+s modelom, nie s pravdou.
+
+**Otázka: Prečo reportujete Sens vs RF a Spec vs RF namiesto accuracy
+proti pravde?**
+Konzistencia s celým projektom. §6.1.1 a §8 obhajujú modely cez
+Sensitivity a Specificity, nie cez accuracy — lebo FN a FP majú inú
+cenu v bezpečnostnej aplikácii. Keby sme Task 4 hodnotili iba cez
+accuracy, prekryli by sme presne ten class-asymetrický rozklad, ktorý
+sme vo zvyšku obhajoby zvýraznili. `Sens vs RF` = per-class rozklad
+fidelity (ako verne strom kopíruje RF na phish strane), `Spec vs RF`
+= to isté na legit strane. `Tree Sens / Tree Spec vs RF Sens / RF
+Spec` = porovnanie prevádzkových bodov, ktoré komisia očakáva
+podobne ako v §6.1.1 tabuľke.
+
+**Otázka: Ako overíte, že root surrogate stromu zodpovedá RF-u a nie
+je artefakt jedného trénu?**
+Vedľa obrázkov stromov v §7.4 pridávame `randomForest::varImpPlot()`
+pre rovnaký teacher RF. Ak je feature v roote surrogate stromu aj
+medzi top-3 v variable-importance plote, surrogate priamo zrkadlí
+poradie, ktoré RF sám priraďuje. To je dôkaz, že strom nie je
+paralelný klasifikátor, ale vizualizácia RF logiky.
+
+**Otázka: Čo keby bola fidelity veľmi nízka, napr. 0.75?**
+Bolo by to samo osebe zistenie: RF v sebe nesie niečo, čo sa jedným
+stromom proste nevyjadrí — typicky interakcie medzi mnohými features,
+ktoré ensemble priemerovanie vie, ale rpart nie. Priznal by som to a
+uviedol to ako explicitný limit vizualizácie. Nesnažil by som sa to
+obísť hlbším stromom, lebo nad hĺbku 7 už strom overfituje na teacher
+predikcie.
+
+**Otázka: Prečo nie decision tree priamo na dátach (bez RF teacher)?**
+To by bol iný experiment — samostatný tree-based klasifikátor, nie
+vizualizácia RF. Fidelity by nebola definovaná (s čím by sa
+porovnávala?). Naše zadanie hovorí "align with model behavior", takže
+teacher musí byť model, ktorý vizualizujeme.
+
+**Otázka: Prečo `ntree = 300` pre teacher RF, keď hlavný §5.1 tiež
+používa 300?**
+Presne preto — teacher RF má byť identický režim ako v §5.1, aby bol
+surrogate verný ako ilustrácia modelu, ktorý sme v §5.1 porovnávali.
+Zdieľanie hyperparametrov je feature, nie bug.
+
+**Otázka: Prečo ste si vybrali rpart a nie napríklad ctree / conditional
+inference tree?**
+rpart je kanonická CART implementácia a je plne kompatibilný s
+rpart.plot na vizualizáciu. ctree by dal podobné výsledky (fidelity by
+bola v rámci šumu rovnaká), lebo teacher labels sú tie isté a oba
+algoritmy robia axis-aligned splity. Vybrali sme rpart kvôli
+jednoduchosti knitu a kvalitnému vizuálu.
+
+**Otázka: Čo je rpart.plot a prečo ste nepoužili base `plot.rpart`?**
+`rpart.plot::rpart.plot` je rozšírenie, ktoré farbí uzly podľa triedy
+a lepšie rozloží popisy. Base `plot.rpart + text.rpart` produkuje tiež
+graf, ale ťažko čitateľný. Pre obhajobu je dôležitý vizuálny dojem,
+preto sme zvolili rpart.plot (~30s inštalácia, pure R).
+
+**Otázka: Prečo je v §7.3 tabuľke fidelity pre `maxdepth = 7` vyššia,
+ako je fidelity zakresleného stromu v §7.4?**
+Pretože zakreslený strom **nie je** globálny víťaz fidelity — je to
+víťaz pod dodatočným obmedzením **≤ 15 listov**. Strom s 37 listmi
+(`maxdepth = 7` na Lexicali) má fidelity o ~0.009 vyššiu (0.967 vs.
+0.958), ale je vizuálne neprečítateľný — zlepené uzly, popisy sa
+prekrývajú, na snímke sa z toho nedá nič vyčítať. Celá Task 4 sa pýta
+na **vizualizáciu** modelu, takže strom, ktorý sa nedá vizuálne
+prečítať, úlohu nespĺňa — aj keby numericky kopíroval RF najvernejšie.
+Tabuľka v §7.3 je tam práve preto, aby bolo vidno aj strop (tým
+obhajujeme, že ladenie bolo poctivé) aj to, koľko fidelity stojí
+readability cap. Reálne čísla: **~0.009 na Lexicali, ~0.003 na
+FullLite** — posledné dve hĺbkové vrstvy pridávajú takmer žiadnu
+fidelity, len listy.
+
+**Otázka: Prečo je na FullLite obrázku root `HasSocialNet`, a nie
+nejaký URL-string feature ako na Lexicali?**
+Lebo FullLite má navyše 21 trust- a behavior-tier príznakov, a RF
+(rovnako ako surrogate) správne zistí, že tieto page-level flagy sú
+**silnejšie** diskriminátory ako URL-string počty. Root-split cez
+`HasSocialNet` hneď rozdelí 60 % legitímnych URL (majú sociálne linky)
+a 40 % prevažne phishingových (často nemajú). Horné tri vrstvy stromu
+sú potom dominované ďalšími trust/behavior binárkami (`IsHTTPS`,
+`HasCopyrightInfo`, `HasDescription`, `HasSubmitButton`). URL-tier
+counts (`NoOfOtherSpecialCharsInURL`, `NoOfDegitsInURL`) sa objavujú
+až v 4.–5. vrstve, ako spresnenie prípadov, ktoré trust flagy samy
+nedoriešili. **Toto je samo osebe ilustrácia toho, čo RF na FullLite
+"považuje za dôležité":** trust-tier dominuje vrcholu logiky, URL-tier
+je refinement. Keby bol root `URLLength`, bola by to podozrivá
+disonancia s tým, čo vidíme v §6.1 (kde FullLite RF bije čistý Lexical
+RF o ~0.03 AUC — práve vďaka týmto trust-tier signálom).
+
+**Otázka: Prečo práve 15 listov ako strop, a nie napr. 10 alebo 20?**
+15 listov je empiricky najviac, čo sa dá čitateľne zmestiť na jednu
+snímku 16:9 pri rpart.plot default layoute. 10 je príliš úsporné a
+stráca veľkú časť fidelity (Lexical d=4 → fidelity 0.95, gap k modelu
+skokovo rastie). 20 už má nečitateľné listové popisy. Cap 15 je
+kompromis medzi "vidieť každé pravidlo" a "udržať fidelity nad 0.95".
 
 ---
 
