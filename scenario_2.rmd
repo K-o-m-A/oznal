@@ -1307,8 +1307,3 @@ At depth 3 on Lexical the symmetry breaks — `Spec vs RF` falls to
 ~0.87 while `Sens vs RF` holds at ~0.98 — and that 11 pp gap closes
 again by depth 6–7. Shallower diagrams therefore show only one side
 of RF's behaviour.
-
-Lexical is where the surrogate has real work to do, since RF wins
-that tier by ~0.10 AUC. FullLite is a sanity check on the
-grid-search: every model sits at AUC ≈ 0.999 there, so any reasonable
-tree fits.
