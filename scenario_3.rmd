@@ -67,13 +67,9 @@ onto H2 directly. Backward, Stepwise and ElasticNet are dropped. The
 reasoning is empirical:
 
 - **Forward over Backward / Stepwise.** The three AIC procedures
-  converge to the same retained set on Lexical (k = 9, Jaccard 1.00)
-  and to the same set within two features on FullLite. Reporting all
-  three is just three tables saying the same thing. Forward also
-  produces the per-step p-value trajectory the assignment asks for
-  ("…lose statistical significance as you **add** … predictors") in a
-  cleaner form than backward, where the trajectory is read in reverse
-  and harder to follow.
+  is used as the single algorithmic method because the assignment
+  asks for one algorithmic method and Forward directly gives the
+  "as you **add** predictors" trajectory the assignment asks for.
 - **Ridge + Lasso, no ElasticNet.** Ridge (α = 0) and Lasso (α = 1)
   sit at the two ends of the regularisation axis, which is the
   sharpest contrast we can run. ElasticNet at α = 0.5 ends up
@@ -100,25 +96,13 @@ reasoning is empirical:
 > agree more on which features matter; on **FullLite** (multiple
 > overlapping clusters), they agree less.*
 
-| # | Criterion (gating) | Threshold | Where |
+| # | Criterion | Threshold | Where |
 |---|---|---|---|
-| C1 | Jaccard overlap of Lasso-vs-Forward retained sets is **lower on FullLite than on Lexical** | $J_\text{FullLite} < J_\text{Lexical}$ | §6.2 |
+| C1 | Difference in retained-feature count between Lasso and Forward | $\lvert k_\text{Lasso} - k_\text{Forward}\rvert \le 1$ on Lexical, $\ge 3$ on FullLite | §6.2 |
+| C2 | Jaccard overlap of retained sets between Lasso and Forward | $J \ge 0.85$ on Lexical, $J \le 0.70$ on FullLite | §6.2 |
+| C3 | Wald p-value flips along the Forward path | $\ge 1$ flip on FullLite, $0$ flips on Lexical | §4.2.1 |
 
-H2 is supported iff C1 holds: the two methods agree more about
-*which* features matter on the small-cluster tier than on the
-multi-cluster tier. We chose a directional contrast rather than
-absolute Jaccard cut-points because absolute cut-points are sensitive
-to lambda choice, AIC penalty and sample jitter, while the direction
-of the contrast is the actual empirical claim we want to make.
-
-**Descriptive support (not gating).** §6.2 also reports the
-retained-count gap $\lvert k_\text{Lasso} - k_\text{Forward}\rvert$
-per tier — a richer tier should produce a bigger gap if H2 holds —
-and §4.2.1 reports how many features flip Wald-significance along the
-forward path, which is the same multicollinearity mechanism showing
-up at the level of an individual p-value. Neither feeds into the
-gating verdict, but both should move in the same direction as C1 if
-the redundancy story is real.
+H2 is supported iff **all three** criteria (C1, C2, C3) hold.
 
 **Two things worth being upfront about.**
 
@@ -129,7 +113,7 @@ the redundancy story is real.
   agree on the same retained set even under redundancy, if AIC,
   `lambda.1se` and the bloc structure all happened to favour the same
   representative.
-- *Ridge does not participate in C1, and that is the point.* L2 has
+- *Ridge does not participate in C1/C2/C3, and that is the point.* L2 has
   zero gradient at zero, so ridge never zeros a coefficient and its
   retained set is always the full tier. Ridge earns its place in §3.4
   (the coefficient-bloc contrast — without it, Lasso's opposing-sign
@@ -474,13 +458,8 @@ asks for *"which features lose significance as you add or remove
 predictors"*. The catch is that those p-values are not quite what
 they look like, which is what §5 is about.
 
-We use forward selection as the algorithmic representative. Forward,
-Backward and Stepwise land on the same retained set on Lexical
-(k = 9, identical features) and on the same set within two features
-on FullLite, so all three would just give us three near-identical
-tables. Forward also matches the assignment's "as you add predictors"
-framing more directly than backward elimination, which reads in
-reverse.
+We use forward selection as the algorithmic representative because it
+matches the assignment's "as you add predictors" framing directly.
 
 ## 4.1 Forward selection — feature entry order & p-values
 
@@ -602,10 +581,8 @@ flip_counts %>%
   kable(caption = "C3 deliverable — number of significance flips per tier.")
 ```
 
-This should be read together with the Jaccard contrast in §6.2: if
-H2's redundancy story is real, FullLite's flip count should be at
-least as high as Lexical's, and any flips on Lexical should land on
-the URL-length cluster rather than on isolated features.
+This table maps directly to C3 in §1.3: for C3 to pass we need at
+least one flip on FullLite and zero flips on Lexical.
 
 ---
 
@@ -637,8 +614,8 @@ consequences:
 **What this means for the notebook.** The final-model p-values in
 §4.2 should not be read as "these are the significant features". They
 are the numbers a naive reader would quote, no more. The honest
-phrasing for a finding here is: "the forward AIC procedure retained
-9 features on Lexical; standard Wald p-values on those features are
+phrasing for a finding here is: "the forward AIC procedure retained a
+subset of predictors; standard Wald p-values on those predictors are
 reported but are biased by the selection procedure and should not be
 used as hypothesis tests."
 
@@ -722,8 +699,8 @@ map_dfr(names(sets_by_tier), function(tier_name) {
   select(tier, method, everything()) %>%
   kable(caption = "Jaccard overlap of retained-feature sets by tier. Off-diagonal < 1 = disagreement.")
 
-# H2 gating deliverable — pull out the single Lasso × Forward Jaccard
-# per tier; H2 is supported iff this drops from Lexical to FullLite (§1.3).
+# C1 + C2 deliverable — retained-count gap and Jaccard with explicit
+# threshold checks from §1.3.
 lasso_fwd_jac <- map_dfr(names(sets_by_tier), function(tier_name) {
   s <- sets_by_tier[[tier_name]]
   tibble(tier = tier_name,
@@ -734,17 +711,25 @@ lasso_fwd_jac <- map_dfr(names(sets_by_tier), function(tier_name) {
 })
 
 lasso_fwd_jac %>%
-  kable(caption = "C1 + C2 deliverable — retained-count gap |k_Lasso − k_Forward| and Jaccard(Lasso, Forward) per tier.")
+  mutate(
+    C1_pass = case_when(
+      tier == "Lexical" ~ k_diff <= 1,
+      tier == "FullLite" ~ k_diff >= 3,
+      TRUE ~ NA
+    ),
+    C2_pass = case_when(
+      tier == "Lexical" ~ jaccard_lasso_forward >= 0.85,
+      tier == "FullLite" ~ jaccard_lasso_forward <= 0.70,
+      TRUE ~ NA
+    )
+  ) %>%
+  kable(caption = "C1 + C2 deliverable — retained-count gap, Jaccard(Lasso, Forward), and per-tier pass/fail.")
 ```
 
-**H2 (gating C1).** H2 is supported iff `jaccard_lasso_forward` on
-FullLite is strictly smaller than on Lexical: the two methods should
-agree more on the small-cluster tier. **Descriptive support.** If the
-redundancy story is real, the retained-count gap `k_diff` should also
-be larger on FullLite than on Lexical. The full 3×3 matrix above is
-left in for context on the Ridge × * comparisons; ridge is always a
-near-superset, so its overlap numbers do not say anything about
-redundancy on their own.
+The table above provides the direct C1/C2 check against fixed EDA
+thresholds. The full 3×3 matrix is left in for context on Ridge × *
+comparisons only; Ridge is always a near-superset, so those overlaps
+do not enter the C1/C2 criteria.
 
 ## 6.3 Predictive performance at each method's retained set
 
@@ -786,10 +771,8 @@ tier_compare %>%
 
 # 7. H2 Verdict
 
-H2 is **supported iff** the Jaccard overlap between Lasso and Forward
-retained sets is **strictly lower on FullLite than on Lexical**
-(§1.3 C1) — the two methods should agree more on the small-cluster
-tier than on the multi-cluster tier.
+H2 is **supported iff all three criteria C1, C2 and C3 hold**
+(§1.3).
 
 ```{r h2-verdict}
 verdict <- lasso_fwd_jac %>%
@@ -801,19 +784,18 @@ flip_compact <- flip_counts %>%
   pivot_wider(names_from = tier, values_from = n_flipped, names_prefix = "flips_")
 
 bind_cols(verdict, flip_compact) %>%
-  mutate(C1_jaccard_drops = jaccard_lasso_forward_FullLite < jaccard_lasso_forward_Lexical,
-         k_diff_grows     = k_diff_FullLite > k_diff_Lexical,
-         flips_grow       = flips_FullLite >= flips_Lexical) %>%
-  kable(caption = "H2 verdict — gating: C1_jaccard_drops must be TRUE. The other two columns are descriptive support and should move in the same direction if the redundancy story holds end-to-end.")
+  mutate(
+    C1_pass = (k_diff_Lexical <= 1) & (k_diff_FullLite >= 3),
+    C2_pass = (jaccard_lasso_forward_Lexical >= 0.85) & (jaccard_lasso_forward_FullLite <= 0.70),
+    C3_pass = (flips_FullLite >= 1) & (flips_Lexical == 0),
+    H2_supported = C1_pass & C2_pass & C3_pass
+  ) %>%
+  kable(caption = "H2 verdict — strict EDA criteria: C1, C2, C3 must all be TRUE.")
 ```
 
-**Reading the verdict.** If `C1_jaccard_drops` is `TRUE`, the gating
-criterion holds and H2 is supported. The two descriptive columns
-(`k_diff_grows`, `flips_grow`) say whether the same redundancy story
-also shows up in the retained-count gap and in the Wald-significance
-flips along the forward path. Agreement across all three signals is
-strong evidence; gating-only support is weaker, but still counts as
-support.
+**Reading the verdict.** H2 is supported only when `C1_pass`,
+`C2_pass`, and `C3_pass` are all `TRUE`. If any one is `FALSE`, H2 is
+not supported under the strict EDA criteria.
 
 **Why the redundancy story matters here.** Lexical has one isolated
 correlation cluster, the URL-length trio, and the rest of its

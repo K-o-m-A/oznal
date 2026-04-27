@@ -1,7 +1,5 @@
 ---
 title: "Phishing URL Detection — Hypothesis & EDA"
-author: "K-o-m-A"
-date: "`r Sys.Date()`"
 output:
   html_notebook:
     toc: true
@@ -28,11 +26,12 @@ DNS lookup, no HTML fetch, no rendering. If a URL-only check is good enough,
 we can block the link for free. If it isn't, we have to fall back to a
 slower page-level check.
 
-The question we want to answer is simple:
-**how much phishing signal is already in the URL?** If a URL-only model works well, we can run it as a fast
-first-line filter. Where it fails, the slower trust- and behavior-level checks have to take over.
+The question is : **how much phishing signal is already in the URL?**
+If a URL-only model works well enough, it can sit at the front of the pipeline
+as a fast first-line filter. Where it fails, the slower trust- and behavior-level
+checks have to take over.
 
-Explored scenarios for hypothesis driven modeling: 2
+Explored scenarios for hypothesis driven modeling: 2,3,4
 
 ## 1.2 Dataset
 
@@ -53,17 +52,17 @@ them into three families by how expensive they are to compute:
 
 Phishing URLs usually leave lexical traces: odd subdomain depth, paths full
 of digits, obfuscated characters. None of this needs the page to be
-downloaded. We expect a model trained only on Lexical features to still reach a reasonable AUC, but the **size of the
-gap** between parametric and non-parametric model families should change
-with the family.
+downloaded. A Lexical-only model should still reach a reasonable AUC, but
+the **size of the gap** between parametric and non-parametric methods should
+depend on which tier we train on.
 
-We compare three parametric methods (LR, LDA, Naive Bayes)
-against three non-parametric ones (RF, SVM-RBF, KNN).
+We compare three parametric methods (LR, LDA, Naive Bayes) against three
+non-parametric ones (RF, SVM-RBF, KNN).
 
 Because the project frame is a **corporate-proxy URL phishing detector**
-(EDA §1.1), the deployment cost is not a ranking — it is a single
+, the deployment cost is not a ranking — it is a single
 block/allow verdict at threshold 0.5 per click. A model with high AUC but
-low Specificity floods the helpdesk with false blocks; one with low
+low Specificity creates false blocks, one with low
 Sensitivity quietly lets phish through. The H1 gating criteria therefore
 target the **weakest-link operating-point metric**
 $\mathrm{minSS} = \min(\mathrm{Sensitivity}, \mathrm{Specificity})$ at the
@@ -72,18 +71,16 @@ default 0.5 cut, with AUC kept as a complementary ranking criterion.
 | # | Criterion | Threshold |
 |---|-----------|-----------|
 | C1 | Test-set $\mathrm{minSS}$ gap between the best non-parametric and best parametric model on the **Lexical (URLOnly) tier** | **Δ minSS ≥ 0.10** |
-| C2 | Paired Wilcoxon signed-rank test on the 10 per-fold AUCs of those two model families (one-sided, non-param > param) | **p < 0.05** |
-| C3 | Gradient across tiers in deployment-relevant terms: $\mathrm{minSS}$ gap is **strictly larger** on Lexical than on FullLite | gap(Lexical) > gap(FullLite) |
-| C4 | Sanity check on ranking discrimination: mean test AUC gap on Lexical | **ΔAUC ≥ 0.02** |
+| C2 | Gradient across tiers in deployment-relevant terms: $\mathrm{minSS}$ gap is **strictly larger** on Lexical than on FullLite | gap(Lexical) > gap(FullLite) |
+| C3 | Sanity check on ranking discrimination: mean test AUC gap on Lexical | **ΔAUC ≥ 0.02** |
 
-H1 is **supported** only if C1 **and** C2 hold. C3 turns the claim from
-"the two families differ on one tier" into the stronger statement *"the
-difference between families shrinks as the feature tier gets stronger."*
-C4 is informative — it confirms the families also differ on the
-threshold-free metric — but is not gating on its own, since a
-non-deployable model with a high AUC (e.g. NB Lexical: AUC 0.85, Spec
-0.38) cannot satisfy the project goal regardless of how it ranks. H1 is
-**rejected** if either C1 or C2 fails on Lexical.
+H1 is **supported** only if C1 **and** C2 hold — both gated on the
+deployment metric (minSS at threshold 0.5), so the same number that
+determines whether a filter is usable in production also determines
+whether the hypothesis is supported. C3 is informative but not gating. It
+confirms the families also differ on the threshold-free metric, but a
+non-deployable model with a high AUC can't satisfy the project goal regardless of how it ranks.
+H1 is **rejected** if either C1 or C2 fails.
 
 Note:
 The FullLite tier is the scenario_2 replacement for a naive "Full" tier: six Behavior
@@ -95,17 +92,16 @@ is trying to measure.
 ## H2 (Scenario 3) — Predictor redundancy increases with tier richness
 
 H1 measures *whether* the parametric–non-parametric gap shrinks as the
-feature tier gets stronger; it does not say *why*. Section §4 of this
-EDA flags two correlated blocks in the predictor space — the URL-length
-cluster (`URLLength`, `DomainLength`, `URLCharProb`, with pairwise
-$|r| > 0.7$ and VIF > 1000 on the FullLite design matrix) and the
-page-count block on Behavior (`NoOfImage`, `NoOfSelfRef`,
-`NoOfExternalRef`, etc., even after the six near-leakers are stripped).
-On the **Lexical** tier (13 features, no near-saturating signal) every
-predictor carries non-trivial unique information; on **FullLite**
-(34 features) the same correlated blocks make multiple equally-good
-subsets exist. H2 turns this observation into a measurable claim about
-feature selection itself.
+feature tier gets stronger; it does not say *why*. Section §4 of this EDA
+flags two correlated blocks in the predictor space: the URL-length cluster
+(`URLLength`, `DomainLength`, `URLCharProb`, with pairwise $|r| > 0.7$ and
+VIF > 1000 on the FullLite design matrix), and the page-count block on
+Behavior (`NoOfImage`, `NoOfSelfRef`, `NoOfExternalRef`, and so on, even
+after the six near-leakers are stripped). On the **Lexical** tier (13
+features, no near-saturating signal) every predictor carries non-trivial
+unique information. On **FullLite** (34 features) the same correlated
+blocks let multiple equally-good subsets exist. H2 makes that observation
+testable through feature selection.
 
 We compare **one algorithmic** method (Forward stepwise on AIC) against
 **two embedded** methods (Lasso, Ridge — all three required by the
@@ -120,12 +116,7 @@ assignment) on the same Lexical and FullLite tiers used in S2.
 H2 is **supported** only if at least two of {C1, C2, C3} hold in the
 predicted direction *on both tiers*. If Lexical and FullLite behave
 the same way (e.g. Jaccard collapses on both, or no flips on either),
-H2 is **rejected** — the redundancy story would not match the data.
-
-The bridge to H1 is left as a **narrative observation** in S3's verdict
-rather than a gating criterion: if regularised parametric models on
-FullLite reach AUC within striking distance of the S2 non-parametric
-champions, that is a useful corroboration but not what H2 tests.
+H2 is **rejected**.
 
 ---
 
@@ -165,7 +156,7 @@ cat("Predictors:  ", ncol(features), "\n")
 The three families (Lexical / Trust / Behavior) are our own taxonomy, not
 a property of the dataset. They reflect the cost of obtaining each signal
 at decision time:
-   Lexical  — derivable from the raw URL string alone (zero network cost).
+   Lexical  — derivable from the raw URL string alone.
    Trust    — requires light page/domain inspection or an external lookup
               (DNS, TLD database, HTTPS handshake, title parsing).
    Behavior — requires fetching, parsing and partially rendering the page.
@@ -272,7 +263,7 @@ cat("Redundant binary to remove:", REDUNDANT_BINARY, "\n")
 
 Each ratio below equals `count / URLLength`, and both the count and
 `URLLength` are already in the dataset. Keeping the ratio gives us a
-perfect linear dependence — and no extra signal.
+perfect linear dependence and no extra signal.
 
 ```{r exclude-ratios}
 RATIOS <- c(
@@ -310,14 +301,6 @@ continuous_features <- setdiff(names(features), binary_features)
 ```
 
 ## 3.4 Feature Tiers Used in Modeling
-
-To test H1 we define three nested feature tiers. The modeling notebook
-reads these tier definitions directly from here, so both notebooks stay
-in sync. The `tier_full` built here (40 features) is the EDA baseline
-used by §4.5's PCA diagnostics; the scenario_2 modeling notebook
-replaces it with **FullLite** (34 features) by stripping six Behavior
-near-leakers — see §5 for the reasoning.
-
 ```{r feature-tiers}
 tier_lexical  <- family_map %>% filter(family == "Lexical")  %>% pull(feature)
 tier_trust    <- family_map %>% filter(family == "Trust")    %>% pull(feature)
@@ -353,8 +336,7 @@ df %>%
   theme_minimal(base_size = 12)
 ```
 
-**Takeaway:** The dataset is roughly balanced, so we don't need resampling
-or class-weighting. Accuracy works as a secondary metric next to AUC.
+The dataset is roughly balanced, so we don't need resampling or class-weighting.
 
 ### 4.1.2 Missing Values
 
@@ -447,15 +429,13 @@ per-feature signal. This supports H1's claim that the URL-only tier has less sig
 
 ## 4.3 Collinearity inside Lexical
 
-Before dimensionality diagnostics, we
-check how much redundant dimensionality Lexical has to start with.
-Heavy collinearity means a few linear combinations already carry most
-of the variance — so PCA's first few axes will dominate the variance
-budget, and the open question shifts to whether those dominant
-variance directions also carry the *class* signal (answered in §4.5).
-The URL-length count cluster is the main source of collinearity; we
-keep Trust and Behavior out of this panel because their features are
-largely binary and near-uncorrelated.
+Before modelling, we check how much pairwise redundancy the Lexical
+predictors carry. This matters for two downstream decisions: Scenario 2
+needs to know whether plain LR is numerically stable (it isn't — hence
+Ridge), and Scenario 3 needs a known correlated bloc to anchor its
+H2 selection-method comparison around. The URL-length count cluster is
+the main source of collinearity; we keep Trust and Behavior out of this
+panel because their features are largely binary and near-uncorrelated.
 
 ### 4.3.1 Lexical Correlation Matrix
 
@@ -478,9 +458,8 @@ lexical_cor <- features %>%
 )
 ```
 
-Across the full feature matrix, 10 pairs pass `|r| > 0.7` — and all of
-them sit inside this Lexical count cluster (URLLength ↔ NoOfLettersInURL
-↔ NoOfDegitsInURL and friends).
+Across the full feature matrix, 10 pairs pass `|r| > 0.7`, and all of them
+sit inside this Lexical count cluster.
 
 ### 4.3.2 Variance Inflation Factors
 
@@ -519,14 +498,17 @@ vif_df %>%
   kable(caption = "Variance Inflation Factors - continuous features (lm-based, target-free).")
 ```
 
-**Takeaway:** `URLLength`, `NoOfLettersInURL` and
-`NoOfDegitsInURL` stay near-collinear because they measure overlapping
-properties of the same URL string. Lexical therefore has fewer
-independent directions of variance than it has features — PCA will
-concentrate 95 % of its variance into a small *k*. That alone does
-not yet say anything about *class separation* in those directions;
-the §4.5 scree and per-PC AUC answer whether variance axes and
-class-separation axes coincide or diverge.
+**Takeaway:** `URLLength`, `NoOfLettersInURL` and `NoOfDegitsInURL` stay
+near-collinear because they measure overlapping properties of the same URL
+string. Two consequences for the modelling notebooks:
+
+- **Scenario 2:** unpenalised LR is numerically unstable here — Ridge
+  (α = 0) is the minimal fix that bounds the coefficients without
+  collapsing the cluster.
+- **Scenario 3 (H2):** the cluster is the natural anchor for the
+  selection-method comparison — Lasso and Forward AIC have to pick a
+  single representative each, while Ridge keeps the whole bloc with
+  shrunken weights.
 
 
 ## 4.4 Skewness Assessment *(Scenario 2 preparation)*
@@ -570,12 +552,11 @@ skew_df %>% filter(abs_skew > 2) %>% select(feature, skewness, family) %>% print
 ```
 
 **Takeaway (Scenario 2):** Several count features are heavily right-skewed
-with long outlier tails. This shapes our modeling choices:
-
-- **Parametric models** (LR, LDA): need scaling and a log-transform on
-  skewed features to make the distributional assumption hold.
-- **Non-parametric models** (trees, KNN, SVM): robust to skew, but KNN and
-  SVM still need standardisation because they use distances.
+with long outlier tails. This shapes our modeling choices. LR and LDA need
+scaling and a log-transform on skewed features for the distributional
+assumption to hold. Trees handle skew without preprocessing. KNN and SVM
+also tolerate skew, but they still need standardisation since they're
+distance-based.
 
 ---
 
@@ -583,19 +564,17 @@ with long outlier tails. This shapes our modeling choices:
 
 **A note on separability.** After the Section 3.3 exclusions, 40 features
 remain (13 Lexical + 7 Trust + 20 Behavior). On this reduced set the task
-is near-perfectly separable once Behavior is present — six Behavior
+is near-perfectly separable as soon as Behavior is included: six Behavior
 counts have univariate AUC > 0.95 on their own, so a naive Full tier
 saturates at AUC ≈ 1.0 and the parametric vs. non-parametric contrast
-disappears.
+just disappears.
 
 For H1 we therefore use the scenario_2 family layout: Lexical
 (13), Trust (7), Behavior with the six near-leakers stripped (14), and
 **FullLite** (34) = Lexical + Trust + reduced Behavior. H1 is tested
 primarily on the **URLOnly tier**, where the family contrast has the
-most room to show, and the family gradient (C3) is measured against
-**FullLite**, not Full. The cross-tier §4.5 scree / per-PC AUC is
-retained as context for where variance and class-separation directions
-diverge most clearly.
+most room to show, and the family gradient (C2) is measured against
+**FullLite**, not Full.
 
 ## 5.1 Implications for modeling scenarios
 
@@ -603,8 +582,5 @@ diverge most clearly.
 |---------|----------------------------|----------------------------|
 | Lexical SMD lowest + features must be combined | Largest parametric/non-parametric AUC gap expected on URLOnly | Feature interactions matter more than single-feature thresholds in URL-only detection |
 | Heavy skewness in 19 of 22 continuous features | Log-transform + standardisation for LR/LDA; trees/RF unaffected | Keep one consistent preprocessing recipe across model families for fair comparisons |
-| URL-length cluster: VIF > 1000 and abs(r) > 0.84 | Use stable solvers / regularised LR for fairness | Lexical is low-rank in variance — strong compression is possible without preserving all class signal |
-| Lexical panel §4.5.2: PC1 carries most variance but low per-PC AUC across PC1–PC5 | — | Variance axes can be orthogonal to class-separation axes, so variance retention alone is not enough |
-| Scenario 2: widest linear/non-linear AUC gap on Lexical (LR 0.861 vs SVM 0.997) | — | Lexical remains the best tier for studying where linear assumptions break |
-| FullLite top 2–3 PCs each carry AUC > 0.8 (§4.5.2) | — | On stronger tiers, many methods saturate; contrast is easier to observe on weaker tiers |
+| URL-length cluster: VIF > 1000 and abs(r) > 0.84 | Use stable solvers / regularised LR for fairness | Anchors the H2 selection-method comparison in Scenario 3 |
 
