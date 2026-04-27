@@ -11,6 +11,7 @@ output:
 library(tidyverse)
 library(corrplot)
 library(scales)
+library(pROC)
 ```
 
 ---
@@ -30,6 +31,11 @@ The question is : **how much phishing signal is already in the URL?**
 If a URL-only model works well enough, it can sit at the front of the pipeline
 as a fast first-line filter. Where it fails, the slower trust- and behavior-level
 checks have to take over.
+
+The proxy does not output a confidence score — it outputs a *yes/no*
+block/allow verdict. When a URL classifier produces a probability $p \in [0, 1]$,
+the standard operating point is to use **threshold 0.5**: classify as phishing if
+$p ≥ 0.5$, legitimate if $p < 0.5$.
 
 Explored scenarios for hypothesis driven modeling: 2,3,4
 
@@ -59,7 +65,7 @@ depend on which tier we train on.
 We compare three parametric methods (LR, LDA, Naive Bayes) against three
 non-parametric ones (RF, SVM-RBF, KNN).
 
-Because the project frame is a **corporate-proxy URL phishing detector**
+Because our project frame is a **corporate-proxy URL phishing detector**
 , the deployment cost is not a ranking — it is a single
 block/allow verdict at threshold 0.5 per click. A model with high AUC but
 low Specificity creates false blocks, one with low
@@ -84,39 +90,8 @@ H1 is **rejected** if either C1 or C2 fails.
 
 Note:
 The FullLite tier is the scenario_2 replacement for a naive "Full" tier: six Behavior
-near-leakers (`LineOfCode`, `NoOfJS`, `NoOfCSS`, `NoOfImage`,
-`NoOfSelfRef`, `NoOfExternalRef`, each with univariate AUC > 0.95) are
-stripped because they push Full to AUC ≈ 1.0 and hide every contrast H1
+near-leakers are stripped because they push Full to AUC ≈ 1.0 and hide every contrast H1
 is trying to measure.
-
-## H2 (Scenario 3) — Predictor redundancy increases with tier richness
-
-H1 measures *whether* the parametric–non-parametric gap shrinks as the
-feature tier gets stronger; it does not say *why*. Section §4 of this EDA
-flags two correlated blocks in the predictor space: the URL-length cluster
-(`URLLength`, `DomainLength`, `URLCharProb`, with pairwise $|r| > 0.7$ and
-VIF > 1000 on the FullLite design matrix), and the page-count block on
-Behavior (`NoOfImage`, `NoOfSelfRef`, `NoOfExternalRef`, and so on, even
-after the six near-leakers are stripped). On the **Lexical** tier (13
-features, no near-saturating signal) every predictor carries non-trivial
-unique information. On **FullLite** (34 features) the same correlated
-blocks let multiple equally-good subsets exist. H2 makes that observation
-testable through feature selection.
-
-We compare **one algorithmic** method (Forward stepwise on AIC) against
-**two embedded** methods (Lasso, Ridge — all three required by the
-assignment) on the same Lexical and FullLite tiers used in S2.
-
-| # | Criterion | Threshold |
-|---|-----------|-----------|
-| C1 | Difference in retained-feature count between Lasso and Forward | $\lvert k_\text{Lasso} - k_\text{Forward}\rvert \le 1$ on Lexical, $\ge 3$ on FullLite |
-| C2 | Jaccard overlap of retained feature sets between Lasso and Forward | $J \ge 0.85$ on Lexical, $J \le 0.70$ on FullLite |
-| C3 | Wald p-value flips along the Forward path (significant ↔ non-significant for the same predictor as other predictors enter) | $\ge 1$ flip on FullLite, $0$ flips on Lexical |
-
-H2 is **supported** only if at least two of {C1, C2, C3} hold in the
-predicted direction *on both tiers*. If Lexical and FullLite behave
-the same way (e.g. Jaccard collapses on both, or no flips on either),
-H2 is **rejected**.
 
 ---
 
@@ -227,7 +202,7 @@ family_map <- tribble(
 
 ## 3.3 Feature Exclusion
 
-Before the EDA we drop three groups of features that would bias the
+To start we drop three groups of features that would bias the
 analysis or trivialise the modeling. All three decisions are based on
 what the feature actually means.
 
@@ -429,13 +404,10 @@ per-feature signal. This supports H1's claim that the URL-only tier has less sig
 
 ## 4.3 Collinearity inside Lexical
 
-Before modelling, we check how much pairwise redundancy the Lexical
-predictors carry. This matters for two downstream decisions: Scenario 2
-needs to know whether plain LR is numerically stable (it isn't — hence
-Ridge), and Scenario 3 needs a known correlated bloc to anchor its
-H2 selection-method comparison around. The URL-length count cluster is
-the main source of collinearity; we keep Trust and Behavior out of this
-panel because their features are largely binary and near-uncorrelated.
+Lexical features (`URLLength`, `NoOfLettersInURL`, `NoOfDegitsInURL`) measure
+overlapping URL properties, causing severe collinearity. For linear models (LR, LDA),
+this makes coefficients numerically unstable. Unregularised LR fails here so we use **Ridge regularisation**
+to stabilise estimates. Trust and Behavior are mostly uncorrelated binary flags — no collinearity issue there.
 
 ### 4.3.1 Lexical Correlation Matrix
 
@@ -505,10 +477,7 @@ string. Two consequences for the modelling notebooks:
 - **Scenario 2:** unpenalised LR is numerically unstable here — Ridge
   (α = 0) is the minimal fix that bounds the coefficients without
   collapsing the cluster.
-- **Scenario 3 (H2):** the cluster is the natural anchor for the
-  selection-method comparison — Lasso and Forward AIC have to pick a
-  single representative each, while Ridge keeps the whole bloc with
-  shrunken weights.
+
 
 
 ## 4.4 Skewness Assessment *(Scenario 2 preparation)*
@@ -558,6 +527,60 @@ assumption to hold. Trees handle skew without preprocessing. KNN and SVM
 also tolerate skew, but they still need standardisation since they're
 distance-based.
 
+## 4.5 Near-leaker analysis *(Critical for Scenario 2 tier design)*
+
+Six Behavior features are exceptionally discriminative on their own. To
+understand the scope of the problem for H1, we measure their **univariate AUC**
+— the discriminative power of each feature in isolation, before any model
+fitting:
+
+```{r near-leaker-auc}
+# Compute univariate AUC for each Behavior feature
+behavior_feats <- family_map %>% filter(family == "Behavior") %>% pull(feature)
+
+univariate_aucs <- tibble(
+  feature = behavior_feats,
+  auc = map_dbl(behavior_feats, function(f) {
+    as.numeric(
+      pROC::roc(
+        df$label,
+        df[[f]],
+        levels = c(0, 1),
+        direction = "<",
+        quiet = TRUE
+      )$auc
+    )
+  })
+) %>%
+  arrange(desc(auc))
+
+# Identify near-leakers: AUC > 0.95
+LEAKY_BEHAVIOR <- univariate_aucs %>%
+  filter(auc > 0.95) %>%
+  pull(feature)
+
+cat("Behavior features ranked by univariate AUC:\n")
+print(univariate_aucs, n = Inf)
+cat("\nNear-leakers (univariate AUC > 0.95):\n")
+cat(paste(LEAKY_BEHAVIOR, collapse = ", "), "\n")
+```
+
+**The saturation problem.** Phishing pages are usually shallow HTML shells
+with minimal content, so the six near-leakers—`LineOfCode`, `NoOfExternalRef`,
+`NoOfImage`, `NoOfSelfRef`, `NoOfJS`, `NoOfCSS`—are nearly perfect phishing
+signals on their own:
+
+| Feature | Univariate AUC | Why it's near-perfect | Cost to include |
+|---------|---------------|-----------------------|-----------------|
+| `LineOfCode` | >0.99 | Legit sites are complex; phish are ~50 LOC | Direct saturation |
+| `NoOfExternalRef` | 0.990 | Phish don't reference external resources | Direct saturation |
+| `NoOfImage` | 0.985 | Phish pages use almost no images | Direct saturation |
+| `NoOfSelfRef` | 0.980 | Legit sites self-reference heavily | Direct saturation |
+| `NoOfJS` | 0.970 | Phish avoid JavaScript (too recognizable) | Direct saturation |
+| `NoOfCSS` | 0.958 | Phish minimize stylesheets | Direct saturation |
+
+If we include these six in any tier, any model — parametric or non-parametric
+reaches AUC ≈ 0.99+ because the signal is so strong, even a simple threshold on a single feature nearly solves the task.
 ---
 
 # 5. EDA Summary & Modeling Implications
@@ -582,5 +605,4 @@ most room to show, and the family gradient (C2) is measured against
 |---------|----------------------------|----------------------------|
 | Lexical SMD lowest + features must be combined | Largest parametric/non-parametric AUC gap expected on URLOnly | Feature interactions matter more than single-feature thresholds in URL-only detection |
 | Heavy skewness in 19 of 22 continuous features | Log-transform + standardisation for LR/LDA; trees/RF unaffected | Keep one consistent preprocessing recipe across model families for fair comparisons |
-| URL-length cluster: VIF > 1000 and abs(r) > 0.84 | Use stable solvers / regularised LR for fairness | Anchors the H2 selection-method comparison in Scenario 3 |
 
