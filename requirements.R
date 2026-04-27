@@ -1,4 +1,4 @@
-# R package dependencies for the Shiny app and scenario_2 notebook.
+# R package dependencies for the Shiny app and modelling notebooks.
 # Install with:  Rscript requirements.R
 pkgs <- c(
   "shiny", "DT", "tidyverse", "caret", "glmnet", "MASS", "klaR",

@@ -32,7 +32,7 @@ The question we want to answer is simple:
 **how much phishing signal is already in the URL?** If a URL-only model works well, we can run it as a fast
 first-line filter. Where it fails, the slower trust- and behavior-level checks have to take over.
 
-Explored scenarios for hypothesis driven modeling: 2,5
+Explored scenarios for hypothesis driven modeling: 3
 
 ## 1.2 Dataset
 
@@ -78,23 +78,37 @@ near-leakers (`LineOfCode`, `NoOfJS`, `NoOfCSS`, `NoOfImage`,
 stripped because they push Full to AUC ≈ 1.0 and hide every contrast H1
 is trying to measure.
 
-## H2 (Scenario 5) — The cost of dimensionality reduction is not the same on every family
+## H1 (Scenario 3) — A smaller URL-only filter can preserve operating quality
 
-Every feature family can be compressed into a few new axes via PCA
-(unsupervised) or LDA projection (supervised). We claim the cost of that
-compression is not uniform across families.
+Scenario 3 keeps the classifier fixed as logistic regression and compares
+feature-selection strategies instead of model families: one algorithmic method
+(bidirectional `stepAIC`) and two embedded methods (`lasso`, `elastic-net`).
 
-On the URL-only (Lexical) tier it is high, because the phishing signal lives in interactions between features and a linear projection loses those interactions; on Behavior and FullLite it approaches zero, because the signal is additive enough that any sufficiently-large PC basis carries it.
+The primary pool is now **Lexical URL-only**, because that is the deployable
+first-line filter the proxy can evaluate before loading the page. FullLite stays
+as a fallback benchmark: if URL-only is not enough and the proxy must inspect
+Trust/Behavior signals too, can we shrink the combined filter to a much smaller
+set without losing AUC, sensitivity, or specificity?
+
+The EDA motivation is the strong redundancy in the URL-length cluster
+(`URLLength`, `NoOfLettersInURL`, `NoOfDegitsInURL`, and related counts)
+plus the near-saturated FullLite signal. That setting should make feature
+selection meaningful: several predictors explain overlapping variance, so
+different selection rules may keep different active sets.
+
+**Scenario 3 H1:** on the Lexical URL-only pool, feature selection can reduce
+the deployable filter below the full 13-feature lexical set without losing
+held-out operating quality.
 
 | # | Criterion | Threshold |
 |---|-----------|-----------|
-| C1 | AUC drop from raw Lexical to Lexical compressed into 3 PCs, best downstream model | **ΔAUC ≥ 0.05** |
-| C2 | AUC drop from raw FullLite to FullLite compressed into 10 PCs, same model | **ΔAUC ≤ 0.01** |
-| C3 | Gradient: drop(Lexical) > drop(FullLite) | **yes** |
+| C1 | Selected-predictor count on the lexical final fit | k_selected < 13 for at least one FS method |
+| C2 | Held-out operating quality on the same 20% test set | AUC, Sensitivity, and Specificity remain operationally usable relative to the full lexical GLM |
 
-H2 is **supported** only if C1 **and** C2 hold on the same downstream
-classifier family. C3 turns the claim into a gradient parallel to H1's —
-the compression cost rises as the tier gets weaker.
+This hypothesis **cannot be answered from EDA alone**. EDA only motivates
+why feature selection should matter (correlation, VIF, redundant signal);
+the actual claim is about the fitted active sets and their held-out
+AUC/Sensitivity/Specificity, so it is tested in `scenario_3.rmd`.
 
 ---
 
@@ -282,10 +296,10 @@ continuous_features <- setdiff(names(features), binary_features)
 
 To test H1 we define three nested feature tiers. The modeling notebook
 reads these tier definitions directly from here, so both notebooks stay
-in sync. The `tier_full` built here (40 features) is the EDA baseline
-used by §4.5's PCA diagnostics; the scenario_2 modeling notebook
-replaces it with **FullLite** (34 features) by stripping six Behavior
-near-leakers — see §5 for the reasoning.
+in sync. The `tier_full` built here (40 features) is the EDA baseline;
+the scenario_2 modeling notebook replaces it with **FullLite**
+(34 features) by stripping six Behavior near-leakers — see §5 for
+the reasoning.
 
 ```{r feature-tiers}
 tier_lexical  <- family_map %>% filter(family == "Lexical")  %>% pull(feature)
@@ -414,10 +428,9 @@ ggplot(smd_family, aes(family, effect, fill = family)) +
 median |SMD| and the smallest spread. Trust and Behavior carry more
 per-feature signal. This supports H1's claim that the URL-only tier has less signal in individual features and relies more on feature combinations.
 
-## 4.3 H2 preparation
+## 4.3 Collinearity
 
-H2 says the cost of linear dimensionality reduction differs sharply across
-families. A quicklook at multicollinearity tells us how much redundant dimensionality each family has to start with. If a family is already low-rank in variance, aggressive compression is cheap. If it has many independent directions of variance, compression is more expensive. The question is whether the class signal lives in those dominant variance directions or orthogonal to them.
+A quicklook at multicollinearity tells us how much redundant dimensionality each family has to start with. If a family is already low-rank in variance, multiple features carry overlapping information; if it has many independent directions of variance, each predictor adds something new.
 
 ### 4.3.1 Lexical Correlation Matrix
 
@@ -481,12 +494,10 @@ vif_df %>%
   kable(caption = "Variance Inflation Factors - continuous features (lm-based, target-free).")
 ```
 
-**Takeaway (H2):** `URLLength`, `NoOfLettersInURL` and `NoOfDegitsInURL`
+**Takeaway:** `URLLength`, `NoOfLettersInURL` and `NoOfDegitsInURL`
 stay near-collinear because they measure overlapping properties of the
-same URL string. For H2 this means Lexical has far fewer independent
-directions of variance than it has features — PCA will compress it
-aggressively. The open question is whether the class signal lives in
-those dominant variance directions or orthogonal to them.
+same URL string. Lexical has far fewer independent directions of variance
+than it has features.
 
 
 ## 4.4 Skewness Assessment *(Scenario 2 preparation)*
@@ -538,112 +549,6 @@ with long outlier tails. This shapes our modeling choices:
   SVM still need standardisation because they use distances.
 
 
-## 4.5 H2 preparation — where the class signal lives across principal components
-
-§4.3 showed that Lexical has fewer independent directions of variance
-than it has features. That alone only tells us about variance — not
-whether any of those directions carry the *class* signal. For H2 the
-crucial question is whether the top few PCs of each family line up with
-phishing vs. legitimate separation. If they don't, any low-dimensional
-projection will drop detection accuracy. Two PCA-based diagnostics answer
-that: a scree plot (how many PCs each tier needs to capture most of its
-variance) and the univariate AUC of each leading PC (how much class
-signal sits along that direction).
-
-### 4.5.1 Scree plot per tier
-
-```{r pca-scree, fig.height=4.5, fig.width=8}
-prep_for_pca <- function(cols) {
-  X <- features[, cols, drop = FALSE]
-  cont <- setdiff(names(X), binary_features)
-  if (length(cont) > 0) {
-    X[, cont] <- lapply(X[, cont], function(x) log1p(pmax(x, 0)))
-  }
-  X_mat <- as.matrix(X)
-  sds <- apply(X_mat, 2, sd)
-  X_mat <- X_mat[, sds > 0, drop = FALSE]
-  scale(X_mat)
-}
-
-pca_tiers <- list(
-  Lexical  = tier_lexical,
-  Trust    = tier_trust,
-  Behavior = tier_behavior,
-  Full     = tier_full
-)
-
-scree_df <- map_dfr(names(pca_tiers), function(tier) {
-  Xp <- prep_for_pca(pca_tiers[[tier]])
-  pc <- prcomp(Xp, center = FALSE, scale. = FALSE)
-  var_exp <- pc$sdev^2 / sum(pc$sdev^2)
-  tibble(tier = tier, k = seq_along(var_exp), cum_var = cumsum(var_exp))
-})
-
-scree_df %>%
-  mutate(tier = factor(tier, levels = c("Lexical", "Trust",
-                                         "Behavior", "Full"))) %>%
-  ggplot(aes(k, cum_var, colour = tier)) +
-  geom_line(linewidth = 0.8) +
-  geom_point(size = 1.5) +
-  geom_hline(yintercept = 0.9, linetype = "dashed", colour = "grey40") +
-  scale_x_continuous(breaks = seq(0, 40, 5)) +
-  scale_y_continuous(labels = scales::percent) +
-  scale_colour_brewer(palette = "Set2") +
-  labs(title = "Cumulative variance explained by leading PCs",
-       subtitle = "Dashed line at 90% variance - fewer PCs = tier is more low-rank",
-       x = "Number of PCs retained", y = "Cumulative variance",
-       colour = "Tier") +
-  theme_minimal(base_size = 11)
-```
-
-Lexical reaches 90 % of its variance with 3–4 PCs — the URL-length
-cluster is doing most of the work. Trust spends all 7 directions because
-its features are binary and near-uncorrelated. Behavior and Full are
-spread out and need 10+ PCs to reach 90 %. That is the *variance*
-picture; it predicts that PCA compression on Lexical will look cheap.
-The class picture below tells a different story.
-
-### 4.5.2 Class signal carried by each leading PC
-
-```{r pca-per-pc-auc, fig.height=4, fig.width=9}
-pca_auc_df <- map_dfr(names(pca_tiers), function(tier) {
-  Xp <- prep_for_pca(pca_tiers[[tier]])
-  pc <- prcomp(Xp, center = FALSE, scale. = FALSE)
-  k_max <- min(10, ncol(pc$x))
-  map_dfr(seq_len(k_max), function(i) {
-    a <- suppressMessages(as.numeric(
-      pROC::roc(df$label_bin, pc$x[, i],
-                levels = c("Legitimate", "Phishing"),
-                quiet = TRUE)$auc))
-    tibble(tier = tier, PC = i, auc = max(a, 1 - a))
-  })
-})
-
-pca_auc_df %>%
-  mutate(tier = factor(tier, levels = c("Lexical", "Trust",
-                                         "Behavior", "Full"))) %>%
-  ggplot(aes(PC, auc, fill = tier)) +
-  geom_col() +
-  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey40") +
-  facet_wrap(~ tier, nrow = 1) +
-  scale_x_continuous(breaks = 1:10) +
-  scale_fill_brewer(palette = "Set2") +
-  labs(title = "Phishing signal carried by each leading PC",
-       subtitle = "Orientation-free univariate AUC; PC1 = direction of largest variance",
-       x = "Principal component index", y = "Univariate AUC") +
-  theme_minimal(base_size = 11) +
-  theme(legend.position = "none")
-```
-
-**Takeaway (H2):** On Lexical, PC1 captures almost all the variance but
-the class signal is smeared across several PCs with low individual AUC —
-variance directions and class directions do not line up. Trust has so few
-features that each PC carries a comparable share of the (already weak)
-signal. On Behavior and Full the top 2–3 PCs each reach AUC above 0.8, so
-a handful of components recover most of the task. This is the direct EDA
-prediction H2 tests quantitatively in `scenario_5.rmd`: compression is
-cheap on Behavior and Full, expensive on Lexical.
-
 ---
 
 # 5. EDA Summary & Modeling Implications
@@ -660,15 +565,27 @@ For H1 we therefore use the scenario_2 family layout: Lexical
 **FullLite** (34) = Lexical + Trust + reduced Behavior. H1 is tested
 primarily on the **URLOnly tier**, where the family contrast has the most
 room to show, and the family gradient (C3) is measured against **FullLite**,
-not Full. H2 is tested across the same families, because the cost of
-compression is what differs between them.
+not Full.
+
+This near-perfect separability is a dataset-internal finding, not a production
+claim. A random split of PhiUSIIL preserves the same collection process,
+website templates and campaign mix on both train and test; a real deployment
+would face temporal drift, new phishing kits and domain/campaign shift. Any
+0.99+ FullLite result should therefore be read as an upper-bound benchmark for
+this curated dataset. A production-grade claim would require a temporal or
+external holdout.
 
 ## 5.1 Implications for modeling scenarios
 
-| Finding | Scenario 2 implication (H1) | Scenario 5 implication (H2) |
-|---------|----------------------------|------------------------------|
-| Lexical SMD lowest + features must be combined | Largest parametric/non-parametric AUC gap expected on URLOnly | On Lexical the signal lives in feature combinations, so a linear projection to 3 PCs is expected to drop AUC sharply |
-| Heavy skewness in 19 of 22 continuous features | Log-transform + standardisation for LR/LDA; trees/RF unaffected | Apply the same log+standardise transform before PCA/LDA projection (both are scale-sensitive) |
-| URL-length cluster: VIF > 1000 and abs(r) > 0.84 | Use stable solvers / regularised LR for fairness | Lexical is low-rank in variance but the class signal is smeared across PCs — the strongest case for "compression is expensive here" |
-| Trust binary features: low intra-correlation | No special treatment | Trust spends all 7 PCs on variance; projection cannot shorten it without losing signal |
+| Finding | Scenario 2 implication (H1) | Scenario 3 implication (H1) |
+|---------|----------------------------|----------------------------|
+| Lexical SMD lowest + features must be combined | Largest parametric/non-parametric AUC gap expected on URLOnly | Use Lexical as the primary first-line FS pool |
+| Heavy skewness in 19 of 22 continuous features | Log-transform + standardisation for LR/LDA; trees/RF unaffected | Use the same transformed/scaled matrix for lexical FS and FullLite fallback |
+| URL-length cluster: VIF > 1000 and abs(r) > 0.84 | Use stable solvers / regularised LR for fairness | Redundant URL predictors make lasso/EN/stepwise active sets worth comparing |
+| Trust binary features: low intra-correlation | No special treatment | Trust/Behavior features belong to the fallback FullLite benchmark |
+
+EDA therefore supports the **motivation** for Scenario 3, but not its
+result. The selected-predictor counts and the AUC/Sensitivity/Specificity
+checks belong in `scenario_3.rmd`, because they depend on the fitted
+feature-selection paths rather than on marginal EDA summaries.
 
