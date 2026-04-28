@@ -96,14 +96,15 @@ plus the near-saturated FullLite signal. That setting should make feature
 selection meaningful: several predictors explain overlapping variance, so
 different selection rules may keep different active sets.
 
-**Scenario 3 H1:** on the Lexical URL-only pool, feature selection can reduce
-the deployable filter below the full 13-feature lexical set without losing
-held-out operating quality.
+**Scenario 3 H1:** on the Lexical URL-only pool, at least one of the three
+feature-selection methods can produce a compact deployable URL filter with
+strong held-out operating quality.
 
 | # | Criterion | Threshold |
 |---|-----------|-----------|
-| C1 | Selected-predictor count on the lexical final fit | k_selected < 13 for at least one FS method |
-| C2 | Held-out operating quality on the same 20% test set | AUC, Sensitivity, and Specificity remain operationally usable relative to the full lexical GLM |
+| C1 | Sparsity on the lexical final fit | at least one FS method keeps **≤ 9 / 13** predictors (≥30% reduction) |
+| C2 | Held-out ranking quality on the same 20% test set | **AUC ≥ 0.95** |
+| C3 | Held-out operating point at threshold 0.5 | **Sensitivity ≥ 0.94** and **Specificity ≥ 0.75** |
 
 This hypothesis **cannot be answered from EDA alone**. EDA only motivates
 why feature selection should matter (correlation, VIF, redundant signal);

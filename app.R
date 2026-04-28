@@ -336,9 +336,9 @@ ui <- fluidPage(
           br(),
           h5("D3: held-out test metrics of the reduced fits"),
           DTOutput("s3_d3_dt"),
-          helpText("Unpenalised logistic regression refit on each method's ",
-                   "selected predictors, scored on the same 20% test split ",
-                   "as Scenario 2. AUC checks ranking; Sensitivity and ",
+          helpText("Method-native final fits scored on the same 20% test split ",
+                   "as Scenario 2: stepwise/lasso/elastic-net final models only. ",
+                   "AUC checks ranking; Sensitivity and ",
                    "Specificity check the threshold-0.5 deployment point.")
         ),
         tabPanel("Data preview",
@@ -823,9 +823,9 @@ server <- function(input, output, session) {
     x_min <- max(0.4, min(d$cv_auc_mean - d$cv_auc_sd, na.rm = TRUE) - 0.01)
 
     ggplot(d, aes(x = cv_auc_mean, y = model, colour = family)) +
-      geom_errorbarh(aes(xmin = pmax(cv_auc_mean - cv_auc_sd, 0),
-                         xmax = pmin(cv_auc_mean + cv_auc_sd, 1)),
-                     height = 0.25, linewidth = 0.6) +
+      geom_errorbar(aes(xmin = pmax(cv_auc_mean - cv_auc_sd, 0),
+                        xmax = pmin(cv_auc_mean + cv_auc_sd, 1)),
+                    orientation = "y", width = 0.25, linewidth = 0.6) +
       geom_point(size = 3.5) +
       geom_text(aes(label = sprintf("%.4f", cv_auc_mean)),
                 hjust = -0.2, size = 3.2, colour = "grey25",
@@ -1073,7 +1073,7 @@ server <- function(input, output, session) {
   s3_finals  <- reactive(s3_read("lexical_final"))
   s3_full_finals <- reactive(s3_read("finals"))
   s3_d3_data <- reactive({
-    s3_read("d3_lexical_metrics")
+    s3_read("d3_lexical_fs_metrics")
   })
 
   output$s3_status <- renderText({
@@ -1081,7 +1081,7 @@ server <- function(input, output, session) {
     if (is.null(fp) || is.null(d3)) {
       return(paste(
         "No cached Scenario 3 fits found.",
-        sprintf("Expected primary files: %s/{lexical_final,d3_lexical_metrics}.rds", S3_DIR),
+        sprintf("Expected primary files: %s/{lexical_final,d3_lexical_fs_metrics}.rds", S3_DIR),
         "Run: rmarkdown::render('scenario_3.rmd') to populate the cache.",
         sep = "\n"))
     }

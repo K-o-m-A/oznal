@@ -19,8 +19,9 @@ aj obsah stránky?**
   modely dokážu vyťažiť viac.
 - **H1 (Scenario 3)** skúma nie typ modelu, ale *výber príznakov* pre
   URL-only filter: či vieme z 13 Lexical premenných vybrať menší deployable
-  set bez rozpadu AUC, Sensitivity a Specificity. FullLite ostáva fallback
-  benchmark, ak by URL-only nestačilo.
+  set so silným AUC, Sensitivity a Specificity. Konkrétne: `k <= 9`,
+  AUC aspoň 0.95, Sensitivity aspoň 0.94 a Specificity aspoň 0.75.
+  FullLite ostáva fallback benchmark, ak by URL-only nestačilo.
 **Čo je EDA a prečo je prvá.** *Exploratory Data Analysis* = pozriem sa
 na dáta **predtým**, ako trénujem model. Spočítam základné štatistiky,
 nakreslím grafy, pozriem koreláciu. Zmyslom je rozhodnúť, čo z dát má

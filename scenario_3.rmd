@@ -38,9 +38,17 @@ We pick **bidirectional stepwise** (`MASS::stepAIC`, `direction = "both"`) for t
 
 The primary classification task is the same first-line deployment case as the EDA and Scenario 2 motivation: **Lexical URL-only** phishing detection. These are the features visible from the URL string before the proxy fetches the page. FullLite remains a secondary fallback benchmark: if URL-only is not enough and we have to inspect trust / behaviour signals as well, then we want the smallest combined-tier filter that preserves the operating quality.
 
-**H1 (primary claim).** *On the Lexical URL-only predictor pool, feature selection can reduce the deployable URL filter below the full 13-feature set without losing held-out operating quality.*
+**H1 (primary practical claim).** *On the Lexical URL-only predictor pool, at least one feature-selection method can produce a compact deployable URL filter with strong held-out operating quality.*
 
-We evaluate this on the same 80/20 split as Scenario 2 by fitting the full lexical GLM and three reduced lexical supports. Elastic-Net is reported alongside as a third reference point with no separate hypothesis. The two assignment-mandated reportables — **how many features each method retains** and **which features lose statistical significance as predictors are added or removed** — are presented for the Lexical primary analysis. FullLite is then shown as a fallback/benchmark, not as the main story.
+This is a pre-declared acceptance rule for the project, not an additional inferential hypothesis test: the same final feature-selection method must satisfy all three explicit criteria on the held-out split.
+
+| # | Criterion | Threshold |
+|---|-----------|-----------|
+| C1 | Sparsity | at least one FS method keeps **≤ 9 / 13** lexical predictors (≥30% reduction) |
+| C2 | Ranking quality | held-out **AUC ≥ 0.95** |
+| C3 | Operating point | held-out **Sensitivity ≥ 0.94** and **Specificity ≥ 0.75** at threshold 0.5 |
+
+We evaluate this on the same 80/20 split as Scenario 2 by comparing the three requested feature-selection methods only: bidirectional stepwise, lasso and elastic-net. Elastic-Net is reported alongside as a third reference point with no separate hypothesis. The two assignment-mandated reportables — **how many features each method retains** and **which features lose statistical significance as predictors are added or removed** — are presented for the Lexical primary analysis. FullLite is then shown as a fallback/benchmark, not as the main story.
 
 ---
 
@@ -183,7 +191,7 @@ All three methods sit on top of the same likelihood: logistic regression with th
 
 ## 4.1 Bidirectional stepwise (algorithmic)
 
-`MASS::stepAIC` greedily adds and drops one term at a time, accepting the move that reduces AIC the most. AIC = `−2 log L + 2 p`, so each extra predictor must buy at least 2 log-likelihood units of fit to be retained — a much weaker bar than a Bonferroni-corrected p-value cut, but stricter than plain BIC for the sample sizes we have. The "both" direction is the right default: forward-only selection locks in early choices and backward-only is unstable when the full GLM is near-saturated. Starting point is the **null model** (intercept only); the upper scope is whichever feature pool we pass in — Lexical for the primary Task 3 analysis and FullLite for the fallback benchmark.
+`MASS::stepAIC` greedily adds and drops one term at a time, accepting the move that reduces AIC the most. AIC = `−2 log L + 2 p`, so each extra predictor must buy at least 2 log-likelihood units of fit to be retained — a much weaker bar than a Bonferroni-corrected p-value cut and less strict than BIC for the sample sizes we have. The "both" direction is the right default: forward-only selection locks in early choices and backward-only is unstable when the full GLM is near-saturated. Starting point is the **null model** (intercept only); the upper scope is whichever feature pool we pass in — Lexical for the primary Task 3 analysis and FullLite for the fallback benchmark.
 
 We capture every step's coefficient table via the `keep` callback so we can later show *which terms lose significance* as the active set evolves (deliverable D2).
 
@@ -243,7 +251,7 @@ Same wrapper as lasso, just `alpha = 0.5`. Conceptually elastic-net solves the l
 
 # 5. FullLite fallback benchmark and primary Lexical check
 
-FullLite is now treated as a fallback benchmark: if the URL-only first line is not enough, we want the smallest combined-tier filter. For each of the 10 outer CV folds we fit all three methods on the in-fold training rows and record the count of selected predictors. Stepwise dominates the cost. On this machine the cached first run took about 49 minutes for the full 10-fold loop; later knits are instant because they load `scenario_3/artifacts/perfold.rds`.
+FullLite is now treated as a fallback benchmark: if the URL-only first line is not enough, we want the smallest combined-tier filter. For each of the 10 outer CV folds we fit all three methods on the in-fold training rows and record the count of selected predictors. This loop is a selected-predictor-count diagnostic, not a fold-level performance estimate; for formal CV performance we would fit the preprocessing recipe inside each fold. Here we intentionally reuse the Scenario 2 train-split preprocessing for parity, and `glmnet` standardises columns internally again during fitting. Stepwise dominates the cost. On this machine the cached first run took about 49 minutes for the full 10-fold loop; later knits are instant because they load `scenario_3/artifacts/perfold.rds`.
 
 ```{r perfold-fit}
 perfold <- run_or_load("perfold", function() {
@@ -342,32 +350,31 @@ ggplot(perfold_long, aes(method, k, fill = method)) +
            label = sprintf("FullLite pool = %d", length(predictors)),
            hjust = 0, size = 3.2, colour = "grey30") +
   labs(x = NULL, y = "selected predictors per fold",
-       title = "Per-fold predictor count (10 CV folds)") +
+       title = "Fallback FullLite benchmark: per-fold predictor count (10 CV folds)") +
   theme_minimal() + theme(legend.position = "none")
 ```
 
 ## 5.2 Primary Lexical URL-only H1 check
 
 The primary Task 3 result is the URL-only version, because it matches what the
-proxy can decide before loading the page. We fit the full lexical GLM and the
-same three feature-selection methods once on the 80% training split, then score
-them on the held-out 20%. Besides AUC we explicitly report **Sensitivity** and
-**Specificity** at threshold 0.5, because those are the operational quantities:
-how many phishing URLs are caught and how many legitimate URLs pass.
+proxy can decide before loading the page. We fit the same three
+feature-selection methods once on the 80% training split, then score them on the
+held-out 20%. Besides AUC we explicitly report
+**Sensitivity** and **Specificity** at threshold 0.5, because those are the
+operational quantities: how many phishing URLs are caught and how many
+legitimate URLs pass.
+
+We deliberately do **not** include ridge in Task 3. Ridge is useful for
+stabilising logistic regression, but it does not perform feature selection
+because it does not zero coefficients. D3 therefore scores only the final models
+from the three selected FS methods: stepwise uses its selected GLM, lasso uses
+its `cv.glmnet(alpha = 1)` fit, and elastic-net uses its
+`cv.glmnet(alpha = 0.5)` fit.
 
 ```{r lexical-final-check}
-metrics_for_terms <- function(terms, train_df = train_std, test_df = test_std) {
-  if (!length(terms)) {
-    return(tibble(test_auc = NA_real_, sensitivity = NA_real_,
-                  specificity = NA_real_, accuracy = NA_real_))
-  }
-  fm <- as.formula(paste("label ~", paste(terms, collapse = " + ")))
-  fit <- glm(fm, data = train_df, family = binomial)
-  prob_legitimate <- predict(fit, newdata = test_df, type = "response")
-  prob_phishing <- 1 - prob_legitimate
+metrics_from_prob <- function(prob_phishing, truth = test_std$label) {
   pred <- factor(ifelse(prob_phishing >= 0.5, "Phishing", "Legitimate"),
-                 levels = levels(test_df$label))
-  truth <- test_df$label
+                 levels = levels(truth))
   tp <- sum(pred == "Phishing" & truth == "Phishing")
   tn <- sum(pred == "Legitimate" & truth == "Legitimate")
   fp <- sum(pred == "Phishing" & truth == "Legitimate")
@@ -380,6 +387,15 @@ metrics_for_terms <- function(terms, train_df = train_std, test_df = test_std) {
     specificity = tn / (tn + fp),
     accuracy = (tp + tn) / length(truth)
   )
+}
+
+predict_glm_phishing <- function(fit, test_df = test_std) {
+  1 - as.numeric(predict(fit, newdata = test_df, type = "response"))
+}
+
+predict_glmnet_phishing <- function(cvfit, test_df, s = "lambda.1se") {
+  X_test <- model.matrix(label ~ . - 1, data = test_df)
+  1 - as.numeric(predict(cvfit, newx = X_test, s = s, type = "response"))
 }
 
 lexical_final <- run_or_load("lexical_final", function() {
@@ -399,17 +415,22 @@ lexical_final <- run_or_load("lexical_final", function() {
   )
 })
 
+test_lexical <- test_std[, c("label", lexical_predictors), drop = FALSE]
+
 lexical_diagnostic <- tibble(
   pool = "Lexical URL-only",
-  method = c("Full lexical (no FS)", "Stepwise", "Lasso", "Elastic-Net"),
-  k = c(length(lexical_predictors), length(lexical_final$sw_terms),
+  method = c("Stepwise", "Lasso", "Elastic-Net"),
+  k = c(length(lexical_final$sw_terms),
         length(lexical_final$lasso_terms), length(lexical_final$en_terms)),
-  terms = list(lexical_predictors, lexical_final$sw_terms,
-               lexical_final$lasso_terms, lexical_final$en_terms)
+  prob_phishing = list(
+    predict_glm_phishing(lexical_final$stepwise_fit),
+    predict_glmnet_phishing(lexical_final$lasso_fit, test_lexical),
+    predict_glmnet_phishing(lexical_final$en_fit, test_lexical)
+  )
 ) %>%
-  mutate(metrics = map(terms, metrics_for_terms)) %>%
+  mutate(metrics = map(prob_phishing, metrics_from_prob)) %>%
   unnest(metrics) %>%
-  dplyr::select(-terms)
+  dplyr::select(-prob_phishing)
 
 lexical_diagnostic %>%
   mutate(across(c(test_auc, sensitivity, specificity, accuracy),
@@ -417,14 +438,45 @@ lexical_diagnostic %>%
   kable(caption = "Primary Task 3 result: final selected counts and held-out AUC/Sensitivity/Specificity on the 13-feature Lexical pool.")
 ```
 
+```{r h1-criteria-table}
+SPARSITY_MAX_K <- 9
+MIN_TEST_AUC <- 0.95
+MIN_SENSITIVITY <- 0.94
+MIN_SPECIFICITY <- 0.75
+
+h1_criteria <- lexical_diagnostic %>%
+  mutate(
+    k_reduction = length(primary_predictors) - k,
+    C1_sparsity = k <= SPARSITY_MAX_K,
+    C2_auc = test_auc >= MIN_TEST_AUC,
+    C3_operating_point = sensitivity >= MIN_SENSITIVITY &
+      specificity >= MIN_SPECIFICITY,
+    H1_pass = C1_sparsity & C2_auc & C3_operating_point
+  )
+
+h1_criteria %>%
+  transmute(
+    method,
+    k,
+    k_reduction,
+    test_auc = sprintf("%.4f", test_auc),
+    sensitivity = sprintf("%.4f", sensitivity),
+    specificity = sprintf("%.4f", specificity),
+    C1_sparsity,
+    C2_auc,
+    C3_operating_point,
+    H1_pass
+  ) %>%
+  kable(caption = "H1 criteria for the three requested FS methods (C1: k <= 9, C2: AUC >= 0.95, C3: Sens >= 0.94 and Spec >= 0.75).")
+```
+
 On the URL-only pool, feature selection is useful for a different reason than
-on FullLite. The full unpenalised lexical GLM is unstable because the URL-length
-cluster is highly collinear; stepwise and lasso both reduce the pool to
+on FullLite. The URL-length cluster is highly collinear; stepwise and lasso both reduce the pool to
 `r length(lexical_final$sw_terms)` / `r length(lexical_final$lasso_terms)`
-predictors and recover much stronger held-out AUC together with explicit
-sensitivity/specificity trade-offs. This supports H1 in the practical sense
-needed for this project: the deployable URL-only filter can be smaller than the
-full 13-feature lexical set without collapsing the held-out operating quality.
+predictors. Under method-native D3 scoring, the reduced fits meet the
+pre-declared AUC, sensitivity and specificity thresholds. This supports H1 in
+the practical sense needed for this project: the deployable URL-only filter can
+be compact without collapsing the held-out operating quality.
 If we must go beyond the URL, FullLite remains the fallback pool where Task 3
 asks for the smallest combined-tier filter.
 
@@ -499,9 +551,10 @@ d1_long <- d1 %>%
 ggplot(d1_long, aes(method, predictor, fill = selected)) +
   geom_tile(colour = "white") +
   scale_fill_manual(values = setNames(c("steelblue", "grey92"), c("x", "")),
-                    guide = "none") +
+                     guide = "none") +
   labs(x = NULL, y = NULL,
-       title = "D1: which predictors each method keeps") +
+       title = "D1: which Lexical URL-only predictors each method keeps",
+       subtitle = "Blue tiles = retained by the method; grey tiles = dropped") +
   theme_minimal() + theme(panel.grid = element_blank())
 ```
 
@@ -549,6 +602,13 @@ step_path %>%
   filter(cross_05) %>%
   kable(caption = "D2 (stepwise): predictors that crossed the 0.05 line during the AIC path.")
 ```
+
+In the rendered Lexical run this crossing table is empty: no predictor moved from
+significant to non-significant (or back) across the AIC path. That does not mean
+every final AIC-selected term has a small Wald p-value. The late binary terms
+`IsDomainIP` and `NoOfQMarkInURL` are useful enough to reduce AIC but have
+unstable individual z-tests, so these p-values are reported descriptively rather
+than as formal post-selection inference.
 
 ### Lasso / Elastic-Net: regularisation path
 
@@ -600,44 +660,37 @@ bind_rows(
 
 ## 6.3 D3 — Test metrics of the reduced fits
 
-We refit a plain (unpenalised) logistic regression on the 80% training split, restricted to each method's selected predictors, and score it on the held-out 20%. The "Full" row uses all 13 lexical URL-only predictors as a baseline. AUC checks ranking quality across all possible thresholds; **Sensitivity** and **Specificity** check the actual deployment-style operating point at threshold 0.5: how many phishing pages are caught and how many legitimate pages are allowed through.
+We score the method-native final fits on the held-out 20% test split. AUC checks ranking quality across all possible thresholds; **Sensitivity** and **Specificity** check the actual deployment-style operating point at threshold 0.5: how many phishing pages are caught and how many legitimate pages are allowed through.
 
 ```{r d3-metrics}
-d3 <- run_or_load("d3_lexical_metrics", function() {
-  tbl <- tibble(
-    method = c("Full lexical (no FS)", "Stepwise", "Lasso", "Elastic-Net"),
-    k = c(length(primary_predictors), length(finals$sw_terms),
-          length(finals$lasso_terms), length(finals$en_terms)),
-    terms = list(primary_predictors, finals$sw_terms, finals$lasso_terms, finals$en_terms)
-  ) %>%
-    mutate(metrics = map(terms, metrics_for_terms)) %>%
-    unnest(metrics) %>%
-    dplyr::select(-terms)
-  list(table = tbl)
+d3 <- run_or_load("d3_lexical_fs_metrics", function() {
+  list(table = lexical_diagnostic %>%
+         dplyr::select(method, k, test_auc, sensitivity, specificity, accuracy))
 })
 
 d3$table %>%
   mutate(across(c(test_auc, sensitivity, specificity, accuracy),
                 ~ sprintf("%.4f", .x))) %>%
-  kable(caption = "D3: held-out test metrics of an unpenalised lexical logistic regression refit on each method's selected predictors.")
+  kable(caption = "D3: held-out test metrics of the three Task 3 feature-selection methods.")
 ```
 
-**External-validity caveat.** These near-perfect numbers are credible as an
-*internal benchmark result* on PhiUSIIL with a random stratified split, but they
-should not be sold as a production guarantee. The dataset contains very strong
-site-structure signals: legitimate pages are typically complete websites with
-titles, social links, copyright markers and richer HTML structure, while many
-phishing pages are shallow replicas. Even after removing the six strongest
-near-leaky page-count variables, the remaining Trust/Behavior indicators still
-make the held-out random test split almost separable. A real deployment claim
-would need a harder validation protocol: temporal split, domain/campaign-level
-holdout, or an external phishing feed collected after the training window.
+**External-validity caveat.** The primary Lexical result is a URL-only internal
+benchmark, not a production guarantee. The much higher FullLite fallback numbers
+are credible as an internal PhiUSIIL random-split benchmark, but should not be
+sold as real-world accuracy. The dataset contains very strong site-structure
+signals: legitimate pages are typically complete websites with titles, social
+links, copyright markers and richer HTML structure, while many phishing pages
+are shallow replicas. Even after removing the six strongest near-leaky
+page-count variables, the remaining Trust/Behavior indicators still make the
+held-out random test split almost separable. A real deployment claim would need
+a harder validation protocol: temporal split, domain/campaign-level holdout, or
+an external phishing feed collected after the training window.
 
 ---
 
 # 7. Conclusion
 
-The primary Lexical URL-only result supports the project story better than the old FullLite headline. Stepwise and lasso reduce the deployable URL filter from 13 predictors to `r length(finals$sw_terms)` / `r length(finals$lasso_terms)` predictors, while D3 reports the held-out AUC, sensitivity, specificity and accuracy at the same operating threshold. This is the version that matches what the user/proxy can see before fetching a page.
+The primary Lexical URL-only result supports the project story better than the old FullLite headline. Stepwise and lasso reduce the deployable URL filter from 13 predictors to `r length(finals$sw_terms)` / `r length(finals$lasso_terms)` predictors, while method-native D3 scoring meets the explicit AUC, sensitivity and specificity thresholds. This is the version that matches what the user/proxy can see before fetching a page.
 
 For the assignment-mandated reportables: D1 names every retained lexical predictor per method, D2 shows which predictors lose significance — both as drifting GLM p-values along the stepwise path and as λ-thresholded active-set changes along the embedded paths — and D3 checks whether reducing from 13 predictors to each selected support changes held-out AUC, sensitivity, or specificity by an operationally meaningful amount.
 
