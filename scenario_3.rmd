@@ -1,7 +1,5 @@
 ---
-title: "Phishing Detection — Scenario 3: Stepwise vs Lasso vs Elastic-Net"
-author: "K-o-m-A"
-date: "`r Sys.Date()`"
+title: "Phishing Detection - Scenario 3: Stepwise vs Lasso vs Elastic-Net"
 output:
   html_notebook:
     toc: true
@@ -29,18 +27,13 @@ dir.create(ARTIFACTS, recursive = TRUE, showWarnings = FALSE)
 
 # 1. Scenario & Hypothesis
 
-Scenario 2 fixed the predictor pool and asked which **model family** (parametric vs non-parametric) extracts more signal. Scenario 3 turns the question around: hold a single linear classifier (logistic regression) constant and ask which **feature-selection method** keeps the most parsimonious predictor set without losing predictive power. The assignment requires us to compare:
+Scenario 2 fixed the predictor pool and asked which **model family** extracts more signal. Scenario 3 holds a single linear classifier (logistic regression) constant and ask which **feature-selection method** keeps the most compact predictor set without losing predictive power.
 
-- one **algorithmic** method (forward / backward / mixed selection), and
-- two **embedded** methods chosen from {lasso, ridge, elastic net}.
+We pick **bidirectional stepwise** (`MASS::stepAIC`, `direction = "both"`) for the algorithmic side because  it reconsiders previously-included terms instead of locking decisions in  pure forward / backward variants. For the embedded pair we pick **Lasso (α = 1)** and **Elastic-Net (α = 0.5)**.
 
-We pick **bidirectional stepwise** (`MASS::stepAIC`, `direction = "both"`) for the algorithmic side because it is the most defensible single choice — it reconsiders previously-included terms instead of locking decisions in like pure forward / backward variants. For the embedded pair we pick **Lasso (α = 1)** and **Elastic-Net (α = 0.5)** and deliberately drop **Ridge (α = 0)**: ridge shrinks coefficients but never zeros them, so it does not produce a smaller predictor set. Including it in a parsimony comparison would just be a constant baseline at "all features retained". Better to invest the slot in elastic-net, which is the lasso / ridge interpolation and answers the natural follow-up *"is pure ℓ1 the right amount of penalty, or is mixing helpful?"*.
+The primary classification task is the same first-line deployment case as the EDA and Scenario 2 motivation, the **Lexical** phishing detection. FullLite remains a secondary fallback benchmark so if URL-only is not enough and we have to inspect trust / behaviour signals as well, then we want the smallest combined-tier filter that preserves the operating quality.
 
-The primary classification task is the same first-line deployment case as the EDA and Scenario 2 motivation: **Lexical URL-only** phishing detection. These are the features visible from the URL string before the proxy fetches the page. FullLite remains a secondary fallback benchmark: if URL-only is not enough and we have to inspect trust / behaviour signals as well, then we want the smallest combined-tier filter that preserves the operating quality.
-
-**H2 (primary practical claim).** *On the Lexical URL-only predictor pool, at least one feature-selection method can produce a compact deployable URL filter with strong held-out operating quality.*
-
-This is a pre-declared acceptance rule for the project, not an additional inferential hypothesis test: the same final feature-selection method must satisfy all three explicit criteria on the held-out split.
+**H2** *On the Lexical predictor pool, at least one feature-selection method can produce a compact deployable URL filter with strong held-out operating quality.*
 
 | # | Criterion | Threshold |
 |---|-----------|-----------|
@@ -48,13 +41,11 @@ This is a pre-declared acceptance rule for the project, not an additional infere
 | C2 | Ranking quality | held-out **AUC ≥ 0.95** |
 | C3 | Operating point | held-out **Sensitivity ≥ 0.94** and **Specificity ≥ 0.75** at threshold 0.5 |
 
-We evaluate this on the same 80/20 split as Scenario 2 by comparing the three requested feature-selection methods only: bidirectional stepwise, lasso and elastic-net. Elastic-Net is reported alongside as a third reference point with no separate hypothesis. The two assignment-mandated reportables — **how many features each method retains** and **which features lose statistical significance as predictors are added or removed** — are presented for the Lexical primary analysis. FullLite is then shown as a fallback/benchmark, not as the main story.
+We evaluate this on the same 80/20 split as Scenario 2 by comparing the three selected feature-selection methods : bidirectional stepwise, lasso and elastic-net.
 
 ---
 
 # 2. Data Loading
-
-Same PhiUSIIL CSV as the EDA and Scenario 2. We strip the UTF-8 BOM the provider attaches to the first column name.
 
 ```{r load-data}
 dataset_path <- if (file.exists("PhiUSIIL_Phishing_URL_Dataset.csv")) {
@@ -70,7 +61,7 @@ cat("Loaded", nrow(raw), "rows,", ncol(raw), "columns.\n")
 
 ## 2.1 EDA exclusions and FullLite tier
 
-Same exclusions as Scenario 2 §2.2: identifier strings, computed scores, the redundant `HasObfuscation` binary, and the four linearly-dependent ratios. On top of that we drop the six near-leaky page-count features (each gives univariate AUC > 0.95 alone) so the model has to lean on the remaining 34 predictors instead of being saturated by one signal. The point of this scenario is to compare feature-selection methods, and that contrast disappears the moment a single feature already solves the task.
+Same exclusions as in Scenario 2.
 
 ```{r exclusions}
 ID_COLS          <- c("FILENAME", "URL", "Domain", "TLD", "Title")
@@ -98,9 +89,7 @@ cat("Feature matrix after exclusions:", ncol(df) - 1, "predictors.\n")
 
 ## 3.1 Stratified sub-sampling and split
 
-Identical to Scenario 2 §3.1–§3.2 (same seed, same `slice_sample` call, same `createDataPartition`, same 10-fold `createFolds`). With the seed pinned at 2026 and the exclusion set above, the row indices are bit-for-bit the same as in Scenario 2 — every fold contains the same training rows.
-
-The 30 k stratified subsample (15 k / 15 k) is inherited from Scenario 2's SVM-driven budget. For Scenario 3 we do not need it for runtime — `stepAIC` and `cv.glmnet` would both finish on the full 235 k rows — but we keep it so the reduced-fit AUCs in §6.3 can be compared directly to LogReg-Ridge from Scenario 2 without a sample-size confound.
+Identical to Scenario 2 3.1–3.2 for parity. The 30k stratified subsample (15k / 15k) is inherited from Scenario 2's SVM-driven budget. For Scenario 3 we keep it so the reduced-fit AUCs in 6.3 can be compared directly to LogReg-Ridge from Scenario 2 without a sample-size confound.
 
 ```{r subsample-split}
 N_SUB <- 30000
@@ -120,8 +109,7 @@ cat("Train:", nrow(train_raw), "Test:", nrow(test_raw),
 ```
 
 ## 3.2 Preprocessing
-
-`log1p` on continuous predictors (the EDA flagged |skew| > 2 on most of them), then centre / scale. Binary 0/1 indicators are left untouched. `preProcess` is fit once on the training set; this is the same recipe Scenario 2 uses for its parametric and distance-based models, which is the appropriate one here because all three feature-selection methods sit on top of a logistic-regression likelihood.
+`log1p` on continuous predictors (the EDA flagged |skew| > 2 on most of them), then centre / scale. Binary indicators are left untouched.
 
 ```{r recipes}
 feat <- df_sub %>% dplyr::select(-label)
@@ -159,7 +147,7 @@ cat("Lexical URL-only pool:", length(lexical_predictors), "predictors.\n")
 
 ## 3.3 Per-fold cache helper
 
-`run_or_load` mirrors the wrapper from Scenario 2: first knit fits everything and writes `scenario_3/artifacts/*.rds`; later knits just load the files. The fingerprint includes the predictor set so a change to the FullLite pool invalidates the cache.
+First knit fits everything and writes `scenario_3/artifacts/*.rds`, later knits just load the files.
 
 ```{r cache-helper}
 fp_inputs <- digest::digest(list(
@@ -187,18 +175,11 @@ run_or_load <- function(name, fn) {
 
 # 4. Feature-selection methods
 
-All three methods sit on top of the same likelihood: logistic regression with the binomial family. The only thing that changes is *how the active set of predictors is chosen*. Centring this design decision lets us attribute every difference in the retained-feature count to the FS strategy itself, not to any modelling-family confound.
+## 4.1 Bidirectional stepwise
 
-The next chunks are **method utilities**. They intentionally do not print standalone
-results: `step_keep()` records the stepwise audit trail, `fit_stepwise()` fits the
-algorithmic selector, and `fit_glmnet()` is reused by both embedded selectors.
-Their outputs are consumed later in the Lexical D1/D2/D3 result sections.
+`MASS::stepAIC` at each step considers every possible move, add an unused predictor or drop a current one, and picks the one that improves AIC the most. AIC rewards better fit but charges a small penalty for every extra predictor, so a feature only stays if it earns its keep. We start from the intercept only and grow toward the feature pool we pass in Lexical for the primary Scenario 3 analysis and FullLite for the fallback benchmark.
 
-## 4.1 Bidirectional stepwise (algorithmic)
-
-`MASS::stepAIC` greedily adds and drops one term at a time, accepting the move that reduces AIC the most. AIC = `−2 log L + 2 p`, so each extra predictor must buy at least 2 log-likelihood units of fit to be retained — a much weaker bar than a Bonferroni-corrected p-value cut and less strict than BIC for the sample sizes we have. The "both" direction is the right default: forward-only selection locks in early choices and backward-only is unstable when the full GLM is near-saturated. Starting point is the **null model** (intercept only); the upper scope is whichever feature pool we pass in — Lexical for the primary Task 3 analysis and FullLite for the fallback benchmark.
-
-We capture every step's coefficient table via the `keep` callback so we can later show *which terms lose significance* as the active set evolves (deliverable D2).
+We use the **bidirectional** variant because the alternatives fail in this setting. Forward-only cannot undo early decisions, so a predictor that gets in first stays in even when later additions make it redundant. Backward-only starts from the full model, which is numerically unstable here because some URL-length features are heavily correlated.
 
 ```{r stepwise-helper}
 step_keep <- function(model, AIC) {
@@ -229,7 +210,7 @@ fit_stepwise <- function(train_df, features = predictors) {
 
 ## 4.2 Lasso (embedded, α = 1)
 
-`cv.glmnet` runs an inner 5-fold CV across a grid of λ values and returns the solution path. We pick `lambda.1se` — the largest λ whose CV deviance is within one standard error of the minimum. This is the canonical "parsimony-favouring" choice from the original Tibshirani / Friedman recommendation: it accepts a small loss in cross-validated fit in exchange for a sparser, more reproducible support set than `lambda.min` typically produces.
+`cv.glmnet` tries a grid of regularisation strengths λ and uses an internal 5-fold cross-validation to score each. We pick `lambda.1se`, the largest λ whose CV error is still within one standard error of the best one. This is the standard parsimony-favouring choice. It gives up a tiny bit of fit in exchange for a smaller and more stable feature set than the strict best-fit `lambda.min` typically returns.
 
 ```{r lasso-helper}
 fit_glmnet <- function(train_df, alpha) {
@@ -248,28 +229,20 @@ count_nonzero <- function(cvfit, s = "lambda.1se") {
 
 ## 4.3 Elastic-Net (embedded, α = 0.5)
 
-Same wrapper as lasso, just `alpha = 0.5`. Conceptually elastic-net solves the lasso's "groups of correlated predictors" pathology — pure ℓ1 picks one out of each correlated cluster more or less arbitrarily, while the ℓ2 component stabilises the choice and tends to keep correlated groups together (the *grouping effect*, Zou & Hastie 2005). We do not tune α; α = 0.5 is the conventional half-and-half default.
+Same wrapper as lasso, only with `alpha = 0.5`. We add elastic-net because lasso has a known weakness with correlated features. It picks one more or less at random and drops the rest. Elastic-net adds a small ridge penalty that stabilises the choice and tends to keep correlated features together. We fix α = 0.5 instead of tuning it, so the comparison stays about the selection method, not hyperparameters.
 
-(Both glmnet calls reuse `fit_glmnet` from §4.2 — we just pass `alpha = 0.5` at call site.)
+[//]: # Zvážiť tú poslednú vetu()
 
 ---
 
 # 5. Primary Lexical URL-only H2 check
 
-The primary Task 3 result is the URL-only version, because it matches what the
+The primary objective in Scenario 3 is the URL-only version, because it matches what the
 proxy can decide before loading the page. We fit the same three
 feature-selection methods once on the 80% training split, then score them on the
 held-out 20%. Besides AUC we explicitly report
 **Sensitivity** and **Specificity** at threshold 0.5, because those are the
-operational quantities: how many phishing URLs are caught and how many
-legitimate URLs pass.
-
-We deliberately do **not** include ridge in Task 3. Ridge is useful for
-stabilising logistic regression, but it does not perform feature selection
-because it does not zero coefficients. D3 therefore scores only the final models
-from the three selected FS methods: stepwise uses its selected GLM, lasso uses
-its `cv.glmnet(alpha = 1)` fit, and elastic-net uses its
-`cv.glmnet(alpha = 0.5)` fit.
+operational quantities set in previous scenario.
 
 ```{r lexical-final-check}
 metrics_from_prob <- function(prob_phishing, truth = test_std$label) {
@@ -370,34 +343,14 @@ h2_criteria %>%
   kable(caption = "H2 criteria for the three requested FS methods (C1: k <= 9, C2: AUC >= 0.95, C3: Sens >= 0.94 and Spec >= 0.75).")
 ```
 
-On the URL-only pool, feature selection is useful for a different reason than
-on FullLite. The URL-length cluster is highly collinear; stepwise and lasso both reduce the pool to
-`r length(lexical_final$sw_terms)` / `r length(lexical_final$lasso_terms)`
-predictors. Under method-native D3 scoring, the reduced fits meet the
-pre-declared AUC, sensitivity and specificity thresholds. This supports H2 in
-the practical sense needed for this project: the deployable URL-only filter can
-be compact without collapsing the held-out operating quality.
-If we must go beyond the URL, FullLite remains the fallback pool where Task 3
-asks for the smallest combined-tier filter.
+The URL-length features are heavily correlated, and both stepwise and lasso shrink the pool from 13 to **9 predictors** (a 31 % reduction). Elastic-net keeps 11 and so misses the C1 sparsity criterion. The smaller fits clear the operating-point thresholds: stepwise reaches **AUC 0.957, Sensitivity 0.949, Specificity 0.839**, and lasso lands at **AUC 0.951, Sensitivity 0.941, Specificity 0.764** - both pass all three H2 criteria, with stepwise the more comfortable margin on Specificity. Elastic-net (AUC 0.953, Sens 0.943, Spec 0.769) is operationally fine but fails the sparsity bound.
 
 ---
 
-# 6. Lexical final fits and deliverables
+# 6. Lexical final fits and diagnostics
+### 6.1 Selected predictors per method
 
-The assignment also asks us to report the *final* selected feature set and to track which features lose significance as predictors are added or removed. These deliverables now use the primary **Lexical URL-only** fits. The FullLite fits are still loaded as a fallback benchmark for comparison, but they are not the headline D1/D2/D3 result.
-
-## 6.1 Final fits on full training set
-
-```{r final-fits}
-finals <- lexical_final
-cat("Stepwise selected:", length(finals$sw_terms), "predictors.\n")
-cat("Lasso    selected:", length(finals$lasso_terms), "predictors.\n")
-cat("ElasticNet selected:", length(finals$en_terms), "predictors.\n")
-```
-
-### D1 — Selected predictors per method
-
-A 13-row matrix with one column per method, marking which lexical URL predictors made the cut. Sorted by total times selected so the "core" set rises to the top.
+A 13-row matrix with one column per method, marking which lexical URL predictors made it. Sorted by total times selected so the "core" set rises to the top.
 
 ```{r d1-table}
 all_terms <- sort(unique(c(finals$sw_terms, finals$lasso_terms, finals$en_terms,
@@ -412,14 +365,12 @@ d1 <- tibble(
   arrange(desc(score), predictor)
 
 d1 %>% dplyr::select(-score) %>%
-  kable(caption = "D1: lexical URL-only predictors retained by each FS method (final fit on full training set).")
+  kable(caption = "Lexical URL-only predictors retained by each FS method.")
 ```
 
-The table is the main D1 deliverable. It already contains the exact selected /
-dropped status for every Lexical predictor, so we do not repeat the same
-information as a second heatmap in the main notebook.
 
-## 6.2 D2 — Significance loss as predictors are added or removed
+NEEDS CHECK
+## 6.2 Significance loss as predictors are added or removed
 
 ### Stepwise: p-value evolution along the AIC path
 
@@ -501,7 +452,7 @@ D2 as an interpretability/audit deliverable, not as a new hypothesis test.
 
 ### Lasso / Elastic-Net: labelled embedded summaries
 
-Embedded methods do not give per-step frequentist p-values — they give the
+Embedded methods do not give per-step frequentist p-values - they give the
 *order in which predictors enter or leave the active set as the penalty
 changes*. The default `glmnet` coefficient-path plot is useful for debugging,
 but it is a weak presentation figure here: 13 coloured lines overlap and the
@@ -601,50 +552,16 @@ That is a useful robustness check rather than a contradiction: lasso answers
 "which single sparse support is enough?", elastic-net answers "which correlated
 URL signals remain useful when shrinkage is softened?".
 
-## 6.3 D3 — Test metrics of the reduced fits
-
-We score the method-native final fits on the held-out 20% test split. AUC checks ranking quality across all possible thresholds; **Sensitivity** and **Specificity** check the actual deployment-style operating point at threshold 0.5: how many phishing pages are caught and how many legitimate pages are allowed through.
-
-```{r d3-metrics}
-d3 <- run_or_load("d3_lexical_fs_metrics", function() {
-  list(table = lexical_diagnostic %>%
-         dplyr::select(method, k, test_auc, sensitivity, specificity, accuracy))
-})
-
-d3$table %>%
-  mutate(across(c(test_auc, sensitivity, specificity, accuracy),
-                ~ sprintf("%.4f", .x))) %>%
-  kable(caption = "D3: held-out test metrics of the three Task 3 feature-selection methods.")
-```
-
-**External-validity caveat.** The primary Lexical result is a URL-only internal
-benchmark, not a production guarantee. The much higher FullLite fallback numbers
-are credible as an internal PhiUSIIL random-split benchmark, but should not be
-sold as real-world accuracy. The dataset contains very strong site-structure
-signals: legitimate pages are typically complete websites with titles, social
-links, copyright markers and richer HTML structure, while many phishing pages
-are shallow replicas. Even after removing the six strongest near-leaky
-page-count variables, the remaining Trust/Behavior indicators still make the
-held-out random test split almost separable. A real deployment claim would need
-a harder validation protocol: temporal split, domain/campaign-level holdout, or
-an external phishing feed collected after the training window.
 
 ---
 
 # 7. Secondary FullLite fallback benchmark
-
-FullLite is kept as a **secondary fallback**: if the URL-only first line is not
-enough, we want the smallest combined-tier filter. This section is deliberately
-after the Lexical D1/D2/D3 outputs because it is not the headline Task 3 claim.
 For each of the 10 outer CV folds we fit all three methods on the in-fold
 training rows and record only the count of selected predictors. This loop is a
-selected-predictor-count diagnostic, not a fold-level performance estimate; for
-formal CV performance we would fit the preprocessing recipe inside each fold.
+selected-predictor-count diagnostic, not a fold-level performance estimate.
+
 Here we intentionally reuse the Scenario 2 train-split preprocessing for parity,
-and `glmnet` standardises columns internally again during fitting. Stepwise
-dominates the cost. On this machine the cached first run took about 49 minutes
-for the full 10-fold loop; later knits are instant because they load
-`scenario_3/artifacts/perfold.rds`.
+and `glmnet` standardises columns internally again during fitting.
 
 ```{r perfold-fit}
 perfold <- run_or_load("perfold", function() {
@@ -725,7 +642,7 @@ tibble(
 ) %>% kable()
 ```
 
-The old FullLite lasso-vs-stepwise expectation is not supported. In this run the observed direction is `r ifelse(mean_lasso < mean_step, "lasso smaller than stepwise", "stepwise smaller than lasso")`: lasso retains `r sprintf("%.1f", mean_lasso)` predictors on average, while stepwise retains `r sprintf("%.1f", mean_step)`. The opposite-direction p-value is shown only as a descriptive diagnostic, not as a replacement hypothesis.
+The old FullLite lasso-vs-stepwise expectation is not supported. In this run the observed direction is **stepwise smaller than lasso**: stepwise retains **17.6 predictors** on average across the 10 folds, lasso retains **26.2**, and elastic-net **28.0**. The opposite-direction p-value is shown only as a descriptive diagnostic, not as a replacement hypothesis.
 
 ```{r fulllite-perfold-plot, fig.height=4, fig.width=8}
 perfold_long <- tibble(
@@ -751,15 +668,7 @@ ggplot(perfold_long, aes(method, k, fill = method)) +
 
 # 8. Conclusion
 
-The primary Lexical URL-only result supports the project story better than the old FullLite headline. Stepwise and lasso reduce the deployable URL filter from 13 predictors to `r length(finals$sw_terms)` / `r length(finals$lasso_terms)` predictors, while method-native D3 scoring meets the explicit AUC, sensitivity and specificity thresholds. This is the version that matches what the user/proxy can see before fetching a page.
+The primary Lexical URL-only result supports the project story. Stepwise and lasso reduce the deployable URL filter from 13 predictors to **9 each** (elastic-net to 11), and the reduced fits meet the explicit AUC ≥ 0.95, Sensitivity ≥ 0.94 and Specificity ≥ 0.75 thresholds: stepwise (AUC 0.957 / Sens 0.949 / Spec 0.839) clears all three by a comfortable margin, lasso (0.951 / 0.941 / 0.764) clears them tightly.
 
-For the assignment-mandated reportables: D1 names every retained lexical predictor per method, D2 shows which predictors lose significance — both as drifting GLM p-values along the stepwise path and as λ-thresholded active-set changes along the embedded paths — and D3 checks whether reducing from 13 predictors to each selected support changes held-out AUC, sensitivity, or specificity by an operationally meaningful amount.
+The FullLite fold benchmark still answers a real fallback question with a negative lasso-vs-stepwise result: on this exact FullLite setup, **lasso is not the sparsest combined-tier fallback; stepwise is** (17.6 predictors per fold against 26.2 for lasso and 28.0 for elastic-net, out of a 34-predictor pool). The held-out test metrics on the full-train fits sit at AUC 0.9999 for every method, with stepwise reaching that ceiling on 17 predictors versus 26 for lasso and 29 for elastic-net. The regularised models still matter because they provide a stable embedded-selection baseline and a coefficient path, but the smallest fallback feature set in this experiment comes from the algorithmic AIC path. If a downstream stakeholder wants an audit log of which terms entered and left, stepwise is also the more interpretable deliverable. If the priority is embedded shrinkage with less post-selection instability, elastic-net/lasso remain useful but not more parsimonious here.
 
-The FullLite fold benchmark still answers a real fallback question with a negative lasso-vs-stepwise result: on this exact FullLite setup, **lasso is not the sparsest combined-tier fallback; stepwise is**. The regularised models still matter because they provide a stable embedded-selection baseline and a coefficient path, but the smallest fallback feature set in this experiment comes from the algorithmic AIC path. If a downstream stakeholder wants an audit log of which terms entered and left, stepwise is also the more interpretable deliverable; if the priority is embedded shrinkage with less post-selection instability, elastic-net/lasso remain useful but not more parsimonious here.
-
-The 0.9999-level metrics should be interpreted as "this benchmark split is
-almost solved", not as "real-world phishing detection is solved". The practical
-takeaway is therefore comparative: within this dataset, Lexical FS gives a
-compact first-line URL filter, and stepwise gives the smallest FullLite fallback
-filter without visible metric loss. Production performance would have to be
-revalidated on time-separated or externally collected URLs.
