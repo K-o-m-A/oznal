@@ -1,0 +1,24 @@
+services:
+  app:
+    build: .
+    image: oznal-phishing:latest
+    container_name: oznal-app
+    ports:
+      - "3838:3838"
+
+  test:
+    build: .
+    image: oznal-phishing:latest
+    profiles: ["test"]
+    command: ["Rscript", "/app/test_app.R"]
+
+  render:
+    build: .
+    image: oznal-phishing:latest
+    profiles: ["render"]
+    command:
+      - "Rscript"
+      - "-e"
+      - "rmarkdown::render('/app/phishing.rmd', output_dir='/app/rendered'); rmarkdown::render('/app/scenario_2.rmd', output_dir='/app/rendered'); rmarkdown::render('/app/scenario_3.rmd', output_dir='/app/rendered')"
+    volumes:
+      - ./rendered:/app/rendered

@@ -17,8 +17,8 @@ Trust/Behavior signálov, nechceme nasadiť všetkých 34 FullLite premenných
 naslepo, ale nájsť čo najmenší kombinovaný filter.
 
 Na samotných URL featurách FS zredukuje 13 premenných na 9–11 a zároveň
-stabilizuje kolineárny URL-only GLM. FullLite per-fold Wilcoxon ostáva v
-notebooku ako fallback/benchmark pre situáciu, keď URL-only nestačí.
+stabilizuje kolineárny URL-only GLM. FullLite per-fold Wilcoxon ostáva až ako
+sekundárny fallback/benchmark pre situáciu, keď URL-only nestačí.
 
 Zadanie (bod 3) pýta porovnanie **jednej algoritmickej** FS metódy a **dvoch
 embedded** metód. Vybrali sme:
@@ -116,11 +116,16 @@ všetkých aktuálne zaradených prediktorov. To dáva audit log: **„v kroku 7
 sme pridali `URLLength` a tým `NoOfLettersInURL` prestal byť signifikantný
 (p stúplo z 0.003 na 0.31)"**.
 
+Preto tieto časti kódu samy osebe **nemajú tabuľkový výstup**: sú to helper
+funkcie. `step_keep()` iba zbiera audit trail, `fit_stepwise()` iba vráti
+vybraný GLM model a `fit_glmnet()` iba vráti penalizovaný fit. Skutočný výstup z
+nich sa objaví až neskôr v D1/D2/D3 tabuľkách.
+
 ---
 
 ## 2. Hypotéza a kritérium
 
-### H1 (primárne praktické tvrdenie)
+### H2 (primárne praktické tvrdenie)
 
 > **Na Lexical URL-only poole vieme feature selection-om získať menší
 > deployable URL filter než plných 13 lexical premenných bez rozpadu held-out
@@ -160,7 +165,7 @@ FullLite per-fold Wilcoxon je sekundárny benchmark: stará očakávaná veta
 `lasso < stepwise` tam nevyšla; stepwise bol naopak sparsnejší (17.6 vs 26.7
 príznaku). To nie je chyba, ale fallback výsledok.
 
-### Prečo NIE H1 typu „lasso má lepšie test AUC"?
+### Prečo NIE H2 typu „lasso má lepšie test AUC"?
 
 To by bola **iná** hypotéza, ktorá nemá nič spoločné s feature selection-om.
 Pri FS nás primárne zaujíma **menší deployable set**, nie to, či penalizovaná
@@ -171,7 +176,7 @@ operating point.
 ### Prečo to stále držíme jednoduché?
 
 Aby sme sa vyhli prekomplikovaniu Scen. 2 (4 tiery × 6 modelov × paired
-Wilcoxon naprieč rodinami). H1 je jednoduché praktické tvrdenie: URL-only
+Wilcoxon naprieč rodinami). H2 je jednoduché praktické tvrdenie: URL-only
 filter vieme zmenšiť a Sens/Spec/AUC stále ukazujú použiteľný operating point.
 Všetko ostatné (D1/D2/D3 v §6) sú deliverables, ktoré zadanie pýta priamo.
 
@@ -192,9 +197,10 @@ dôvod fixovať smer.
 
 ---
 
-## 4. Fitovanie — implementačné detaily
+## 4. Fitovanie — implementačné detaily a poradie v notebooku
 
-Primárny Lexical výsledok fitujeme raz na 80 % tréningovej časti a skórujeme
+V notebooku má ísť najprv **primárny Lexical výsledok** a až potom FullLite
+fallback. Primárny Lexical výsledok fitujeme raz na 80 % tréningovej časti a skórujeme
 na rovnakom 20 % test sete ako Scenár 2. FullLite per-fold loop je iba
 sekundárny fallback benchmark. V oboch častiach sú metódy rovnaké:
 
@@ -235,6 +241,10 @@ lasso ponechali 9, elastic-net 11. Toto podporuje hlavnú praktickú pointu Task
 3: URL-only filter sa dá zmenšiť a stále reportujeme AUC, Sensitivity a
 Specificity na rovnakom test sete.
 
+**D1 stačí ako tabuľka.** Heatmapa s modrými/sivými políčkami ukazuje to isté
+ako D1 tabuľka (`x` = vybrané, prázdne = zhodené). Na obhajobu je lepšia
+tabuľka, lebo presne pomenuje každý ponechaný a vyradený príznak.
+
 **Fallback FullLite benchmark:** pôvodne sme čakali `k_lasso ≤ k_EN ≤ k_step`,
 ale dáta ukázali opačnú praktickú pointu:
 
@@ -246,7 +256,7 @@ Interpretácia pre FullLite: stepwise začína z nulového modelu a pridáva iba
 ktoré znížia AIC. Pri tejto dátovej matici to vedie k menšiemu aktívnemu setu
 než `lambda.1se` v glmnet-e, ktorý stále drží veľa korelovaných FullLite
 prediktorov. Toto nie je implementačná chyba; je to negatívny výsledok pre
-pôvodnú H1.
+pôvodnú FullLite očakávanú vetu.
 
 ### Ktoré príznaky stratia signifikanciu (D2)
 
@@ -267,6 +277,35 @@ celej cesty — to je core URL-length/URL-count cluster z EDA.
 **V regularizačnej ceste**: príznaky aktívne ešte pri veľkej λ sú **„core"**.
 Príznaky, ktoré sa objavia až pri malej λ, sú slabé samostatne alebo
 kolineárne s niečím silnejším.
+
+### Ako jednoducho vysvetliť D2 grafy
+
+**Stepwise graf** nie je performance graf. Je to audit toho, ako sa správa
+vybraný logistický GLM počas AIC cesty. GLM znamená **Generalized Linear
+Model**; u nás konkrétne `glm(..., family = binomial)`, teda logistická regresia
+pre binárny label phishing / legitimate. Os x sú kroky `stepAIC`, os y sú
+p-hodnoty koeficientov v log mierke a červená čiara je p = 0.05. Bod pod čiarou
+znamená, že daný prediktor je v tom medzikroku individuálne signifikantný;
+chýbajúci bod znamená, že prediktor vtedy ešte nebol v aktívnom modeli. Samotné
+farby v grafe nie sú dobrý spôsob identifikácie featur; graf slúži ako rýchly
+prehľad, či niečo prechádza cez 0.05. Konkrétne názvy a hodnoty preto čítame
+z pomenovanej D2 tabuľky pod grafom (`first_step`, `last_step`, `min_p`,
+`max_p`, `final_p`, `crosses_05`).
+
+**Lasso a elastic-net** sa technicky dajú ukázať ako klasické `glmnet`
+regularizačné cesty, ale to je slabý prezentačný graf: farebné krivky sa
+prekrývajú a bez labelov nevidno, ktorý feature je ktorý. Preto v reporte
+uprednostňujeme dva čitateľnejšie D2 výstupy: pomenované nenulové koeficienty
+pri `lambda.1se` a graf/tabuľku najväčšej λ, pri ktorej je každý feature ešte
+aktívny. Nula pri `lambda.1se` znamená dropped feature; vyššia aktívna λ znamená
+robustnejší feature, ktorý prežije aj silnejšiu penalizáciu.
+
+**Čo sa z toho učíme:** stabilné jadro Lexical modelu tvoria dĺžkové, početné
+a špeciálno-znakové URL príznaky. Lasso ukazuje, že kompaktný model s 9
+prediktormi stačí; elastic-net ponechá 11, lebo pri korelovaných URL príznakoch
+radšej zachová skupinu podobných signálov. Stepwise zároveň ukazuje, že AIC
+môže ponechať aj slabšie binárne indikátory, ak zlepšia celkový fit, hoci ich
+samostatná Wald p-hodnota je nestabilná.
 
 ### Test metriky (D3)
 
@@ -371,7 +410,7 @@ Použili sme `set.seed(2026)` a identický `slice_sample` + `createDataPartition
 
 α = 0.5 je konvencia. Reálna optimálna α je niekde medzi 0.5 a 1, dala by sa
 nájsť ďalším vnoreným CV (`caret::train(method = "glmnet")` to robí). My to
-**nerobíme zámerne** — H1 je o porovnaní troch *konkrétnych* metód, nie o
+**nerobíme zámerne** — H2 je o porovnaní troch *konkrétnych* metód, nie o
 hľadaní najlepšej α. Tuning α je ortogonálny experiment.
 
 ### „Wilcoxon na 10 foldoch má floor `1/2^10`. Nie je to slabý test?"

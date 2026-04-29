@@ -38,7 +38,7 @@ We pick **bidirectional stepwise** (`MASS::stepAIC`, `direction = "both"`) for t
 
 The primary classification task is the same first-line deployment case as the EDA and Scenario 2 motivation: **Lexical URL-only** phishing detection. These are the features visible from the URL string before the proxy fetches the page. FullLite remains a secondary fallback benchmark: if URL-only is not enough and we have to inspect trust / behaviour signals as well, then we want the smallest combined-tier filter that preserves the operating quality.
 
-**H1 (primary practical claim).** *On the Lexical URL-only predictor pool, at least one feature-selection method can produce a compact deployable URL filter with strong held-out operating quality.*
+**H2 (primary practical claim).** *On the Lexical URL-only predictor pool, at least one feature-selection method can produce a compact deployable URL filter with strong held-out operating quality.*
 
 This is a pre-declared acceptance rule for the project, not an additional inferential hypothesis test: the same final feature-selection method must satisfy all three explicit criteria on the held-out split.
 
@@ -189,6 +189,11 @@ run_or_load <- function(name, fn) {
 
 All three methods sit on top of the same likelihood: logistic regression with the binomial family. The only thing that changes is *how the active set of predictors is chosen*. Centring this design decision lets us attribute every difference in the retained-feature count to the FS strategy itself, not to any modelling-family confound.
 
+The next chunks are **method utilities**. They intentionally do not print standalone
+results: `step_keep()` records the stepwise audit trail, `fit_stepwise()` fits the
+algorithmic selector, and `fit_glmnet()` is reused by both embedded selectors.
+Their outputs are consumed later in the Lexical D1/D2/D3 result sections.
+
 ## 4.1 Bidirectional stepwise (algorithmic)
 
 `MASS::stepAIC` greedily adds and drops one term at a time, accepting the move that reduces AIC the most. AIC = `−2 log L + 2 p`, so each extra predictor must buy at least 2 log-likelihood units of fit to be retained — a much weaker bar than a Bonferroni-corrected p-value cut and less strict than BIC for the sample sizes we have. The "both" direction is the right default: forward-only selection locks in early choices and backward-only is unstable when the full GLM is near-saturated. Starting point is the **null model** (intercept only); the upper scope is whichever feature pool we pass in — Lexical for the primary Task 3 analysis and FullLite for the fallback benchmark.
@@ -249,9 +254,397 @@ Same wrapper as lasso, just `alpha = 0.5`. Conceptually elastic-net solves the l
 
 ---
 
-# 5. FullLite fallback benchmark and primary Lexical check
+# 5. Primary Lexical URL-only H2 check
 
-FullLite is now treated as a fallback benchmark: if the URL-only first line is not enough, we want the smallest combined-tier filter. For each of the 10 outer CV folds we fit all three methods on the in-fold training rows and record the count of selected predictors. This loop is a selected-predictor-count diagnostic, not a fold-level performance estimate; for formal CV performance we would fit the preprocessing recipe inside each fold. Here we intentionally reuse the Scenario 2 train-split preprocessing for parity, and `glmnet` standardises columns internally again during fitting. Stepwise dominates the cost. On this machine the cached first run took about 49 minutes for the full 10-fold loop; later knits are instant because they load `scenario_3/artifacts/perfold.rds`.
+The primary Task 3 result is the URL-only version, because it matches what the
+proxy can decide before loading the page. We fit the same three
+feature-selection methods once on the 80% training split, then score them on the
+held-out 20%. Besides AUC we explicitly report
+**Sensitivity** and **Specificity** at threshold 0.5, because those are the
+operational quantities: how many phishing URLs are caught and how many
+legitimate URLs pass.
+
+We deliberately do **not** include ridge in Task 3. Ridge is useful for
+stabilising logistic regression, but it does not perform feature selection
+because it does not zero coefficients. D3 therefore scores only the final models
+from the three selected FS methods: stepwise uses its selected GLM, lasso uses
+its `cv.glmnet(alpha = 1)` fit, and elastic-net uses its
+`cv.glmnet(alpha = 0.5)` fit.
+
+```{r lexical-final-check}
+metrics_from_prob <- function(prob_phishing, truth = test_std$label) {
+  pred <- factor(ifelse(prob_phishing >= 0.5, "Phishing", "Legitimate"),
+                 levels = levels(truth))
+  tp <- sum(pred == "Phishing" & truth == "Phishing")
+  tn <- sum(pred == "Legitimate" & truth == "Legitimate")
+  fp <- sum(pred == "Phishing" & truth == "Legitimate")
+  fn <- sum(pred == "Legitimate" & truth == "Phishing")
+  tibble(
+    test_auc = as.numeric(pROC::roc(truth, prob_phishing,
+                                    levels = c("Legitimate", "Phishing"),
+                                    direction = "<", quiet = TRUE)$auc),
+    sensitivity = tp / (tp + fn),
+    specificity = tn / (tn + fp),
+    accuracy = (tp + tn) / length(truth)
+  )
+}
+
+predict_glm_phishing <- function(fit, test_df) {
+  1 - as.numeric(predict(fit, newdata = test_df, type = "response"))
+}
+
+predict_glmnet_phishing <- function(cvfit, test_df, s = "lambda.1se") {
+  X_test <- model.matrix(label ~ . - 1, data = test_df)
+  1 - as.numeric(predict(cvfit, newx = X_test, s = s, type = "response"))
+}
+
+lexical_final <- run_or_load("lexical_final", function() {
+  trn <- train_std[, c("label", lexical_predictors)]
+  sw <- fit_stepwise(trn, lexical_predictors)
+  cvl <- fit_glmnet(trn, alpha = 1)
+  cve <- fit_glmnet(trn, alpha = 0.5)
+  term_names <- colnames(model.matrix(label ~ . - 1, data = trn))
+  list(
+    stepwise_fit = sw,
+    lasso_fit = cvl,
+    en_fit = cve,
+    sw_terms = setdiff(names(coef(sw)), "(Intercept)"),
+    lasso_terms = term_names[as.numeric(coef(cvl, s = "lambda.1se"))[-1] != 0],
+    en_terms = term_names[as.numeric(coef(cve, s = "lambda.1se"))[-1] != 0],
+    X_names = term_names
+  )
+})
+
+test_lexical <- test_std[, c("label", lexical_predictors), drop = FALSE]
+
+lexical_diagnostic <- tibble(
+  pool = "Lexical URL-only",
+  method = c("Stepwise", "Lasso", "Elastic-Net"),
+  k = c(length(lexical_final$sw_terms),
+        length(lexical_final$lasso_terms), length(lexical_final$en_terms)),
+  prob_phishing = list(
+    predict_glm_phishing(lexical_final$stepwise_fit, test_lexical),
+    predict_glmnet_phishing(lexical_final$lasso_fit, test_lexical),
+    predict_glmnet_phishing(lexical_final$en_fit, test_lexical)
+  )
+) %>%
+  mutate(metrics = map(prob_phishing, metrics_from_prob)) %>%
+  unnest(metrics) %>%
+  dplyr::select(-prob_phishing)
+
+lexical_diagnostic %>%
+  mutate(across(c(test_auc, sensitivity, specificity, accuracy),
+                ~ sprintf("%.4f", .x))) %>%
+  kable(caption = "Primary Task 3 result: final selected counts and held-out AUC/Sensitivity/Specificity on the 13-feature Lexical pool.")
+```
+
+```{r h2-criteria-table}
+SPARSITY_MAX_K <- 9
+MIN_TEST_AUC <- 0.95
+MIN_SENSITIVITY <- 0.94
+MIN_SPECIFICITY <- 0.75
+
+h2_criteria <- lexical_diagnostic %>%
+  mutate(
+    k_reduction = length(primary_predictors) - k,
+    C1_sparsity = k <= SPARSITY_MAX_K,
+    C2_auc = test_auc >= MIN_TEST_AUC,
+    C3_operating_point = sensitivity >= MIN_SENSITIVITY &
+      specificity >= MIN_SPECIFICITY,
+    H2_pass = C1_sparsity & C2_auc & C3_operating_point
+  )
+
+h2_criteria %>%
+  transmute(
+    method,
+    k,
+    k_reduction,
+    test_auc = sprintf("%.4f", test_auc),
+    sensitivity = sprintf("%.4f", sensitivity),
+    specificity = sprintf("%.4f", specificity),
+    C1_sparsity,
+    C2_auc,
+    C3_operating_point,
+    H2_pass
+  ) %>%
+  kable(caption = "H2 criteria for the three requested FS methods (C1: k <= 9, C2: AUC >= 0.95, C3: Sens >= 0.94 and Spec >= 0.75).")
+```
+
+On the URL-only pool, feature selection is useful for a different reason than
+on FullLite. The URL-length cluster is highly collinear; stepwise and lasso both reduce the pool to
+`r length(lexical_final$sw_terms)` / `r length(lexical_final$lasso_terms)`
+predictors. Under method-native D3 scoring, the reduced fits meet the
+pre-declared AUC, sensitivity and specificity thresholds. This supports H2 in
+the practical sense needed for this project: the deployable URL-only filter can
+be compact without collapsing the held-out operating quality.
+If we must go beyond the URL, FullLite remains the fallback pool where Task 3
+asks for the smallest combined-tier filter.
+
+---
+
+# 6. Lexical final fits and deliverables
+
+The assignment also asks us to report the *final* selected feature set and to track which features lose significance as predictors are added or removed. These deliverables now use the primary **Lexical URL-only** fits. The FullLite fits are still loaded as a fallback benchmark for comparison, but they are not the headline D1/D2/D3 result.
+
+## 6.1 Final fits on full training set
+
+```{r final-fits}
+finals <- lexical_final
+cat("Stepwise selected:", length(finals$sw_terms), "predictors.\n")
+cat("Lasso    selected:", length(finals$lasso_terms), "predictors.\n")
+cat("ElasticNet selected:", length(finals$en_terms), "predictors.\n")
+```
+
+### D1 — Selected predictors per method
+
+A 13-row matrix with one column per method, marking which lexical URL predictors made the cut. Sorted by total times selected so the "core" set rises to the top.
+
+```{r d1-table}
+all_terms <- sort(unique(c(finals$sw_terms, finals$lasso_terms, finals$en_terms,
+                           primary_predictors)))
+d1 <- tibble(
+  predictor = all_terms,
+  stepwise    = ifelse(predictor %in% finals$sw_terms,    "x", ""),
+  lasso       = ifelse(predictor %in% finals$lasso_terms, "x", ""),
+  elastic_net = ifelse(predictor %in% finals$en_terms,    "x", "")
+) %>%
+  mutate(score = (stepwise == "x") + (lasso == "x") + (elastic_net == "x")) %>%
+  arrange(desc(score), predictor)
+
+d1 %>% dplyr::select(-score) %>%
+  kable(caption = "D1: lexical URL-only predictors retained by each FS method (final fit on full training set).")
+```
+
+The table is the main D1 deliverable. It already contains the exact selected /
+dropped status for every Lexical predictor, so we do not repeat the same
+information as a second heatmap in the main notebook.
+
+## 6.2 D2 — Significance loss as predictors are added or removed
+
+### Stepwise: p-value evolution along the AIC path
+
+`stepAIC` recorded a snapshot of `summary(model)$coefficients` at every step via the `keep` callback. We unpack it, refit the GLM at each step (so we have access to the full coefficient table), and watch how each predictor's two-sided z-test p-value moves as terms are added or dropped.
+
+Here **GLM** means **Generalized Linear Model**; concretely we use
+`glm(..., family = binomial)`, i.e. logistic regression for the binary phishing
+/ legitimate label. The stepwise D2 figure is therefore not a performance
+curve: it is an audit plot of the selected logistic-regression model. The x-axis
+is the AIC selection step, the y-axis is the coefficient p-value on a log scale,
+and the red dashed line is the usual descriptive 0.05 threshold. Points below
+the line are individually significant in that temporary GLM; missing points
+mean that the predictor was not yet in the active model at that step.
+
+```{r d2-stepwise, fig.height=7, fig.width=10}
+keep_mat <- finals$stepwise_fit$keep
+n_steps <- if (is.matrix(keep_mat)) ncol(keep_mat) else length(keep_mat)
+
+step_path <- map_dfr(seq_len(n_steps), function(i) {
+  k_i <- if (is.matrix(keep_mat)) keep_mat[, i] else keep_mat[[i]]
+  tibble(step = i,
+         predictor = k_i$terms,
+         p = k_i$p,
+         AIC = k_i$AIC)
+}) %>%
+  filter(predictor != "(Intercept)")
+
+P_FLOOR <- 1e-100
+step_path_plot <- step_path %>%
+  mutate(p_plot = pmax(p, P_FLOOR))
+
+ggplot(step_path_plot, aes(step, p_plot, group = predictor, colour = predictor)) +
+  geom_line(alpha = 0.7) + geom_point(size = 1.3) +
+  geom_hline(yintercept = 0.05, linetype = "dashed", colour = "red") +
+  scale_y_log10(limits = c(P_FLOOR, 1),
+                labels = scales::label_scientific()) +
+  labs(x = "stepAIC step", y = "Pr(>|z|)  (log scale; floored for plotting)",
+       title = "D2 (stepwise): per-step coefficient p-values along the AIC path",
+       subtitle = "Overview only: red dashed line = 0.05; exact feature-level audit is in the table below") +
+  theme_minimal() + theme(legend.position = "none")
+
+step_path_summary <- step_path %>%
+  group_by(predictor) %>%
+  arrange(step, .by_group = TRUE) %>%
+  summarise(
+    first_step = min(step),
+    last_step = max(step),
+    min_p = min(p, na.rm = TRUE),
+    max_p = max(p, na.rm = TRUE),
+    final_p = dplyr::last(p),
+    crosses_05 = any(p > 0.05) && any(p < 0.05),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(crosses_05), desc(max_p), predictor)
+
+step_path_summary %>%
+  mutate(across(c(min_p, max_p, final_p), ~ signif(.x, 3))) %>%
+  kable(caption = "D2 (stepwise): named p-value audit for predictors active along the AIC path.")
+
+step_path_summary %>%
+  arrange(desc(crosses_05), max_p) %>%
+  mutate(across(c(min_p, max_p), ~ signif(.x, 3))) %>%
+  filter(crosses_05) %>%
+  kable(caption = "D2 (stepwise): predictors that crossed the 0.05 line during the AIC path.")
+```
+
+In the rendered Lexical run the crossing-only table is empty: no predictor moved from
+significant to non-significant (or back) across the AIC path. That does not mean
+every final AIC-selected term has a small Wald p-value. The late binary terms
+`IsDomainIP` and `NoOfQMarkInURL` are useful enough to reduce AIC but have
+unstable individual z-tests, so these p-values are reported descriptively rather
+than as formal post-selection inference.
+
+What we learn from this plot-and-table pair: the stable lexical signal is the URL
+length/count/special-character cluster, which stays extremely far below 0.05.
+The weaker late binary indicators are not the main statistical evidence; they
+are small AIC improvements kept by the algorithm. This is exactly why we treat
+D2 as an interpretability/audit deliverable, not as a new hypothesis test.
+
+### Lasso / Elastic-Net: labelled embedded summaries
+
+Embedded methods do not give per-step frequentist p-values — they give the
+*order in which predictors enter or leave the active set as the penalty
+changes*. The default `glmnet` coefficient-path plot is useful for debugging,
+but it is a weak presentation figure here: 13 coloured lines overlap and the
+colours do not identify the feature names. For the report we therefore use two
+labelled summaries that carry the same information more directly:
+
+1. the named non-zero coefficients at our final `lambda.1se`, and
+2. the largest lambda at which each predictor is active.
+
+If a coefficient is zero at `lambda.1se`, that feature is dropped by the
+embedded method. A feature that is active already at a larger lambda is more
+robust to regularisation; a feature that appears only at a very small lambda is
+weaker or mostly redundant with stronger URL predictors.
+
+```{r d2-embedded-coefs, fig.height=6, fig.width=10}
+coef_at_lambda <- function(cvfit, label, s = "lambda.1se") {
+  beta <- as.matrix(coef(cvfit, s = s))[-1, , drop = FALSE]
+  tibble(
+    predictor = rownames(beta),
+    method = label,
+    coefficient = as.numeric(beta[, 1]),
+    retained = coefficient != 0
+  )
+}
+
+embedded_coefs <- bind_rows(
+  coef_at_lambda(finals$lasso_fit, "lasso"),
+  coef_at_lambda(finals$en_fit,    "elastic-net")
+)
+
+embedded_coefs %>%
+  filter(retained) %>%
+  mutate(predictor = reorder(predictor, abs(coefficient))) %>%
+  ggplot(aes(coefficient, predictor, fill = method)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ method, scales = "free_y") +
+  geom_vline(xintercept = 0, colour = "grey50") +
+  labs(
+    title = "D2 (embedded): named coefficients retained at lambda.1se",
+    subtitle = "Only non-zero coefficients are shown; zero means the feature was dropped",
+    x = "Coefficient at lambda.1se",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+```{r d2-zero-lambda}
+active_lambda_table <- function(cvfit, label) {
+  beta_path <- as.matrix(coef(cvfit$glmnet.fit))[-1, , drop = FALSE]
+  lambdas <- cvfit$glmnet.fit$lambda
+  active_lambda <- apply(beta_path, 1, function(row) {
+    nz <- which(row != 0)
+    if (!length(nz)) return(NA_real_)
+    max(lambdas[nz])
+  })
+  tibble(predictor = rownames(beta_path),
+         active_lambda = active_lambda,
+         method = label) %>%
+    arrange(desc(active_lambda))
+}
+
+embedded_lambda <- bind_rows(
+  active_lambda_table(finals$lasso_fit, "lasso"),
+  active_lambda_table(finals$en_fit,    "elastic-net")
+)
+
+embedded_lambda %>%
+  pivot_wider(names_from = method, values_from = active_lambda) %>%
+  mutate(across(c(lasso, `elastic-net`),
+                ~ ifelse(is.na(.x), "(never)", signif(.x, 3)))) %>%
+  arrange(predictor) %>%
+  kable(caption = "D2 (embedded): largest lambda at which each predictor is active. Larger = retained under stronger regularisation.")
+```
+
+```{r d2-embedded-lambda-plot, fig.height=6, fig.width=10}
+embedded_lambda %>%
+  filter(!is.na(active_lambda)) %>%
+  mutate(predictor = reorder(predictor, active_lambda)) %>%
+  ggplot(aes(active_lambda, predictor, colour = method)) +
+  geom_point(size = 2.5, alpha = 0.9,
+             position = position_dodge(width = 0.45)) +
+  scale_x_log10() +
+  labs(
+    title = "D2 (embedded): feature robustness along the regularisation path",
+    subtitle = "Further right = active even under stronger regularisation; absent = never active",
+    x = "Largest lambda where coefficient is non-zero (log scale)",
+    y = NULL,
+    colour = "Method"
+  ) +
+  theme_minimal()
+```
+
+What we learn from the embedded paths: lasso is the more aggressive selector and
+keeps the Lexical model compact at 9 predictors, while elastic-net keeps 11
+because its ridge component tends to preserve groups of correlated URL features.
+That is a useful robustness check rather than a contradiction: lasso answers
+"which single sparse support is enough?", elastic-net answers "which correlated
+URL signals remain useful when shrinkage is softened?".
+
+## 6.3 D3 — Test metrics of the reduced fits
+
+We score the method-native final fits on the held-out 20% test split. AUC checks ranking quality across all possible thresholds; **Sensitivity** and **Specificity** check the actual deployment-style operating point at threshold 0.5: how many phishing pages are caught and how many legitimate pages are allowed through.
+
+```{r d3-metrics}
+d3 <- run_or_load("d3_lexical_fs_metrics", function() {
+  list(table = lexical_diagnostic %>%
+         dplyr::select(method, k, test_auc, sensitivity, specificity, accuracy))
+})
+
+d3$table %>%
+  mutate(across(c(test_auc, sensitivity, specificity, accuracy),
+                ~ sprintf("%.4f", .x))) %>%
+  kable(caption = "D3: held-out test metrics of the three Task 3 feature-selection methods.")
+```
+
+**External-validity caveat.** The primary Lexical result is a URL-only internal
+benchmark, not a production guarantee. The much higher FullLite fallback numbers
+are credible as an internal PhiUSIIL random-split benchmark, but should not be
+sold as real-world accuracy. The dataset contains very strong site-structure
+signals: legitimate pages are typically complete websites with titles, social
+links, copyright markers and richer HTML structure, while many phishing pages
+are shallow replicas. Even after removing the six strongest near-leaky
+page-count variables, the remaining Trust/Behavior indicators still make the
+held-out random test split almost separable. A real deployment claim would need
+a harder validation protocol: temporal split, domain/campaign-level holdout, or
+an external phishing feed collected after the training window.
+
+---
+
+# 7. Secondary FullLite fallback benchmark
+
+FullLite is kept as a **secondary fallback**: if the URL-only first line is not
+enough, we want the smallest combined-tier filter. This section is deliberately
+after the Lexical D1/D2/D3 outputs because it is not the headline Task 3 claim.
+For each of the 10 outer CV folds we fit all three methods on the in-fold
+training rows and record only the count of selected predictors. This loop is a
+selected-predictor-count diagnostic, not a fold-level performance estimate; for
+formal CV performance we would fit the preprocessing recipe inside each fold.
+Here we intentionally reuse the Scenario 2 train-split preprocessing for parity,
+and `glmnet` standardises columns internally again during fitting. Stepwise
+dominates the cost. On this machine the cached first run took about 49 minutes
+for the full 10-fold loop; later knits are instant because they load
+`scenario_3/artifacts/perfold.rds`.
 
 ```{r perfold-fit}
 perfold <- run_or_load("perfold", function() {
@@ -264,9 +657,9 @@ perfold <- run_or_load("perfold", function() {
 
   t0 <- Sys.time()
   for (k in seq_along(fold_idx)) {
-    trn <- train_std[fold_idx[[k]], ]
+    trn <- train_std[fold_idx[[k]], c("label", predictors), drop = FALSE]
 
-    sw   <- fit_stepwise(trn)
+    sw   <- fit_stepwise(trn, predictors)
     sw_terms <- setdiff(names(coef(sw)), "(Intercept)")
     k_step[k] <- length(sw_terms)
     step_terms_per_fold[[k]] <- sw_terms
@@ -302,12 +695,12 @@ tibble(
   k_lasso = perfold$k_lasso,
   k_en    = perfold$k_en
 ) %>%
-  kable(caption = "Fallback FullLite benchmark: selected-predictor count per CV fold (out of 34 candidates).")
+  kable(caption = "Secondary FullLite fallback: selected-predictor count per CV fold (out of 34 candidates).")
 ```
 
-## 5.1 FullLite lasso-vs-stepwise diagnostic
+## 7.1 FullLite lasso-vs-stepwise diagnostic
 
-```{r h1-test}
+```{r fulllite-diagnostic}
 wt <- wilcox.test(perfold$k_lasso, perfold$k_step,
                   paired = TRUE, alternative = "less", exact = FALSE)
 wt_opposite <- wilcox.test(perfold$k_lasso, perfold$k_step,
@@ -315,7 +708,7 @@ wt_opposite <- wilcox.test(perfold$k_lasso, perfold$k_step,
 mean_step  <- mean(perfold$k_step)
 mean_lasso <- mean(perfold$k_lasso)
 mean_en    <- mean(perfold$k_en)
-h1_supported <- mean_lasso < mean_step && wt$p.value < 0.05
+old_fulllite_expectation_supported <- mean_lasso < mean_step && wt$p.value < 0.05
 
 tibble(
   metric = c("mean k (stepwise)", "mean k (lasso)", "mean k (elastic-net)",
@@ -328,13 +721,13 @@ tibble(
              sprintf("%.0f", unname(wt$statistic)),
              signif(wt$p.value, 3),
              signif(wt_opposite$p.value, 3),
-             ifelse(h1_supported, "supported", "not supported"))
+             ifelse(old_fulllite_expectation_supported, "supported", "not supported"))
 ) %>% kable()
 ```
 
 The old FullLite lasso-vs-stepwise expectation is not supported. In this run the observed direction is `r ifelse(mean_lasso < mean_step, "lasso smaller than stepwise", "stepwise smaller than lasso")`: lasso retains `r sprintf("%.1f", mean_lasso)` predictors on average, while stepwise retains `r sprintf("%.1f", mean_step)`. The opposite-direction p-value is shown only as a descriptive diagnostic, not as a replacement hypothesis.
 
-```{r perfold-plot, fig.height=4, fig.width=8}
+```{r fulllite-perfold-plot, fig.height=4, fig.width=8}
 perfold_long <- tibble(
   fold = rep(seq_along(fold_idx), 3),
   method = rep(c("stepwise", "lasso", "elastic-net"), each = length(fold_idx)),
@@ -350,345 +743,13 @@ ggplot(perfold_long, aes(method, k, fill = method)) +
            label = sprintf("FullLite pool = %d", length(predictors)),
            hjust = 0, size = 3.2, colour = "grey30") +
   labs(x = NULL, y = "selected predictors per fold",
-       title = "Fallback FullLite benchmark: per-fold predictor count (10 CV folds)") +
+       title = "Secondary FullLite fallback: per-fold predictor count (10 CV folds)") +
   theme_minimal() + theme(legend.position = "none")
 ```
 
-## 5.2 Primary Lexical URL-only H1 check
-
-The primary Task 3 result is the URL-only version, because it matches what the
-proxy can decide before loading the page. We fit the same three
-feature-selection methods once on the 80% training split, then score them on the
-held-out 20%. Besides AUC we explicitly report
-**Sensitivity** and **Specificity** at threshold 0.5, because those are the
-operational quantities: how many phishing URLs are caught and how many
-legitimate URLs pass.
-
-We deliberately do **not** include ridge in Task 3. Ridge is useful for
-stabilising logistic regression, but it does not perform feature selection
-because it does not zero coefficients. D3 therefore scores only the final models
-from the three selected FS methods: stepwise uses its selected GLM, lasso uses
-its `cv.glmnet(alpha = 1)` fit, and elastic-net uses its
-`cv.glmnet(alpha = 0.5)` fit.
-
-```{r lexical-final-check}
-metrics_from_prob <- function(prob_phishing, truth = test_std$label) {
-  pred <- factor(ifelse(prob_phishing >= 0.5, "Phishing", "Legitimate"),
-                 levels = levels(truth))
-  tp <- sum(pred == "Phishing" & truth == "Phishing")
-  tn <- sum(pred == "Legitimate" & truth == "Legitimate")
-  fp <- sum(pred == "Phishing" & truth == "Legitimate")
-  fn <- sum(pred == "Legitimate" & truth == "Phishing")
-  tibble(
-    test_auc = as.numeric(pROC::roc(truth, prob_phishing,
-                                    levels = c("Legitimate", "Phishing"),
-                                    direction = "<", quiet = TRUE)$auc),
-    sensitivity = tp / (tp + fn),
-    specificity = tn / (tn + fp),
-    accuracy = (tp + tn) / length(truth)
-  )
-}
-
-predict_glm_phishing <- function(fit, test_df = test_std) {
-  1 - as.numeric(predict(fit, newdata = test_df, type = "response"))
-}
-
-predict_glmnet_phishing <- function(cvfit, test_df, s = "lambda.1se") {
-  X_test <- model.matrix(label ~ . - 1, data = test_df)
-  1 - as.numeric(predict(cvfit, newx = X_test, s = s, type = "response"))
-}
-
-lexical_final <- run_or_load("lexical_final", function() {
-  trn <- train_std[, c("label", lexical_predictors)]
-  sw <- fit_stepwise(trn, lexical_predictors)
-  cvl <- fit_glmnet(trn, alpha = 1)
-  cve <- fit_glmnet(trn, alpha = 0.5)
-  term_names <- colnames(model.matrix(label ~ . - 1, data = trn))
-  list(
-    stepwise_fit = sw,
-    lasso_fit = cvl,
-    en_fit = cve,
-    sw_terms = setdiff(names(coef(sw)), "(Intercept)"),
-    lasso_terms = term_names[as.numeric(coef(cvl, s = "lambda.1se"))[-1] != 0],
-    en_terms = term_names[as.numeric(coef(cve, s = "lambda.1se"))[-1] != 0],
-    X_names = term_names
-  )
-})
-
-test_lexical <- test_std[, c("label", lexical_predictors), drop = FALSE]
-
-lexical_diagnostic <- tibble(
-  pool = "Lexical URL-only",
-  method = c("Stepwise", "Lasso", "Elastic-Net"),
-  k = c(length(lexical_final$sw_terms),
-        length(lexical_final$lasso_terms), length(lexical_final$en_terms)),
-  prob_phishing = list(
-    predict_glm_phishing(lexical_final$stepwise_fit),
-    predict_glmnet_phishing(lexical_final$lasso_fit, test_lexical),
-    predict_glmnet_phishing(lexical_final$en_fit, test_lexical)
-  )
-) %>%
-  mutate(metrics = map(prob_phishing, metrics_from_prob)) %>%
-  unnest(metrics) %>%
-  dplyr::select(-prob_phishing)
-
-lexical_diagnostic %>%
-  mutate(across(c(test_auc, sensitivity, specificity, accuracy),
-                ~ sprintf("%.4f", .x))) %>%
-  kable(caption = "Primary Task 3 result: final selected counts and held-out AUC/Sensitivity/Specificity on the 13-feature Lexical pool.")
-```
-
-```{r h1-criteria-table}
-SPARSITY_MAX_K <- 9
-MIN_TEST_AUC <- 0.95
-MIN_SENSITIVITY <- 0.94
-MIN_SPECIFICITY <- 0.75
-
-h1_criteria <- lexical_diagnostic %>%
-  mutate(
-    k_reduction = length(primary_predictors) - k,
-    C1_sparsity = k <= SPARSITY_MAX_K,
-    C2_auc = test_auc >= MIN_TEST_AUC,
-    C3_operating_point = sensitivity >= MIN_SENSITIVITY &
-      specificity >= MIN_SPECIFICITY,
-    H1_pass = C1_sparsity & C2_auc & C3_operating_point
-  )
-
-h1_criteria %>%
-  transmute(
-    method,
-    k,
-    k_reduction,
-    test_auc = sprintf("%.4f", test_auc),
-    sensitivity = sprintf("%.4f", sensitivity),
-    specificity = sprintf("%.4f", specificity),
-    C1_sparsity,
-    C2_auc,
-    C3_operating_point,
-    H1_pass
-  ) %>%
-  kable(caption = "H1 criteria for the three requested FS methods (C1: k <= 9, C2: AUC >= 0.95, C3: Sens >= 0.94 and Spec >= 0.75).")
-```
-
-On the URL-only pool, feature selection is useful for a different reason than
-on FullLite. The URL-length cluster is highly collinear; stepwise and lasso both reduce the pool to
-`r length(lexical_final$sw_terms)` / `r length(lexical_final$lasso_terms)`
-predictors. Under method-native D3 scoring, the reduced fits meet the
-pre-declared AUC, sensitivity and specificity thresholds. This supports H1 in
-the practical sense needed for this project: the deployable URL-only filter can
-be compact without collapsing the held-out operating quality.
-If we must go beyond the URL, FullLite remains the fallback pool where Task 3
-asks for the smallest combined-tier filter.
-
 ---
 
-# 6. Lexical final fits and deliverables
-
-The assignment also asks us to report the *final* selected feature set and to track which features lose significance as predictors are added or removed. These deliverables now use the primary **Lexical URL-only** fits. The FullLite fits are still loaded as a fallback benchmark for comparison, but they are not the headline D1/D2/D3 result.
-
-## 6.1 Final fits on full training set
-
-```{r final-fits}
-fallback_finals <- run_or_load("finals", function() {
-  sw <- fit_stepwise(train_std)
-  cvl <- fit_glmnet(train_std, alpha = 1)
-  cve <- fit_glmnet(train_std, alpha = 0.5)
-
-  X_names <- colnames(model.matrix(label ~ . - 1, data = train_std))
-
-  sw_terms <- setdiff(names(coef(sw)), "(Intercept)")
-
-  lasso_beta <- as.numeric(coef(cvl, s = "lambda.1se"))[-1]
-  lasso_terms <- X_names[lasso_beta != 0]
-
-  en_beta <- as.numeric(coef(cve, s = "lambda.1se"))[-1]
-  en_terms <- X_names[en_beta != 0]
-
-  list(stepwise_fit = sw,
-       lasso_fit    = cvl,
-       en_fit       = cve,
-       sw_terms     = sw_terms,
-       lasso_terms  = lasso_terms,
-       en_terms     = en_terms,
-       X_names      = X_names)
-})
-
-finals <- lexical_final
-cat("Stepwise selected:", length(finals$sw_terms), "predictors.\n")
-cat("Lasso    selected:", length(finals$lasso_terms), "predictors.\n")
-cat("ElasticNet selected:", length(finals$en_terms), "predictors.\n")
-cat("Fallback FullLite stepwise selected:",
-    length(fallback_finals$sw_terms), "predictors.\n")
-```
-
-### D1 — Selected predictors per method
-
-A 13-row matrix with one column per method, marking which lexical URL predictors made the cut. Sorted by total times selected so the "core" set rises to the top.
-
-```{r d1-table}
-all_terms <- sort(unique(c(finals$sw_terms, finals$lasso_terms, finals$en_terms,
-                           primary_predictors)))
-d1 <- tibble(
-  predictor = all_terms,
-  stepwise    = ifelse(predictor %in% finals$sw_terms,    "x", ""),
-  lasso       = ifelse(predictor %in% finals$lasso_terms, "x", ""),
-  elastic_net = ifelse(predictor %in% finals$en_terms,    "x", "")
-) %>%
-  mutate(score = (stepwise == "x") + (lasso == "x") + (elastic_net == "x")) %>%
-  arrange(desc(score), predictor)
-
-d1 %>% dplyr::select(-score) %>%
-  kable(caption = "D1: lexical URL-only predictors retained by each FS method (final fit on full training set).")
-```
-
-```{r d1-plot, fig.height=8, fig.width=8}
-d1_long <- d1 %>%
-  pivot_longer(c(stepwise, lasso, elastic_net),
-               names_to = "method", values_to = "selected") %>%
-  mutate(method = factor(method, levels = c("stepwise", "elastic_net", "lasso")),
-         predictor = factor(predictor, levels = rev(d1$predictor)))
-
-ggplot(d1_long, aes(method, predictor, fill = selected)) +
-  geom_tile(colour = "white") +
-  scale_fill_manual(values = setNames(c("steelblue", "grey92"), c("x", "")),
-                     guide = "none") +
-  labs(x = NULL, y = NULL,
-       title = "D1: which Lexical URL-only predictors each method keeps",
-       subtitle = "Blue tiles = retained by the method; grey tiles = dropped") +
-  theme_minimal() + theme(panel.grid = element_blank())
-```
-
-## 6.2 D2 — Significance loss as predictors are added or removed
-
-### Stepwise: p-value evolution along the AIC path
-
-`stepAIC` recorded a snapshot of `summary(model)$coefficients` at every step via the `keep` callback. We unpack it, refit the GLM at each step (so we have access to the full coefficient table), and watch how each predictor's two-sided z-test p-value moves as terms are added or dropped.
-
-```{r d2-stepwise, fig.height=7, fig.width=10}
-keep_mat <- finals$stepwise_fit$keep
-n_steps <- if (is.matrix(keep_mat)) ncol(keep_mat) else length(keep_mat)
-
-step_path <- map_dfr(seq_len(n_steps), function(i) {
-  k_i <- if (is.matrix(keep_mat)) keep_mat[, i] else keep_mat[[i]]
-  tibble(step = i,
-         predictor = k_i$terms,
-         p = k_i$p,
-         AIC = k_i$AIC)
-}) %>%
-  filter(predictor != "(Intercept)")
-
-P_FLOOR <- 1e-100
-step_path_plot <- step_path %>%
-  mutate(p_plot = pmax(p, P_FLOOR))
-
-ggplot(step_path_plot, aes(step, p_plot, group = predictor, colour = predictor)) +
-  geom_line(alpha = 0.7) + geom_point(size = 1.3) +
-  geom_hline(yintercept = 0.05, linetype = "dashed", colour = "red") +
-  scale_y_log10(limits = c(P_FLOOR, 1),
-                labels = scales::label_scientific()) +
-  labs(x = "stepAIC step", y = "Pr(>|z|)  (log scale; floored for plotting)",
-       title = "D2 (stepwise): per-step coefficient p-values along the AIC path",
-       subtitle = "Red dashed line = 0.05; p <= 1e-100 is floored to avoid log(0); missing points = predictor not in active set") +
-  theme_minimal() + theme(legend.position = "none")
-
-step_path %>%
-  group_by(predictor) %>%
-  summarise(min_p = min(p, na.rm = TRUE),
-            max_p = max(p, na.rm = TRUE),
-            cross_05 = any(p > 0.05) && any(p < 0.05),
-            .groups = "drop") %>%
-  arrange(desc(cross_05), max_p) %>%
-  mutate(across(c(min_p, max_p), ~ signif(.x, 3))) %>%
-  filter(cross_05) %>%
-  kable(caption = "D2 (stepwise): predictors that crossed the 0.05 line during the AIC path.")
-```
-
-In the rendered Lexical run this crossing table is empty: no predictor moved from
-significant to non-significant (or back) across the AIC path. That does not mean
-every final AIC-selected term has a small Wald p-value. The late binary terms
-`IsDomainIP` and `NoOfQMarkInURL` are useful enough to reduce AIC but have
-unstable individual z-tests, so these p-values are reported descriptively rather
-than as formal post-selection inference.
-
-### Lasso / Elastic-Net: regularisation path
-
-Embedded methods do not give per-step frequentist p-values — they give the *order in which predictors enter or leave the active set as the penalty changes*. The interpretation is parallel: a feature that is only active at very weak regularisation is the embedded analogue of a feature whose stepwise p-value drifts above 0.05.
-
-```{r d2-lasso-path, fig.height=5, fig.width=9}
-old_par <- par(mar = c(5, 5, 5, 2) + 0.1)
-plot(finals$lasso_fit$glmnet.fit, xvar = "lambda", label = FALSE)
-abline(v = -log(finals$lasso_fit$lambda.1se), lty = 2, col = "red")
-mtext("D2 (lasso): coefficient path with lambda.1se marked",
-      side = 3, line = 3, font = 2)
-par(old_par)
-```
-
-```{r d2-en-path, fig.height=5, fig.width=9}
-old_par <- par(mar = c(5, 5, 5, 2) + 0.1)
-plot(finals$en_fit$glmnet.fit, xvar = "lambda", label = FALSE)
-abline(v = -log(finals$en_fit$lambda.1se), lty = 2, col = "red")
-mtext("D2 (elastic-net): coefficient path with lambda.1se marked",
-      side = 3, line = 3, font = 2)
-par(old_par)
-```
-
-```{r d2-zero-lambda}
-active_lambda_table <- function(cvfit, label) {
-  beta_path <- as.matrix(coef(cvfit$glmnet.fit))[-1, , drop = FALSE]
-  lambdas <- cvfit$glmnet.fit$lambda
-  active_lambda <- apply(beta_path, 1, function(row) {
-    nz <- which(row != 0)
-    if (!length(nz)) return(NA_real_)
-    max(lambdas[nz])
-  })
-  tibble(predictor = rownames(beta_path),
-         active_lambda = active_lambda,
-         method = label) %>%
-    arrange(desc(active_lambda))
-}
-
-bind_rows(
-  active_lambda_table(finals$lasso_fit, "lasso"),
-  active_lambda_table(finals$en_fit,    "elastic-net")
-) %>%
-  pivot_wider(names_from = method, values_from = active_lambda) %>%
-  mutate(across(c(lasso, `elastic-net`),
-                ~ ifelse(is.na(.x), "(never)", signif(.x, 3)))) %>%
-  arrange(predictor) %>%
-  kable(caption = "D2 (embedded): largest lambda at which each predictor is active. Larger = retained under stronger regularisation.")
-```
-
-## 6.3 D3 — Test metrics of the reduced fits
-
-We score the method-native final fits on the held-out 20% test split. AUC checks ranking quality across all possible thresholds; **Sensitivity** and **Specificity** check the actual deployment-style operating point at threshold 0.5: how many phishing pages are caught and how many legitimate pages are allowed through.
-
-```{r d3-metrics}
-d3 <- run_or_load("d3_lexical_fs_metrics", function() {
-  list(table = lexical_diagnostic %>%
-         dplyr::select(method, k, test_auc, sensitivity, specificity, accuracy))
-})
-
-d3$table %>%
-  mutate(across(c(test_auc, sensitivity, specificity, accuracy),
-                ~ sprintf("%.4f", .x))) %>%
-  kable(caption = "D3: held-out test metrics of the three Task 3 feature-selection methods.")
-```
-
-**External-validity caveat.** The primary Lexical result is a URL-only internal
-benchmark, not a production guarantee. The much higher FullLite fallback numbers
-are credible as an internal PhiUSIIL random-split benchmark, but should not be
-sold as real-world accuracy. The dataset contains very strong site-structure
-signals: legitimate pages are typically complete websites with titles, social
-links, copyright markers and richer HTML structure, while many phishing pages
-are shallow replicas. Even after removing the six strongest near-leaky
-page-count variables, the remaining Trust/Behavior indicators still make the
-held-out random test split almost separable. A real deployment claim would need
-a harder validation protocol: temporal split, domain/campaign-level holdout, or
-an external phishing feed collected after the training window.
-
----
-
-# 7. Conclusion
+# 8. Conclusion
 
 The primary Lexical URL-only result supports the project story better than the old FullLite headline. Stepwise and lasso reduce the deployable URL filter from 13 predictors to `r length(finals$sw_terms)` / `r length(finals$lasso_terms)` predictors, while method-native D3 scoring meets the explicit AUC, sensitivity and specificity thresholds. This is the version that matches what the user/proxy can see before fetching a page.
 

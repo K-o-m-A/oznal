@@ -29,8 +29,14 @@ source(CORE_PATH)
 ARTIFACTS_DIR <- "artifacts"
 SESSION_FILE  <- file.path(ARTIFACTS_DIR, "app_session.rds")
 WORK_DIR      <- file.path(ARTIFACTS_DIR, "app_session")
+WINNER_PATH   <- file.path(ARTIFACTS_DIR, "winner_svm_lexical.rds")
 if (!dir.exists(ARTIFACTS_DIR)) dir.create(ARTIFACTS_DIR, showWarnings = FALSE)
 if (!dir.exists(WORK_DIR))      dir.create(WORK_DIR,      showWarnings = FALSE)
+
+# Pre-fitted winning model bundle (produced by fit_winner.R). NULL if missing
+# - the Winner showcase tab degrades gracefully with a hint to run the script.
+winner <- if (file.exists(WINNER_PATH))
+  tryCatch(readRDS(WINNER_PATH), error = function(e) NULL) else NULL
 
 save_session <- function(results, active_config = NULL) {
   payload <- list(results = results, active_config = active_config)
@@ -50,6 +56,17 @@ load_session <- function() {
 clear_workdir <- function() {
   files <- list.files(WORK_DIR, full.names = TRUE)
   if (length(files)) unlink(files, force = TRUE)
+}
+
+# Transform a one-row data.frame of RAW lexical feature values into the
+# standardized space the SVM-RBF was trained on. Mirrors fit_core.R:148-160.
+winner_transform <- function(raw_row, w) {
+  for (c in w$pp_continuous)
+    raw_row[[c]] <- log1p(pmax(raw_row[[c]], 0))
+  if (length(w$pp_continuous))
+    raw_row[, w$pp_continuous] <- predict(
+      w$pp, raw_row[, w$pp_continuous, drop = FALSE])
+  raw_row[, w$features, drop = FALSE]
 }
 
 # -----------------------------------------------------------------------------
@@ -224,6 +241,11 @@ ui <- fluidPage(
       uiOutput("active_config_panel"),
       tabsetPanel(
         id = "main_tabs",
+        tabPanel("Winner showcase",
+          br(),
+          uiOutput("winner_info_card"),
+          uiOutput("winner_body")
+        ),
         tabPanel("Summary table",
           br(),
           DTOutput("summary_dt"),
@@ -266,7 +288,7 @@ ui <- fluidPage(
                    "across CV folds - needs >=1 model from each family selected."),
           DTOutput("wilcox_dt")
         ),
-        tabPanel("Surrogate tree (Task 4)",
+        tabPanel("Scenario 4 (Surrogate tree)",
           br(),
           helpText(strong("Task 4 - visualising the RF decision rule."),
                    " A single rpart tree trained on the RF's own predictions ",
@@ -313,33 +335,46 @@ ui <- fluidPage(
                    code("scenario_3.rmd"), " to refresh."),
           verbatimTextOutput("s3_status"),
           br(),
-          h5("Primary Lexical URL-only result (AUC, Sensitivity, Specificity)"),
-          DTOutput("s3_h1_dt"),
+          h5("Primary Lexical URL-only H2 result (AUC, Sensitivity, Specificity)"),
+          DTOutput("s3_h2_dt"),
           br(),
-          h5("Fallback FullLite predictor counts (10 outer CV folds)"),
-          plotOutput("s3_perfold_plot", height = "350px"),
-          br(),
-          h5("D1: which Lexical predictors each method keeps"),
-          plotOutput("s3_d1_plot", height = "650px"),
+          h5("D1: exact Lexical predictors retained by each method"),
+          DTOutput("s3_d1_dt"),
+          helpText("This table is the main D1 output: x = retained by the FS method; blank = dropped."),
           br(),
           h5("D2: stepwise p-value path along the AIC selection"),
-          plotOutput("s3_step_path_plot", height = "450px"),
-          helpText("Each line is one predictor's two-sided z-test p-value ",
-                   "across stepAIC steps. Red dashed = 0.05. Predictors ",
-                   "missing at a step were not in the active set there."),
-          br(),
-          h5("D2: lasso regularisation path"),
-          plotOutput("s3_lasso_path_plot", height = "400px"),
-          br(),
-          h5("D2: elastic-net regularisation path"),
-          plotOutput("s3_en_path_plot", height = "400px"),
-          br(),
+           plotOutput("s3_step_path_plot", height = "450px"),
+           DTOutput("s3_step_path_dt"),
+           helpText("Each line is one predictor's two-sided z-test p-value ",
+                    "across stepAIC steps. The plot is only an overview; the ",
+                    "table below it gives the named feature-level audit. ",
+                    "This is an audit of the selected logistic GLM, not a ",
+                    "performance curve."),
+           br(),
+           h5("D2: embedded coefficients retained at lambda.1se"),
+           plotOutput("s3_embedded_coef_plot", height = "450px"),
+           helpText("This replaces the anonymous glmnet path plot with named ",
+                    "features. Only non-zero coefficients are shown; zero means ",
+                    "the feature was dropped by that embedded method."),
+           br(),
+           h5("D2: embedded feature robustness along the regularisation path"),
+           plotOutput("s3_embedded_lambda_plot", height = "450px"),
+           helpText("Further right means the feature remains active under ",
+                    "stronger regularisation. Elastic-net often keeps groups of ",
+                    "correlated URL predictors instead of dropping as aggressively ",
+                    "as lasso."),
+           br(),
           h5("D3: held-out test metrics of the reduced fits"),
           DTOutput("s3_d3_dt"),
           helpText("Method-native final fits scored on the same 20% test split ",
-                   "as Scenario 2: stepwise/lasso/elastic-net final models only. ",
-                   "AUC checks ranking; Sensitivity and ",
-                   "Specificity check the threshold-0.5 deployment point.")
+                    "as Scenario 2: stepwise/lasso/elastic-net final models only. ",
+                    "AUC checks ranking; Sensitivity and ",
+                    "Specificity check the threshold-0.5 deployment point."),
+          br(),
+          h5("Secondary FullLite fallback predictor counts (10 outer CV folds)"),
+          plotOutput("s3_perfold_plot", height = "350px"),
+          helpText("Fallback-only diagnostic: selected-predictor counts on the 34-feature FullLite pool. ",
+                   "This is not the primary Lexical Task 3 claim.")
         ),
         tabPanel("Data preview",
           br(),
@@ -1091,7 +1126,7 @@ server <- function(input, output, session) {
             if (is.null(pf)) "not cached" else paste0(length(pf$k_step), " folds"))
   })
 
-  output$s3_h1_dt <- renderDT({
+  output$s3_h2_dt <- renderDT({
     d3 <- s3_d3_data()
     if (is.null(d3) || is.null(d3$table)) return(NULL)
     d3$table %>%
@@ -1127,7 +1162,7 @@ server <- function(input, output, session) {
     p
   })
 
-  output$s3_d1_plot <- renderPlot({
+  output$s3_d1_dt <- renderDT({
     fp <- s3_finals()
     if (is.null(fp)) return(NULL)
     all_terms <- sort(unique(c(fp$sw_terms, fp$lasso_terms,
@@ -1140,29 +1175,30 @@ server <- function(input, output, session) {
     ) %>%
       mutate(score = stepwise + lasso + elastic_net) %>%
       arrange(desc(score), predictor)
-    long <- d1 %>%
-      pivot_longer(c(stepwise, lasso, elastic_net),
-                   names_to = "method", values_to = "selected") %>%
-      mutate(method = factor(method,
-                             levels = c("stepwise", "elastic_net", "lasso")),
-             predictor = factor(predictor, levels = rev(d1$predictor)))
-    ggplot(long, aes(method, predictor, fill = selected)) +
-      geom_tile(colour = "white") +
-      scale_fill_manual(values = c(`TRUE` = "steelblue",
-                                   `FALSE` = "grey92"), guide = "none") +
-      labs(x = NULL, y = NULL) +
-      theme_minimal(base_size = 12) + theme(panel.grid = element_blank())
+    d1 %>%
+      transmute(
+        predictor,
+        stepwise = ifelse(stepwise, "x", ""),
+        lasso = ifelse(lasso, "x", ""),
+        elastic_net = ifelse(elastic_net, "x", "")
+      ) %>%
+      datatable(options = list(dom = "t", pageLength = 20),
+                rownames = FALSE)
   })
+
+  s3_step_path_data <- function(fp) {
+    keep_mat <- fp$stepwise_fit$keep
+    n_steps <- if (is.matrix(keep_mat)) ncol(keep_mat) else length(keep_mat)
+    map_dfr(seq_len(n_steps), function(i) {
+      k_i <- if (is.matrix(keep_mat)) keep_mat[, i] else keep_mat[[i]]
+      tibble(step = i, predictor = k_i$terms, p = k_i$p, AIC = k_i$AIC)
+    }) %>% filter(predictor != "(Intercept)")
+  }
 
   output$s3_step_path_plot <- renderPlot({
     fp <- s3_finals()
     if (is.null(fp) || is.null(fp$stepwise_fit$keep)) return(NULL)
-    keep_mat <- fp$stepwise_fit$keep
-    n_steps <- if (is.matrix(keep_mat)) ncol(keep_mat) else length(keep_mat)
-    step_path <- map_dfr(seq_len(n_steps), function(i) {
-      k_i <- if (is.matrix(keep_mat)) keep_mat[, i] else keep_mat[[i]]
-      tibble(step = i, predictor = k_i$terms, p = k_i$p, AIC = k_i$AIC)
-    }) %>% filter(predictor != "(Intercept)")
+    step_path <- s3_step_path_data(fp)
     p_floor <- 1e-100
     step_path_plot <- step_path %>% mutate(p_plot = pmax(p, p_floor))
     ggplot(step_path_plot, aes(step, p_plot, group = predictor, colour = predictor)) +
@@ -1175,28 +1211,91 @@ server <- function(input, output, session) {
       theme_minimal(base_size = 12) + theme(legend.position = "none")
   })
 
-  output$s3_lasso_path_plot <- renderPlot({
+  output$s3_step_path_dt <- renderDT({
     fp <- s3_finals()
-    if (is.null(fp)) return(NULL)
-    old_par <- par(mar = c(5, 5, 5, 2) + 0.1)
-    on.exit(par(old_par), add = TRUE)
-    plot(fp$lasso_fit$glmnet.fit, xvar = "lambda", label = FALSE)
-    abline(v = -log(fp$lasso_fit$lambda.1se), lty = 2, col = "red")
-    mtext(sprintf("Lasso path (red dashed = lambda.1se = %.4g)",
-                  fp$lasso_fit$lambda.1se),
-          side = 3, line = 3, font = 2)
+    if (is.null(fp) || is.null(fp$stepwise_fit$keep)) return(NULL)
+    s3_step_path_data(fp) %>%
+      group_by(predictor) %>%
+      arrange(step, .by_group = TRUE) %>%
+      summarise(
+        first_step = min(step),
+        last_step = max(step),
+        min_p = min(p, na.rm = TRUE),
+        max_p = max(p, na.rm = TRUE),
+        final_p = dplyr::last(p),
+        crosses_05 = any(p > 0.05) && any(p < 0.05),
+        .groups = "drop"
+      ) %>%
+      arrange(desc(crosses_05), desc(max_p), predictor) %>%
+      mutate(across(c(min_p, max_p, final_p), ~ signif(.x, 3))) %>%
+      datatable(options = list(dom = "t", pageLength = 12),
+                rownames = FALSE)
   })
 
-  output$s3_en_path_plot <- renderPlot({
+  s3_coef_at_lambda <- function(cvfit, label, s = "lambda.1se") {
+    beta <- as.matrix(coef(cvfit, s = s))[-1, , drop = FALSE]
+    tibble(
+      predictor = rownames(beta),
+      method = label,
+      coefficient = as.numeric(beta[, 1]),
+      retained = coefficient != 0
+    )
+  }
+
+  s3_active_lambda_table <- function(cvfit, label) {
+    beta_path <- as.matrix(coef(cvfit$glmnet.fit))[-1, , drop = FALSE]
+    lambdas <- cvfit$glmnet.fit$lambda
+    active_lambda <- apply(beta_path, 1, function(row) {
+      nz <- which(row != 0)
+      if (!length(nz)) return(NA_real_)
+      max(lambdas[nz])
+    })
+    tibble(
+      predictor = rownames(beta_path),
+      active_lambda = active_lambda,
+      method = label
+    )
+  }
+
+  output$s3_embedded_coef_plot <- renderPlot({
     fp <- s3_finals()
     if (is.null(fp)) return(NULL)
-    old_par <- par(mar = c(5, 5, 5, 2) + 0.1)
-    on.exit(par(old_par), add = TRUE)
-    plot(fp$en_fit$glmnet.fit, xvar = "lambda", label = FALSE)
-    abline(v = -log(fp$en_fit$lambda.1se), lty = 2, col = "red")
-    mtext(sprintf("Elastic-Net path (red dashed = lambda.1se = %.4g)",
-                  fp$en_fit$lambda.1se),
-          side = 3, line = 3, font = 2)
+    bind_rows(
+      s3_coef_at_lambda(fp$lasso_fit, "lasso"),
+      s3_coef_at_lambda(fp$en_fit, "elastic-net")
+    ) %>%
+      filter(retained) %>%
+      mutate(predictor = reorder(predictor, abs(coefficient))) %>%
+      ggplot(aes(coefficient, predictor, fill = method)) +
+      geom_col(show.legend = FALSE) +
+      facet_wrap(~ method, scales = "free_y") +
+      geom_vline(xintercept = 0, colour = "grey50") +
+      labs(
+        x = "Coefficient at lambda.1se",
+        y = NULL
+      ) +
+      theme_minimal(base_size = 12)
+  })
+
+  output$s3_embedded_lambda_plot <- renderPlot({
+    fp <- s3_finals()
+    if (is.null(fp)) return(NULL)
+    bind_rows(
+      s3_active_lambda_table(fp$lasso_fit, "lasso"),
+      s3_active_lambda_table(fp$en_fit, "elastic-net")
+    ) %>%
+      filter(!is.na(active_lambda)) %>%
+      mutate(predictor = reorder(predictor, active_lambda)) %>%
+      ggplot(aes(active_lambda, predictor, colour = method)) +
+      geom_point(size = 2.5, alpha = 0.9,
+                 position = position_dodge(width = 0.45)) +
+      scale_x_log10() +
+      labs(
+        x = "Largest lambda where coefficient is non-zero (log scale)",
+        y = NULL,
+        colour = "Method"
+      ) +
+      theme_minimal(base_size = 12)
   })
 
   output$s3_d3_dt <- renderDT({
@@ -1205,6 +1304,224 @@ server <- function(input, output, session) {
     d3$table %>%
       mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
       datatable(options = list(dom = "t"), rownames = FALSE)
+  })
+
+  # ---------------------------------------------------------------------------
+  # Winner showcase tab - SVM-RBF on Lexical (loaded from artifacts/winner_svm_lexical.rds).
+  # Two interactive controls: classification threshold + per-feature URL inputs.
+  # All visualizations recompute reactively without a refit.
+  # ---------------------------------------------------------------------------
+
+  output$winner_info_card <- renderUI({
+    if (is.null(winner)) return(NULL)
+    m <- winner$meta
+    div(class = "config-panel",
+        strong("Winning model: "),
+        tags$code(sprintf("%s on %s tier", m$model, m$tier)),
+        span(class = "config-meta",
+             sprintf(" - %d features, train n=%s, test n=%s, test AUC=%.4f",
+                     m$n_features,
+                     format(m$n_train, big.mark = ","),
+                     format(m$n_test,  big.mark = ","),
+                     m$test_auc)),
+        div(class = "config-row",
+            span(class = "config-model",
+                 strong("Hyperparams: "),
+                 tags$code(sprintf("C=%g, sigma=%g", m$C, m$sigma)))))
+  })
+
+  output$winner_body <- renderUI({
+    if (is.null(winner)) {
+      return(div(
+        style = "padding:18px;background:#FFF7E6;border-left:4px solid #E0A800;
+                 border-radius:4px;margin-top:10px;",
+        h4("Winning model artefakt nenajdeny"),
+        p("Subor ", tags$code(WINNER_PATH), " neexistuje. ",
+          "Spusti v R / RStudio (na Windows strane, nie WSL):"),
+        tags$pre("setwd(\"C:/Users/frede/PycharmProjects/oznal-project\")\nsource(\"fit_winner.R\")"),
+        p("Trvanie: par minut. Vytvori sa artefakt s natrenovanym SVM-RBF ",
+          "modelom + test pravdepodobnostami, ktore tento tab pouziva na ",
+          "real-time vizualizacie a predikcie.")
+      ))
+    }
+
+    feat_inputs <- lapply(winner$features, function(f) {
+      stat <- winner$feature_stats[[f]]
+      id   <- paste0("winner_", f)
+      if (isTRUE(stat$is_binary)) {
+        selectInput(id, f,
+                    choices  = c("0" = 0, "1" = 1),
+                    selected = as.character(round(stat$median)))
+      } else {
+        lo <- floor(stat$min); hi <- ceiling(stat$max)
+        # slider needs hi > lo - guard against degenerate constants
+        if (hi <= lo) hi <- lo + 1
+        sliderInput(id, f, min = lo, max = hi,
+                    value = round(stat$median), step = 1)
+      }
+    })
+
+    fluidRow(
+      column(4,
+        h4("Nastavenia"),
+        sliderInput("winner_threshold",
+                    "Klasifikacny prah (Phishing ak prob >= prah)",
+                    min = 0, max = 1, value = 0.5, step = 0.01),
+        actionButton("winner_reset", "Reset na defaulty",
+                     class = "btn-default", style = "margin-bottom:10px;"),
+        tags$details(class = "hp-section", open = NA,
+          tags$summary(sprintf("URL features (%d)", length(winner$features))),
+          helpText("Hodnoty pre hypoteticku URL. Predikcia sa prepocita ",
+                   "real-time pri kazdej zmene."),
+          do.call(tagList, feat_inputs))
+      ),
+      column(8,
+        h4("Live predikcia hypotetickej URL"),
+        uiOutput("winner_verdict"),
+        br(),
+        h4("Vykon na test sete pri zvolenom prahu"),
+        uiOutput("winner_metrics_row"),
+        br(),
+        fluidRow(
+          column(6,
+            h5("Confusion matrix"),
+            tableOutput("winner_cm_table")),
+          column(6,
+            h5("ROC krivka + operating point"),
+            plotOutput("winner_roc_plot", height = "260px"))
+        ),
+        br(),
+        h5("Histogram predikovanych pravdepodobnosti (test set)"),
+        plotOutput("winner_hist_plot", height = "260px"),
+        helpText("Cervena ciara = aktualny prah. Sirka prekryvu medzi ",
+                 "triedami pri tejto hodnote = miera neistoty modelu.")
+      )
+    )
+  })
+
+  winner_metrics <- reactive({
+    req(winner)
+    thr <- input$winner_threshold
+    pred <- factor(ifelse(winner$test_prob >= thr, "Phishing", "Legitimate"),
+                   levels = c("Phishing", "Legitimate"))
+    cm <- caret::confusionMatrix(pred, winner$test_label, positive = "Phishing")
+    list(
+      cm   = cm$table,
+      acc  = unname(cm$overall["Accuracy"]),
+      sens = unname(cm$byClass["Sensitivity"]),
+      spec = unname(cm$byClass["Specificity"]),
+      f1   = unname(cm$byClass["F1"])
+    )
+  })
+
+  winner_user_prob <- reactive({
+    req(winner)
+    vals <- lapply(winner$features, function(f) {
+      v <- input[[paste0("winner_", f)]]
+      req(v)
+      as.numeric(v)
+    })
+    raw <- as.data.frame(setNames(vals, winner$features),
+                         stringsAsFactors = FALSE)
+    std <- winner_transform(raw, winner)
+    as.numeric(predict(winner$fit, std, type = "prob")[, "Phishing"])
+  })
+
+  output$winner_verdict <- renderUI({
+    req(winner)
+    p   <- winner_user_prob()
+    thr <- input$winner_threshold
+    is_phish <- p >= thr
+    bg <- if (is_phish) "#FDECEA" else "#E8F5E9"
+    bd <- if (is_phish) "#C62828" else "#2E7D32"
+    label <- if (is_phish) "PHISHING" else "LEGITIMATE"
+    div(style = sprintf(
+        "padding:14px 18px;background:%s;border-left:6px solid %s;
+         border-radius:4px;font-size:18px;", bg, bd),
+        strong(style = sprintf("color:%s;font-size:22px;", bd), label),
+        span(style = "margin-left:14px;color:#333;",
+             sprintf("Prob(Phishing) = %.4f", p)),
+        span(style = "margin-left:14px;color:#666;font-size:13px;",
+             sprintf("(prah = %.2f)", thr)))
+  })
+
+  output$winner_metrics_row <- renderUI({
+    m <- winner_metrics()
+    chip <- function(label, value, color) {
+      div(style = sprintf(
+          "display:inline-block;padding:8px 14px;margin-right:10px;
+           background:%s;border-radius:4px;border:1px solid #d1d5db;",
+          color),
+          strong(label), ": ", sprintf("%.4f", value))
+    }
+    tagList(
+      chip("Accuracy",    m$acc,  "#F0F7FF"),
+      chip("Sensitivity", m$sens, "#FFF7E6"),
+      chip("Specificity", m$spec, "#FFF7E6"),
+      chip("F1",          m$f1,   "#F0F7FF")
+    )
+  })
+
+  output$winner_cm_table <- renderTable({
+    cm <- winner_metrics()$cm
+    df <- as.data.frame.matrix(cm)
+    df <- cbind(`Predicted \\ Actual` = rownames(df), df)
+    df
+  }, striped = TRUE, bordered = TRUE, align = "lcc", rownames = FALSE)
+
+  output$winner_roc_plot <- renderPlot({
+    req(winner)
+    m <- winner_metrics()
+    roc_df <- tibble(
+      fpr = 1 - winner$roc_obj$specificities,
+      tpr = winner$roc_obj$sensitivities
+    )
+    op <- tibble(fpr = 1 - m$spec, tpr = m$sens)
+    ggplot(roc_df, aes(fpr, tpr)) +
+      geom_abline(slope = 1, intercept = 0,
+                  colour = "grey70", linetype = "dashed") +
+      geom_path(colour = "#4C78A8", linewidth = 0.9) +
+      geom_point(data = op, colour = "#C62828", size = 4) +
+      geom_text(data = op,
+                aes(label = sprintf("(%.3f, %.3f)", fpr, tpr)),
+                hjust = -0.15, vjust = 0.5, size = 3.6, colour = "#C62828") +
+      coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+      labs(x = "False positive rate (1 - Specificity)",
+           y = "True positive rate (Sensitivity)") +
+      theme_minimal(base_size = 12)
+  })
+
+  output$winner_hist_plot <- renderPlot({
+    req(winner)
+    thr <- input$winner_threshold
+    df <- tibble(prob = winner$test_prob,
+                 class = winner$test_label)
+    ggplot(df, aes(prob, fill = class)) +
+      geom_histogram(bins = 50, position = "identity", alpha = 0.55,
+                     colour = "white", linewidth = 0.1) +
+      geom_vline(xintercept = thr, colour = "#C62828",
+                 linewidth = 0.9, linetype = "dashed") +
+      scale_fill_manual(values = c(Phishing = "#C62828",
+                                   Legitimate = "#2E7D32")) +
+      labs(x = "Predicted P(Phishing)", y = "Pocet test URLs",
+           fill = NULL) +
+      theme_minimal(base_size = 12) +
+      theme(legend.position = "top")
+  })
+
+  observeEvent(input$winner_reset, {
+    req(winner)
+    for (f in winner$features) {
+      stat <- winner$feature_stats[[f]]
+      id   <- paste0("winner_", f)
+      if (isTRUE(stat$is_binary)) {
+        updateSelectInput(session, id,
+                          selected = as.character(round(stat$median)))
+      } else {
+        updateSliderInput(session, id, value = round(stat$median))
+      }
+    }
+    updateSliderInput(session, "winner_threshold", value = 0.5)
   })
 
   # On disconnect: kill orphan background process so it doesn't keep burning CPU.

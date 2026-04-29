@@ -3,7 +3,29 @@
 R Markdown notebooks (`phishing.rmd`, `scenario_2.rmd`, `scenario_3.rmd`)
 plus a Shiny application (`app.R`) for interactive model exploration.
 
-## Run the Shiny app
+## Run via Docker (recommended for evaluators)
+
+Requires Docker Desktop (Win/Mac) or Docker Engine (Linux).
+
+```bash
+docker compose up app
+```
+
+First build downloads R 4.5.3 and all packages (~5-10 min). The Shiny app is
+then served at <http://localhost:3838>.
+
+Optional services:
+
+```bash
+docker compose run --rm test     # runs test_app.R smoke test (one fit per family)
+docker compose run --rm render   # knits all three .rmd notebooks to ./rendered/
+```
+
+R version (4.5.3) and every package are pinned via the Posit Public Package
+Manager snapshot dated `2026-04-15`, so each evaluator gets identical versions
+of `tidyverse`, `shiny`, `caret`, etc.
+
+## Run locally (no Docker)
 
 ```powershell
 Rscript requirements.R
@@ -47,3 +69,5 @@ The app expects `PhiUSIIL_Phishing_URL_Dataset.csv` next to `app.R`
 | `requirements.R`             | Installs all R packages              |
 | `scenario_2/artifacts/*.rds` | Cached fits used by `scenario_2.rmd` |
 | `scenario_3/artifacts/*.rds` | Cached fits used by `scenario_3.rmd` |
+| `Dockerfile`                 | Pinned R 4.5.3 + PPM-snapshotted packages |
+| `docker-compose.yml`         | `app` / `test` / `render` services   |

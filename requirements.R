@@ -3,7 +3,8 @@
 pkgs <- c(
   "shiny", "DT", "tidyverse", "caret", "glmnet", "MASS", "klaR",
   "randomForest", "kernlab", "pROC", "digest", "rpart", "rpart.plot",
-  "e1071", "ggrepel", "shinyjs", "callr"
+  "e1071", "ggrepel", "shinyjs", "callr",
+  "corrplot", "scales", "knitr", "rmarkdown"
 )
 to_install <- setdiff(pkgs, rownames(installed.packages()))
 if (length(to_install)) {
