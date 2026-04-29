@@ -121,7 +121,7 @@ ui <- fluidPage(
     }
     .config-panel .config-empty { color: #9ca3af; font-style: italic; }
   "))),
-  titlePanel("Phishing Detection - Scenario 2 (Parametric vs Non-parametric)"),
+  titlePanel("Phishing Detection"),
 
   sidebarLayout(
     sidebarPanel(
@@ -300,6 +300,46 @@ ui <- fluidPage(
           br(),
           h5("Fidelity saturation - best (cp, minbucket) per depth"),
           DTOutput("task4_depth_dt")
+        ),
+        tabPanel("Scenario 3 (FS)",
+          br(),
+          helpText(strong("Task 3 - feature-selection comparison."),
+                   " Compares one algorithmic FS method (bidirectional ",
+                   "stepwise, AIC) and two embedded ones (lasso alpha=1, ",
+                   "elastic-net alpha=0.5). The primary result is Lexical ",
+                   "URL-only; FullLite is kept as a fallback benchmark. ",
+                   "All numbers come from cached fits in ",
+                   code("scenario_3/artifacts/"), "; re-knit ",
+                   code("scenario_3.rmd"), " to refresh."),
+          verbatimTextOutput("s3_status"),
+          br(),
+          h5("Primary Lexical URL-only result (AUC, Sensitivity, Specificity)"),
+          DTOutput("s3_h1_dt"),
+          br(),
+          h5("Fallback FullLite predictor counts (10 outer CV folds)"),
+          plotOutput("s3_perfold_plot", height = "350px"),
+          br(),
+          h5("D1: which Lexical predictors each method keeps"),
+          plotOutput("s3_d1_plot", height = "650px"),
+          br(),
+          h5("D2: stepwise p-value path along the AIC selection"),
+          plotOutput("s3_step_path_plot", height = "450px"),
+          helpText("Each line is one predictor's two-sided z-test p-value ",
+                   "across stepAIC steps. Red dashed = 0.05. Predictors ",
+                   "missing at a step were not in the active set there."),
+          br(),
+          h5("D2: lasso regularisation path"),
+          plotOutput("s3_lasso_path_plot", height = "400px"),
+          br(),
+          h5("D2: elastic-net regularisation path"),
+          plotOutput("s3_en_path_plot", height = "400px"),
+          br(),
+          h5("D3: held-out test metrics of the reduced fits"),
+          DTOutput("s3_d3_dt"),
+          helpText("Method-native final fits scored on the same 20% test split ",
+                   "as Scenario 2: stepwise/lasso/elastic-net final models only. ",
+                   "AUC checks ranking; Sensitivity and ",
+                   "Specificity check the threshold-0.5 deployment point.")
         ),
         tabPanel("Data preview",
           br(),
@@ -783,9 +823,9 @@ server <- function(input, output, session) {
     x_min <- max(0.4, min(d$cv_auc_mean - d$cv_auc_sd, na.rm = TRUE) - 0.01)
 
     ggplot(d, aes(x = cv_auc_mean, y = model, colour = family)) +
-      geom_errorbarh(aes(xmin = pmax(cv_auc_mean - cv_auc_sd, 0),
-                         xmax = pmin(cv_auc_mean + cv_auc_sd, 1)),
-                     height = 0.25, linewidth = 0.6) +
+      geom_errorbar(aes(xmin = pmax(cv_auc_mean - cv_auc_sd, 0),
+                        xmax = pmin(cv_auc_mean + cv_auc_sd, 1)),
+                    orientation = "y", width = 0.25, linewidth = 0.6) +
       geom_point(size = 3.5) +
       geom_text(aes(label = sprintf("%.4f", cv_auc_mean)),
                 hjust = -0.2, size = 3.2, colour = "grey25",
@@ -1015,6 +1055,155 @@ server <- function(input, output, session) {
                 `Sens vs RF` = round(sens_vs_rf, 4),
                 `Spec vs RF` = round(spec_vs_rf, 4),
                 `Tree AUC`   = round(auc,        4)) %>%
+      datatable(options = list(dom = "t"), rownames = FALSE)
+  })
+
+  # ---- Scenario 3: feature-selection comparison tab -----------------------
+  # Reads cached fits produced by scenario_3.rmd. Read-only viewer; the
+  # notebook is the single source of truth for Task 3.
+
+  S3_DIR <- "scenario_3/artifacts"
+
+  s3_read <- function(name) {
+    path <- file.path(S3_DIR, paste0(name, ".rds"))
+    if (!file.exists(path)) return(NULL)
+    tryCatch(readRDS(path), error = function(e) NULL)
+  }
+  s3_perfold <- reactive(s3_read("perfold"))
+  s3_finals  <- reactive(s3_read("lexical_final"))
+  s3_full_finals <- reactive(s3_read("finals"))
+  s3_d3_data <- reactive({
+    s3_read("d3_lexical_fs_metrics")
+  })
+
+  output$s3_status <- renderText({
+    fp <- s3_finals(); d3 <- s3_d3_data()
+    if (is.null(fp) || is.null(d3)) {
+      return(paste(
+        "No cached Scenario 3 fits found.",
+        sprintf("Expected primary files: %s/{lexical_final,d3_lexical_fs_metrics}.rds", S3_DIR),
+        "Run: rmarkdown::render('scenario_3.rmd') to populate the cache.",
+        sep = "\n"))
+    }
+    pf <- s3_perfold()
+    sprintf("Loaded Lexical primary fits (%d selected by stepwise, %d by lasso, %d by EN). FullLite fallback folds: %s.",
+            length(fp$sw_terms), length(fp$lasso_terms), length(fp$en_terms),
+            if (is.null(pf)) "not cached" else paste0(length(pf$k_step), " folds"))
+  })
+
+  output$s3_h1_dt <- renderDT({
+    d3 <- s3_d3_data()
+    if (is.null(d3) || is.null(d3$table)) return(NULL)
+    d3$table %>%
+      mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
+      datatable(options = list(dom = "t"), rownames = FALSE)
+  })
+
+  output$s3_perfold_plot <- renderPlot({
+    pf <- s3_perfold()
+    if (is.null(pf)) return(NULL)
+    fp <- s3_full_finals()
+    pool <- if (!is.null(fp)) length(fp$X_names) else NA_real_
+    long <- tibble(
+      fold   = rep(seq_along(pf$k_step), 3),
+      method = rep(c("stepwise", "lasso", "elastic-net"),
+                   each = length(pf$k_step)),
+      k      = c(pf$k_step, pf$k_lasso, pf$k_en)
+    ) %>%
+      mutate(method = factor(method,
+                             levels = c("stepwise", "elastic-net", "lasso")))
+    p <- ggplot(long, aes(method, k, fill = method)) +
+      geom_boxplot(alpha = 0.6, outlier.shape = NA) +
+      geom_point(position = position_jitter(width = 0.1, seed = 1), size = 1.6) +
+      labs(x = NULL, y = "selected predictors per fold") +
+      theme_minimal(base_size = 13) + theme(legend.position = "none")
+    if (!is.na(pool)) {
+      p <- p + geom_hline(yintercept = pool, linetype = "dashed",
+                          colour = "grey40") +
+        annotate("text", x = 0.6, y = pool + 0.3,
+                 label = sprintf("FullLite pool = %d", pool),
+                 hjust = 0, size = 3.4, colour = "grey30")
+    }
+    p
+  })
+
+  output$s3_d1_plot <- renderPlot({
+    fp <- s3_finals()
+    if (is.null(fp)) return(NULL)
+    all_terms <- sort(unique(c(fp$sw_terms, fp$lasso_terms,
+                               fp$en_terms, fp$X_names)))
+    d1 <- tibble(
+      predictor   = all_terms,
+      stepwise    = predictor %in% fp$sw_terms,
+      lasso       = predictor %in% fp$lasso_terms,
+      elastic_net = predictor %in% fp$en_terms
+    ) %>%
+      mutate(score = stepwise + lasso + elastic_net) %>%
+      arrange(desc(score), predictor)
+    long <- d1 %>%
+      pivot_longer(c(stepwise, lasso, elastic_net),
+                   names_to = "method", values_to = "selected") %>%
+      mutate(method = factor(method,
+                             levels = c("stepwise", "elastic_net", "lasso")),
+             predictor = factor(predictor, levels = rev(d1$predictor)))
+    ggplot(long, aes(method, predictor, fill = selected)) +
+      geom_tile(colour = "white") +
+      scale_fill_manual(values = c(`TRUE` = "steelblue",
+                                   `FALSE` = "grey92"), guide = "none") +
+      labs(x = NULL, y = NULL) +
+      theme_minimal(base_size = 12) + theme(panel.grid = element_blank())
+  })
+
+  output$s3_step_path_plot <- renderPlot({
+    fp <- s3_finals()
+    if (is.null(fp) || is.null(fp$stepwise_fit$keep)) return(NULL)
+    keep_mat <- fp$stepwise_fit$keep
+    n_steps <- if (is.matrix(keep_mat)) ncol(keep_mat) else length(keep_mat)
+    step_path <- map_dfr(seq_len(n_steps), function(i) {
+      k_i <- if (is.matrix(keep_mat)) keep_mat[, i] else keep_mat[[i]]
+      tibble(step = i, predictor = k_i$terms, p = k_i$p, AIC = k_i$AIC)
+    }) %>% filter(predictor != "(Intercept)")
+    p_floor <- 1e-100
+    step_path_plot <- step_path %>% mutate(p_plot = pmax(p, p_floor))
+    ggplot(step_path_plot, aes(step, p_plot, group = predictor, colour = predictor)) +
+      geom_line(alpha = 0.7) + geom_point(size = 1.2) +
+      geom_hline(yintercept = 0.05, linetype = "dashed", colour = "red") +
+      scale_y_log10(limits = c(p_floor, 1),
+                    labels = scales::label_scientific()) +
+      labs(x = "stepAIC step",
+           y = "Pr(>|z|)  (log scale; floored for plotting)") +
+      theme_minimal(base_size = 12) + theme(legend.position = "none")
+  })
+
+  output$s3_lasso_path_plot <- renderPlot({
+    fp <- s3_finals()
+    if (is.null(fp)) return(NULL)
+    old_par <- par(mar = c(5, 5, 5, 2) + 0.1)
+    on.exit(par(old_par), add = TRUE)
+    plot(fp$lasso_fit$glmnet.fit, xvar = "lambda", label = FALSE)
+    abline(v = -log(fp$lasso_fit$lambda.1se), lty = 2, col = "red")
+    mtext(sprintf("Lasso path (red dashed = lambda.1se = %.4g)",
+                  fp$lasso_fit$lambda.1se),
+          side = 3, line = 3, font = 2)
+  })
+
+  output$s3_en_path_plot <- renderPlot({
+    fp <- s3_finals()
+    if (is.null(fp)) return(NULL)
+    old_par <- par(mar = c(5, 5, 5, 2) + 0.1)
+    on.exit(par(old_par), add = TRUE)
+    plot(fp$en_fit$glmnet.fit, xvar = "lambda", label = FALSE)
+    abline(v = -log(fp$en_fit$lambda.1se), lty = 2, col = "red")
+    mtext(sprintf("Elastic-Net path (red dashed = lambda.1se = %.4g)",
+                  fp$en_fit$lambda.1se),
+          side = 3, line = 3, font = 2)
+  })
+
+  output$s3_d3_dt <- renderDT({
+    d3 <- s3_d3_data()
+    if (is.null(d3) || is.null(d3$table)) return(NULL)
+    d3$table %>%
+      mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
       datatable(options = list(dom = "t"), rownames = FALSE)
   })
 

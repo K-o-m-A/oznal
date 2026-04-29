@@ -1,7 +1,7 @@
 # Phishing Detection — Capstone Project
 
-R Markdown notebooks (`phishing.rmd`, `scenario_2.rmd`) plus a Shiny
-application (`app.R`) for interactive model exploration.
+R Markdown notebooks (`phishing.rmd`, `scenario_2.rmd`, `scenario_3.rmd`)
+plus a Shiny application (`app.R`) for interactive model exploration.
 
 ## Run the Shiny app
 
@@ -13,7 +13,7 @@ Rscript -e "shiny::runApp('app.R', launch.browser = TRUE)"
 The app expects `PhiUSIIL_Phishing_URL_Dataset.csv` next to `app.R`
 (or upload it from the **Data** sidebar panel).
 
-## What the app does (mirrors `scenario_2.rmd`)
+## What the app does
 
 1. **Load & clean** PhiUSIIL CSV — strips BOM, drops EDA-excluded columns
    (IDs, computed scores, redundant binaries, linearly-dependent ratios).
@@ -33,6 +33,7 @@ The app expects `PhiUSIIL_Phishing_URL_Dataset.csv` next to `app.R`
    - `Quality @ 0.5` — Accuracy / F1 / Precision / Sens / Spec at the default 0.5 threshold.
    - `ROC curves` — held-out test ROC per model, faceted by tier.
    - `Wilcoxon (H1)` — per-tier paired Wilcoxon (non-param > param).
+   - `Scenario 3 (FS)` — cached stepwise/lasso/elastic-net feature-selection comparison from `scenario_3/artifacts/*.rds`.
    - `Data preview` — split sizes and the first 50 training rows.
 
 ## Files
@@ -40,7 +41,9 @@ The app expects `PhiUSIIL_Phishing_URL_Dataset.csv` next to `app.R`
 | File                         | Purpose                              |
 |------------------------------|--------------------------------------|
 | `phishing.rmd`               | EDA notebook                         |
-| `scenario_2.rmd`             | Scenario 2 modelling notebook        |
+| `scenario_2.rmd`             | Scenario 2 modelling notebook (parametric vs non-parametric) |
+| `scenario_3.rmd`             | Scenario 3 notebook (stepwise vs lasso vs elastic-net feature selection) |
 | `app.R`                      | Shiny application                    |
 | `requirements.R`             | Installs all R packages              |
 | `scenario_2/artifacts/*.rds` | Cached fits used by `scenario_2.rmd` |
+| `scenario_3/artifacts/*.rds` | Cached fits used by `scenario_3.rmd` |

@@ -11,17 +11,17 @@ samotnú adresu URL — bez toho, aby stránku stiahol. Otázka práce znie:
 **stačí na rozoznanie phishingu pozrieť len text URL, alebo treba
 aj obsah stránky?**
 
-**Čo je hypotéza a prečo ich testujeme dve.**
+**Čo je hypotéza a prečo ich testujeme tri scenáre.**
 - **H1 (Scenario 2)** skúma, *ktorý typ modelu* si poradí lepšie na
   slabom signáli (len URL). Modely delíme na „parametrické" (jednoduchší
   tvar, napr. regresia) a „neparametrické" (flexibilnejšie, napr. les
   rozhodovacích stromov). Tušíme, že keď je signál slabý, zložitejšie
   modely dokážu vyťažiť viac.
-- **H2 (Scenario 5)** skúma, *ako drahé je zjednodušenie dát* (PCA =
-  stlačenie mnohých stĺpcov do pár hlavných „smerov"). Keď je signál
-  skrytý v kombináciách príznakov, stlačenie ho pokazí; keď je signál
-  priamočiary, stlačenie je lacné.
-
+- **H1 (Scenario 3)** skúma nie typ modelu, ale *výber príznakov* pre
+  URL-only filter: či vieme z 13 Lexical premenných vybrať menší deployable
+  set so silným AUC, Sensitivity a Specificity. Konkrétne: `k <= 9`,
+  AUC aspoň 0.95, Sensitivity aspoň 0.94 a Specificity aspoň 0.75.
+  FullLite ostáva fallback benchmark, ak by URL-only nestačilo.
 **Čo je EDA a prečo je prvá.** *Exploratory Data Analysis* = pozriem sa
 na dáta **predtým**, ako trénujem model. Spočítam základné štatistiky,
 nakreslím grafy, pozriem koreláciu. Zmyslom je rozhodnúť, čo z dát má
@@ -319,40 +319,6 @@ nechutný koláč.
 (C, σ), ale **neparametrický** v štatistickom zmysle — nerobí
 parametrický predpoklad o rozdelení.
 
-### PCA (Principal Component Analysis, analýza hlavných komponentov)
-Technika, ktorá z mnohých korelovaných príznakov vyrobí **menší počet
-nových príznakov** (tzv. hlavných komponentov, PC), z ktorých každý je
-lineárnou kombináciou pôvodných a ktoré sú medzi sebou **nekorelované**.
-
-*Ľudskou rečou:* Predstav si, že máš 40 meradiel URL a mnohé z nich
-merajú skoro to isté (dĺžka, počet písmen, počet číslic — všetky rastú
-s „veľkosťou URL"). PCA nájde skrytú os „veľkosť URL" a stlačí tie
-vzájomne závislé merania do jedného čísla. Urobí to pre každú
-„nezávislú dimenziu variability" v dátach. Výsledok: pár nových
-súradníc namiesto pôvodných 40.
-
-- **PC1** je smer, v ktorom sa dáta najviac líšia (najväčšia variabilita).
-- **PC2** je smer kolmý na PC1 s druhou najväčšou variabilitou. Atď.
-- **Variance explained** = koľko percent pôvodnej variability dát daná
-  os zachytáva. Scree plot to vykresľuje kumulatívne.
-
-**Dôležité a kontraintuitívne:** PCA hľadá smery **najväčšej
-variability**, nie smery, ktoré najlepšie oddeľujú triedy. Tie dve
-veci nemusia súhlasiť — os s najväčšou varianciou môže biť kolmá na
-os, kde sa phish oddelí od legit. Preto v EDA dopĺňame scree plot
-o „AUC každého PC" — aby sme videli, kde žije trieda, nie len kde je
-variabilita.
-
-### LDA projekcia (Linear Discriminant Analysis ako dimenzionality reduction)
-Podobne ako PCA zmenší počet rozmerov, ale **s využitím triednej
-informácie** — hľadá os, na ktorej sú priemery tried od seba čo
-najďalej vzhľadom na ich vnútroskupinový rozptyl.
-
-*Ľudskou rečou:* PCA si povie „kde sú dáta najviac rozhádzané", LDA
-si povie „kde je phish vs. legit najviac oddelený". Pre binárnu
-klasifikáciu LDA vyrobí iba jednu jedinú os (dve triedy → k−1 = 1
-smer), ale často je to tá najužitočnejšia os pre klasifikáciu.
-
 ### Stratifikovaný split (stratified split / sampling)
 Delenie dát na tréning a test tak, aby **pomer tried** ostal v oboch
 častiach rovnaký ako v celej sade.
@@ -481,37 +447,6 @@ sa zmenšuje, keď sa príznaková rodina stáva silnejšou"*.
 - Menší prah (0.01) by mohol byť v hladine šumu; väčší (0.05) by bol
   zbytočne prísny — aj 0.03 AUC rozdiel je v bezpečnostnej aplikácii
   rozdielom medzi dobrým a výborným filtrom.
-
-### H2 (Scenario 5)
-*Cena lineárnej redukcie dimenzionality nie je rovnaká v každej rodine
-príznakov.*
-
-*Ľudskou rečou:* „redukcia dimenzionality" = zobrať 40 stĺpcov a stlačiť
-ich do 3 alebo 10 nových, ktoré zachytávajú to podstatné. Keď tie 3-10
-nových stĺpcov pošleme klasifikátoru, ako veľmi stratí presnosť oproti
-tomu, keď by videl všetkých 40? **H2 tvrdí, že to záleží od rodiny
-príznakov** — niekde je tá strata malá (kompresia „lacná"), inde veľká
-(kompresia „drahá"). Dôvod: keď signál žije v **interakciách** medzi
-príznakmi (URL-only), lineárna kompresia tie interakcie vyžehlí a
-stratíš signál. Keď signál žije **priamo v hodnotách** jednotlivých
-príznakov (Behavior), kompresia mu neublíži.
-
-Každú rodinu môžeme stlačiť do menšieho počtu osí cez PCA (unsupervised
-= nepozerá na cieľovú premennú) alebo LDA projekciu (supervised =
-využíva triednu informáciu). Tvrdíme, že táto "compression penalty"
-nie je rovnomerná:
-- na Lexical je veľký (signál je v interakciách, lineárna projekcia ho
-  časť zmaže),
-- na Behavior/FullLite je malý (silný, viac aditívny signál).
-
-| Kritérium | Obsah | Prah |
-|-----------|-------|------|
-| C1 | Pokles AUC: raw Lexical vs. Lexical komprimovaný na 3 PC (najlepší downstream model) | ΔAUC ≥ 0.05 |
-| C2 | Pokles AUC: raw FullLite vs. FullLite komprimovaný na 10 PC (ten istý model) | ΔAUC ≤ 0.01 |
-| C3 | Gradient poklesu | drop(Lexical) > drop(FullLite) |
-
-H2 je podporená iba ak C1 aj C2 platia na rovnakej rodine klasifikátora.
-C3 mení tvrdenie na gradient: čím slabší tier, tým drahšia kompresia.
 
 ---
 
@@ -644,15 +579,12 @@ Medián |SMD| je **najnižší v rodine Lexical**. To znamená:
 ukazuje, že úloha vyžaduje viacrozmerné rozhodovanie, kde majú
 neparametrické modely prirodzenú výhodu.
 
-### 4.3 Multikolinearita — príprava H2
+### 4.3 Multikolinearita
 
 *Ľudskou rečou:* Ak dva ukazovatele merajú takmer to isté, jeden z nich
 je redundantný — a lineárny model z toho bude zmätený. Tu sa
-pozrieme, ktoré Lexical príznaky sú „dvojičky", lebo to má dve
-dôsledky: (1) pre scenario_2 to znamená používať regularizovanú regresiu
-(Ridge), nie obyčajnú; (2) pre scenario_5 to znamená, že Lexical je
-v princípe stlačiteľný — ale to nezaručuje, že ho stlačiť bez straty
-**klasifikačnej** presnosti, to testuje §4.5.
+pozrieme, ktoré Lexical príznaky sú „dvojičky". Pre scenario_2 to
+znamená používať regularizovanú regresiu (Ridge), nie obyčajnú.
 
 #### 4.3.1 Korelačná matica Lexical príznakov
 Vizualizuje klaster korelovaných príznakov:
@@ -674,13 +606,6 @@ leží v tomto Lexical klastri. Trust a Behavior rodiny majú
 Binárne príznaky zámerne vylúčené z VIF výpočtu, lebo lineárna regresia
 binárneho indikátora na spojitých prediktoroch nie je v rovnakej škále
 informatívna.
-
-#### Prečo je to dôležité pre H2
-- Kolineárny Lexical klaster znamená, že veľká časť variability žije v
-  pár smeroch. To zvádza k záveru, že PCA kompresia bude "lacná".
-- Ale H2 rieši inú otázku: či tieto dominantné smery variability nesú aj
-  triedový signál. Preto po korelácii/VIF potrebujeme ešte PCA diagnostiku
-  s AUC na jednotlivých PC (sekcia 4.5).
 
 ### 4.4 Šikmosť
 
@@ -704,71 +629,27 @@ znakových "obludiek").
   vzdialenosti a ostatné (napr. TLDLength v jednotkách) by boli
   ignorované.
 
-### 4.5 Kde leží triedový signál po PCA (kľúč k H2)
-
-Sekcia 4.3 ukázala varianciu a kolinearitu. To však ešte nehovorí, či
-hlavné komponenty nesú aj separáciu Phishing vs Legitimate.
-
-**Najdôležitejší rozdiel celej sekcie, povedaný nahlas:**
-*variability* (kde sú dáta rozhádzané) a *triedový signál* (kde sa
-phish oddelí od legit) **nie sú to isté**. PCA optimalizuje prvé,
-nie druhé. Bežná chyba pri interpretácii: „scree plot ukazuje že 3 PC
-stačí na 90 % variancie, takže 3 PC stačí aj na klasifikáciu" — a to
-nie je automaticky pravda.
-
-*Ľudskou rečou — analógia:* predstav si mapu parkoviska zhora. Autá
-sú rozhádzané v smere sever-juh (to je smer najväčšej variancie = PC1).
-Ale otázka, ktorú chceš zodpovedať, je „ktoré auto je červené a ktoré
-modré", a farba v skutočnosti súvisí s parkovacím miestom, ktoré beží
-východ-západ (kolmo na PC1). Ak stlačíš mapu iba na os sever-juh,
-dostaneš síce „čo najviac informácie o polohe áut", ale **stratíš
-celú informáciu o farbe**. PCA by v tomto príklade bolo pre
-klasifikáciu katastrofálne napriek tomu, že zachytáva 100 % variancie
-v osi sever-juh.
-
-#### 4.5.1 Scree intuícia (koľko PC treba na 90 % variability)
-Scree plot vykresľuje kumulatívne, aké percento variability dáva
-postupne 1 PC, 2 PC, 3 PC atď. Hľadáme „lakeť" krivky — bod, kde
-pridanie ďalšej PC už prináša málo.
-- Lexical dosiahne ~90 % variability už pri 3-4 PC. (Lexical má veľa
-  korelovaných počtov okolo dĺžky URL, takže sa dá stlačiť.)
-- Trust minie prakticky všetky svoje smery (binárne, slabo korelované
-  — každý príznak je „svoj" smer).
-- Behavior a Full potrebujú viac komponentov (10+).
-
-Toto je iba "variance picture". Samotná variancia nemusí byť rovnaká vec
-ako klasifikačný signál — preto 4.5.2.
-
-#### 4.5.2 AUC na jednotlivých PC (kde je diskriminačný signál)
-Pre každú PC zvlášť spočítame univariátnu AUC (len tá jedna os ako
-klasifikátor). Hovorí nám: „ak by som mal k dispozícii iba tento
-jeden smer, ako dobre by som rozlíšil phish od legit?"
-
-- Na Lexical má PC1 veľa variability, ale separačný signál je rozliaty do
-  viacerých PC s nižšou AUC. → Variance a trieda si **nesadli**.
-- Na Behavior/Full prvé 2-3 PC nesú silný signál (vysoké AUC), takže
-  kompresia je lacnejšia. → Variance aj trieda si **sadli**.
-
-**Interpretácia pre H2:**
-- "málo PC na 90 % variance" automaticky neznamená "málo PC stačí na
-  klasifikáciu".
-- Práve preto v Scenario 5 čakáme veľký pokles po kompresii na Lexical a
-  malý pokles na FullLite. Scenario 5 to potom kvantifikuje
-  naozajstným trénovaním modelov na PC-komprimovaných dátach.
-
 ---
 
 ## 5. Zhrnutie EDA a implikácie pre modelovanie
 
-### Near-perfect separabilita na Full a prechod na FullLite
+### Near-perfect separabilita na Full a prechod na Lexical-primary + FullLite fallback
 Po vylúčení príznakov v §3.3 zostáva 40 feature (13 Lexical, 7 Trust,
 20 Behavior). Keď je Behavior plný, úloha je takmer saturovaná (AUC ~1.0)
 a rozdiely medzi modelovými rodinami sa stierajú.
 
-Pre H1 preto používame **FullLite** (34 feature): z Behavior odoberieme
-6 near-leakerov (`LineOfCode`, `NoOfJS`, `NoOfCSS`, `NoOfImage`,
-`NoOfSelfRef`, `NoOfExternalRef`). Takto je porovnanie medzi tiermi
-informatívne a nie "utopené" v saturácii.
+Pre Scenario 2 H1 preto používame **FullLite** (34 feature): z Behavior
+odoberieme 6 near-leakerov (`LineOfCode`, `NoOfJS`, `NoOfCSS`, `NoOfImage`,
+`NoOfSelfRef`, `NoOfExternalRef`). Pre Scenario 3 sme ako primárny pool dali
+**Lexical URL-only**, lebo to lepšie sedí na deployment príbeh: najprv lacný URL
+filter, až potom FullLite fallback, keď URL nestačí.
+
+**Ako obhájiť AUC ~0.9999:** ako interný benchmark na tomto datasete áno, ako
+produkčný claim nie. PhiUSIIL random split necháva v train/test rovnaký zber,
+rovnaké typy webov a podobný campaign mix. Keď model vidí Behavior/Trust
+signály, legitímne stránky a phishing repliky sa líšia až príliš čisto. V
+produkcii by sme čakali drift, nové phishing kity a iné domény, preto by bolo
+treba temporal split alebo externý holdout.
 
 ### Implikácie pre Scenario 2 (H1)
 | Zistenie z EDA | Implikácia pre modelovanie |
@@ -778,23 +659,9 @@ informatívne a nie "utopené" v saturácii.
 | Šikmosť v 19 z 22 príznakov | Log + scale pre LR/LDA/NB/SVM/KNN; RF bez transform |
 | VIF > 500 | Ridge-regularizovaná LR na fairnej stabilite |
 
-### Implikácie pre Scenario 5 (H2)
-| Zistenie z EDA | Implikácia |
-|----------------|------------|
-| Lexical: nízky per-feature signal + signál rozliaty naprieč PC | Kompresia na 3 PC má mať citeľný AUC pokles |
-| Behavior/Full: silný signál v prvých PC | Kompresia má byť lacná (malý AUC pokles) |
-| Kolineárny URL-length klaster | Variancia je low-rank, ale to samo o sebe nezaručuje low-loss kompresiu |
-| Trust binárky majú nízku vzájomnú koreláciu | Trust minie viac PC na varianciu; krátka projekcia môže rýchlo strácať informáciu |
-
 ---
 
 ## 6. Typické otázky komisie a návrhy odpovedí
-
-**Q: Prečo vôbec používate PCA, keď znižuje interpretovateľnosť?**
-A: V tomto projekte PCA nepoužívame ako finálny produkčný model, ale ako
-kontrolovaný experiment pre H2: meriame, koľko výkonu stratí každý tier
-po kompresii. Tým testujeme, kde je signál "komprimovateľný" a kde nie.
-Interpretovateľný baseline zostáva na pôvodných príznakoch.
 
 **Q: Prečo nie SMOTE, keď signál v Lexical je slabý?**
 A: Slabosť signálu ≠ class imbalance. Dataset je vyvážený (43/57);
@@ -902,6 +769,13 @@ A: PhiUSIIL je zhromaždený v jednom časovom okne (~2021), takže
 nemodeluje časový drift phishing kit autorov. V produkčnom nasadení by
 bol potrebný kontinuálny retraining. Toto je limitácia, ktorú
 priznávame.
+
+**Q: Nie je podozrivé, že FullLite dáva takmer dokonalé metriky?**
+A: Je to podozrivé len vtedy, keby sme tvrdili, že tým dokazujeme produkčnú
+presnosť. My tvrdíme menej: na random splite PhiUSIIL je FullLite takmer
+separovateľný. Dataset má silné štrukturálne signály a train/test pochádzajú z
+tej istej distribúcie. Preto je 0.9999 obhájiteľné ako benchmarkový ceiling, ale
+nie ako dôkaz reálneho nasadenia bez temporal/external validácie.
 
 **Q: Prečo je v `scenario_2.rmd` Precision počítaná vzorcom a nie
 priamo z confusion matrix?**
