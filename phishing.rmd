@@ -32,7 +32,7 @@ If a URL-only model works well enough, it can sit at the front of the pipeline
 as a fast first-line filter. Where it fails, the slower trust- and behavior-level
 checks have to take over.
 
-The proxy does not output a confidence score - it outputs a *yes/no*
+The proxy does not output a confidence score - it outputs a
 block/allow verdict. When a URL classifier produces a probability $p \in [0, 1]$,
 the standard operating point is to use **threshold 0.5**: classify as phishing if
 $p >= 0.5$, legitimate if $p < 0.5$.

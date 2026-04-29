@@ -604,7 +604,7 @@ size hides the 1-NN boundary without merging the two classes.
 There is one practical twist. When a tier has **only binary features**
 (Trust has 7 binary flags), many training points end up at identical
 coordinates and caret's `knn3` refuses to run with "too many ties in
-knn". We add a tiny Gaussian jitter (SD = 10^-3³, less than 0.1 % of
+knn". We add a tiny Gaussian jitter (SD = 10^-3, less than 0.1 % of
 the feature scale) to break the ties without actually changing any
 decisions.
 
