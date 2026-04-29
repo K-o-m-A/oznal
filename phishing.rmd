@@ -1,5 +1,5 @@
 ---
-title: "Phishing URL Detection — Hypothesis & EDA"
+title: "Phishing URL Detection - Hypothesis & EDA"
 output:
   html_notebook:
     toc: true
@@ -22,7 +22,7 @@ library(pROC)
 
 A user clicks a link in an email, chat, or search result. The
 corporate proxy has to decide **before the page loads** whether the link is
-phishing. The cheapest signal at that moment is the URL string itself — no
+phishing. The cheapest signal at that moment is the URL string itself - no
 DNS lookup, no HTML fetch, no rendering. If a URL-only check is good enough,
 we can block the link for free. If it isn't, we have to fall back to a
 slower page-level check.
@@ -32,10 +32,10 @@ If a URL-only model works well enough, it can sit at the front of the pipeline
 as a fast first-line filter. Where it fails, the slower trust- and behavior-level
 checks have to take over.
 
-The proxy does not output a confidence score — it outputs a *yes/no*
+The proxy does not output a confidence score - it outputs a *yes/no*
 block/allow verdict. When a URL classifier produces a probability $p \in [0, 1]$,
 the standard operating point is to use **threshold 0.5**: classify as phishing if
-$p ≥ 0.5$, legitimate if $p < 0.5$.
+$p >= 0.5$, legitimate if $p < 0.5$.
 
 Explored scenarios for hypothesis driven modeling: 2,3,4
 
@@ -54,7 +54,7 @@ them into three families by how expensive they are to compute:
 
 # 2. Hypotheses
 
-## H1 (Scenario 2) — The gap between parametric and non-parametric model families is tier-dependent
+## H1 (Scenario 2) - The gap between parametric and non-parametric model families is tier-dependent
 
 Phishing URLs usually leave lexical traces: odd subdomain depth, paths full
 of digits, obfuscated characters. None of this needs the page to be
@@ -66,7 +66,7 @@ We compare three parametric methods (LR, LDA, Naive Bayes) against three
 non-parametric ones (RF, SVM-RBF, KNN).
 
 Because our project frame is a **corporate-proxy URL phishing detector**
-, the deployment cost is not a ranking — it is a single
+, the deployment cost is a single
 block/allow verdict at threshold 0.5 per click. A model with high AUC but
 low Specificity creates false blocks, one with low
 Sensitivity quietly lets phish through. The H1 gating criteria therefore
@@ -76,11 +76,11 @@ default 0.5 cut, with AUC kept as a complementary ranking criterion.
 
 | # | Criterion | Threshold |
 |---|-----------|-----------|
-| C1 | Test-set $\mathrm{minSS}$ gap between the best non-parametric and best parametric model on the **Lexical (URLOnly) tier** | **Δ minSS ≥ 0.10** |
+| C1 | Test-set $\mathrm{minSS}$ gap between the best non-parametric and best parametric model on the **Lexical (URLOnly) tier** | **Δ minSS >= 0.10** |
 | C2 | Gradient across tiers in deployment-relevant terms: $\mathrm{minSS}$ gap is **strictly larger** on Lexical than on FullLite | gap(Lexical) > gap(FullLite) |
-| C3 | Sanity check on ranking discrimination: mean test AUC gap on Lexical | **ΔAUC ≥ 0.02** |
+| C3 | Sanity check on ranking discrimination: mean test AUC gap on Lexical | **ΔAUC >= 0.02** |
 
-H1 is **supported** only if C1 **and** C2 hold — both gated on the
+H1 is **supported** only if C1 **and** C2 hold - both gated on the
 deployment metric (minSS at threshold 0.5), so the same number that
 determines whether a filter is usable in production also determines
 whether the hypothesis is supported. C3 is informative but not gating. It
@@ -89,43 +89,29 @@ non-deployable model with a high AUC can't satisfy the project goal regardless o
 H1 is **rejected** if either C1 or C2 fails.
 
 Note:
-The FullLite tier is the scenario_2 replacement for a naive "Full" tier: six Behavior
+The FullLite tier is the replacement for a naive "Full" tier: six Behavior
 near-leakers are stripped because they push Full to AUC ≈ 1.0 and hide every contrast H1
 is trying to measure.
 
-## H1 (Scenario 3) — A smaller URL-only filter can preserve operating quality
+## H2 (Scenario 3) - A smaller URL-only filter can preserve operating quality
 
-Scenario 3 keeps the classifier fixed as logistic regression and compares
-feature-selection strategies instead of model families: one algorithmic method
+Scenario 3  compares feature-selection strategies: one algorithmic method
 (bidirectional `stepAIC`) and two embedded methods (`lasso`, `elastic-net`).
 
-The primary pool is now **Lexical URL-only**, because that is the deployable
-first-line filter the proxy can evaluate before loading the page. FullLite stays
-as a fallback benchmark: if URL-only is not enough and the proxy must inspect
-Trust/Behavior signals too, can we shrink the combined filter to a much smaller
+The primary tier is again **Lexical**, to follow on Scenario 2. FullLite stays
+as a fallback benchmark, if URL-only is not enough and the proxy must inspect
+Trust/Behavior signals too. Are we able to shrink the combined filter to a much smaller
 set without losing AUC, sensitivity, or specificity?
 
-The EDA motivation is the strong redundancy in the URL-length cluster
-(`URLLength`, `NoOfLettersInURL`, `NoOfDegitsInURL`, and related counts)
-plus the near-saturated FullLite signal. That setting should make feature
-selection meaningful: several predictors explain overlapping variance, so
-different selection rules may keep different active sets.
-
-**Scenario 3 H1:** on the Lexical URL-only pool, at least one of the three
+**Scenario 3 H2:** on the Lexical tier, at least one of the three
 feature-selection methods can produce a compact deployable URL filter with
 strong held-out operating quality.
 
 | # | Criterion | Threshold |
 |---|-----------|-----------|
-| C1 | Sparsity on the lexical final fit | at least one FS method keeps **≤ 9 / 13** predictors (≥30% reduction) |
-| C2 | Held-out ranking quality on the same 20% test set | **AUC ≥ 0.95** |
-| C3 | Held-out operating point at threshold 0.5 | **Sensitivity ≥ 0.94** and **Specificity ≥ 0.75** |
-
-This hypothesis **cannot be answered from EDA alone**. EDA only motivates
-why feature selection should matter (correlation, VIF, redundant signal);
-the actual claim is about the fitted active sets and their held-out
-AUC/Sensitivity/Specificity, so it is tested in `scenario_3.rmd`.
-
+| C1 | Sparsity on the lexical final fit | at least one FS method keeps **=< 9 / 13** predictors (>=30% reduction) |
+| C2 | Held-out ranking quality on the same 20% test set | **AUC >= 0.95** |
+| C3 | Held-out operating point at threshold 0.5 | **Sensitivity >= 0.94** and **Specificity >= 0.75** |
 ---
 
 # 3. Data Loading & Cleaning
@@ -164,10 +150,10 @@ cat("Predictors:  ", ncol(features), "\n")
 The three families (Lexical / Trust / Behavior) are our own taxonomy, not
 a property of the dataset. They reflect the cost of obtaining each signal
 at decision time:
-   Lexical  — derivable from the raw URL string alone.
-   Trust    — requires light page/domain inspection or an external lookup
+   Lexical  - derivable from the raw URL string alone.
+   Trust    - requires light page/domain inspection or an external lookup
               (DNS, TLD database, HTTPS handshake, title parsing).
-   Behavior — requires fetching, parsing and partially rendering the page.
+   Behavior - requires fetching, parsing and partially rendering the page.
 
 Note on `IsHTTPS`: although the "https://" scheme is part of the URL string,
 we place it in the **Trust** family. Modern browsers refuse plain HTTP for
@@ -239,7 +225,7 @@ To start we drop three groups of features that would bias the
 analysis or trivialise the modeling. All three decisions are based on
 what the feature actually means.
 
-### Category 1 — Computed probability / similarity scores
+### Category 1 - Computed probability / similarity scores
 
 These are not raw URL measurements. They are outputs of other models or
 expert-written scoring functions that already encode phishing-detection
@@ -257,7 +243,7 @@ SCORES <- c(
 cat("Computed scores to remove:", paste(SCORES, collapse = ", "), "\n")
 ```
 
-### Category 2 — Redundant binary indicator
+### Category 2 - Redundant binary indicator
 
 `HasObfuscation` is literally `(NoOfObfuscatedChar > 0)`. It holds no
 information that the count feature doesn't already carry.
@@ -267,7 +253,7 @@ REDUNDANT_BINARY <- "HasObfuscation"
 cat("Redundant binary to remove:", REDUNDANT_BINARY, "\n")
 ```
 
-### Category 3 — Redundant ratio features
+### Category 3 - Redundant ratio features
 
 Each ratio below equals `count / URLLength`, and both the count and
 `URLLength` are already in the dataset. Keeping the ratio gives us a
@@ -314,8 +300,7 @@ To test H1 we define three nested feature tiers. The modeling notebook
 reads these tier definitions directly from here, so both notebooks stay
 in sync. The `tier_full` built here (40 features) is the EDA baseline;
 the scenario_2 modeling notebook replaces it with **FullLite**
-(34 features) by stripping six Behavior near-leakers — see §5 for
-the reasoning.
+(34 features) by stripping six Behavior near-leakers.
 
 ```{r feature-tiers}
 tier_lexical  <- family_map %>% filter(family == "Lexical")  %>% pull(feature)
@@ -371,7 +356,7 @@ We measure discriminative power separately for continuous and binary
 features. The standardised mean difference (SMD) only makes sense for
 continuous features. For binary features the "pooled SD" collapses to a
 function of the class proportion, so SMD stops being comparable across
-features. For those we use **Cramér's V** instead — the standard
+features. For those we use **Cramér's V** instead - the standard
 effect-size measure for a 2×2 contingency table, on the same 0–1 scale
 as |correlation|.
 
@@ -418,7 +403,6 @@ ggplot(discrim_df, aes(x = reorder(feature, effect), y = effect, fill = family))
   facet_wrap(~ metric, scales = "free", ncol = 2) +
   scale_fill_brewer(palette = "Set2") +
   labs(title = "Per-feature discriminative power",
-       subtitle = "Continuous: |SMD|. Binary: Cramer's V. Both >= 0.",
        x = NULL, y = "Effect size", fill = "Family") +
   theme_minimal(base_size = 10) +
   theme(legend.position = "top")
@@ -448,7 +432,7 @@ per-feature signal. This supports H1's claim that the URL-only tier has less sig
 Lexical features (`URLLength`, `NoOfLettersInURL`, `NoOfDegitsInURL`) measure
 overlapping URL properties, causing severe collinearity. For linear models (LR, LDA),
 this makes coefficients numerically unstable. Unregularised LR fails here so we use **Ridge regularisation**
-to stabilise estimates. Trust and Behavior are mostly uncorrelated binary flags — no collinearity issue there.
+to stabilise estimates. Trust and Behavior are mostly uncorrelated binary flags - no collinearity issue there.
 
 ### 4.3.1 Lexical Correlation Matrix
 
@@ -508,14 +492,14 @@ vif_df %>%
             Family  = family,
             VIF     = round(vif, 2),
             Severity = severity) %>%
-  kable(caption = "Variance Inflation Factors - continuous features (lm-based, target-free).")
+  kable(caption = "Variance Inflation Factors - continuous features")
 ```
 
 **Takeaway:** `URLLength`, `NoOfLettersInURL` and `NoOfDegitsInURL` stay
 near-collinear because they measure overlapping properties of the same URL
 string. Two consequences for the modelling notebooks:
 
-- **Scenario 2:** unpenalised LR is numerically unstable here — Ridge
+- **Scenario 2:** unpenalised LR is numerically unstable here - Ridge
   (α = 0) is the minimal fix that bounds the coefficients without
   collapsing the cluster.
 
@@ -546,7 +530,6 @@ ggplot(skew_df, aes(x = reorder(feature, abs_skew), y = skewness, fill = family)
   geom_hline(yintercept = c(-2, 2), linetype = "dashed", colour = "grey40") +
   scale_fill_brewer(palette = "Set2") +
   labs(title = "Skewness of continuous features",
-       subtitle = "Dashed lines at +/- 2 mark heavy skew; LR/LDA may struggle here",
        x = NULL, y = "Skewness", fill = "Family") +
   theme_minimal(base_size = 10) +
   theme(legend.position = "top")
@@ -560,10 +543,7 @@ skew_df %>% filter(abs_skew > 2) %>% select(feature, skewness, family) %>% print
 ```
 
 
-TODO merge idk co to je rozbite:
-
-from main:
-**Takeaway (Scenario 2):** Several count features are heavily right-skewed
+**Takeaway:** Several count features are heavily right-skewed
 with long outlier tails. This shapes our modeling choices. LR and LDA need
 scaling and a log-transform on skewed features for the distributional
 assumption to hold. Trees handle skew without preprocessing. KNN and SVM
@@ -574,7 +554,7 @@ distance-based.
 
 Six Behavior features are exceptionally discriminative on their own. To
 understand the scope of the problem for H1, we measure their **univariate AUC**
-— the discriminative power of each feature in isolation, before any model
+- the discriminative power of each feature in isolation, before any model
 fitting:
 
 ```{r near-leaker-auc}
@@ -609,8 +589,8 @@ cat(paste(LEAKY_BEHAVIOR, collapse = ", "), "\n")
 ```
 
 **The saturation problem.** Phishing pages are usually shallow HTML shells
-with minimal content, so the six near-leakers—`LineOfCode`, `NoOfExternalRef`,
-`NoOfImage`, `NoOfSelfRef`, `NoOfJS`, `NoOfCSS`—are nearly perfect phishing
+with minimal content, so the six near-leakers-`LineOfCode`, `NoOfExternalRef`,
+`NoOfImage`, `NoOfSelfRef`, `NoOfJS`, `NoOfCSS`-are nearly perfect phishing
 signals on their own:
 
 | Feature | Univariate AUC | Why it's near-perfect | Cost to include |
@@ -622,7 +602,7 @@ signals on their own:
 | `NoOfJS` | 0.970 | Phish avoid JavaScript (too recognizable) | Direct saturation |
 | `NoOfCSS` | 0.958 | Phish minimize stylesheets | Direct saturation |
 
-If we include these six in any tier, any model — parametric or non-parametric
+If we include these six in any tier, any model, parametric or non-parametric
 reaches AUC ≈ 0.99+ because the signal is so strong, even a simple threshold on a single feature nearly solves the task.
 ---
 
@@ -648,16 +628,12 @@ claim. A random split of PhiUSIIL preserves the same collection process,
 website templates and campaign mix on both train and test; a real deployment
 would face temporal drift, new phishing kits and domain/campaign shift. Any
 0.99+ FullLite result should therefore be read as an upper-bound benchmark for
-this curated dataset. A production-grade claim would require a temporal or
+this curated dataset. A production-grade     claim would require a temporal or
 external holdout.
 
 ## 5.1 Implications for modeling scenarios
-
-//TODO: check
-
 | Finding | Scenario 2 implication (H1) | Additional EDA implication |
 |---------|----------------------------|----------------------------|
 | Lexical SMD lowest + features must be combined | Largest parametric/non-parametric AUC gap expected on URLOnly | Feature interactions matter more than single-feature thresholds in URL-only detection |
 | Heavy skewness in 19 of 22 continuous features | Log-transform + standardisation for LR/LDA; trees/RF unaffected | Keep one consistent preprocessing recipe across model families for fair comparisons |
-| Finding | Scenario 2 implication (H1) | Scenario 3 implication (H1) |
 |---------|----------------------------|----------------------------|----------------------------|
