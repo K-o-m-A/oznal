@@ -1,5 +1,5 @@
 ---
-title: "Phishing Detection — Scenario 2: Parametric vs Non-parametric"
+title: "Phishing Detection - Scenario 2: Parametric vs Non-parametric"
 output:
   html_notebook:
     toc: true
@@ -31,7 +31,7 @@ dir.create(ARTIFACTS, recursive = TRUE, showWarnings = FALSE)
 # 1. Scenario & Hypothesis
 
 **H1**: *On the URL-only tier, non-parametric models pick up
-meaningfully more signal than parametric ones — and the gap is large
+meaningfully more signal than parametric ones - and the gap is large
 enough to matter for the corporate-proxy deployment.*
 
 The H1 criteria are gated on the deployment-relevant operating-point
@@ -48,13 +48,13 @@ tiers**:
 
 | Tier | Features | What the model sees                                                                                                                                                      |
 |------|---------:|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Lexical** (URL-only) | 13 | URL string only — the first-line case: no DNS, no HTML fetch.                                                                                                            |
-| **Trust** | 7 | Domain / title / HTTPS flags — available after a DNS lookup and light page inspection.                                                                                   |
+| **Lexical** (URL-only) | 13 | URL string only - the first-line case: no DNS, no HTML fetch.                                                                                                            |
+| **Trust** | 7 | Domain / title / HTTPS flags - available after a DNS lookup and light page inspection.                                                                                   |
 | **Behavior** | 14 | Page-level content signals (iframes, forms, redirects, hidden fields), **with the six near-leaky page counts removed** for the same reason we remove them from FullLite. |
 | **FullLite** | 34 | All three families combined minus six near-leakers. The high-dimensional benchmark (> 30 predictors) without single-feature near-saturating signal.                      |
 
-Six Behavior features — `LineOfCode`, `NoOfExternalRef`, `NoOfImage`,
-`NoOfSelfRef`, `NoOfJS`, `NoOfCSS` — each individually give a univariate
+Six Behavior features - `LineOfCode`, `NoOfExternalRef`, `NoOfImage`,
+`NoOfSelfRef`, `NoOfJS`, `NoOfCSS` - each individually give a univariate
 AUC between 0.958 and 0.990 on this dataset. Phishing pages are usually
 shallow HTML shells with almost no scripts, images or external links, so
 these counts effectively solve the task on their own, even though they
@@ -69,19 +69,19 @@ scanning all four tiers we can sharpen H1 from a single-tier claim into a
 feature tier is weak and shrinks as more signal is added.*
 
 **This notebook also covers Scenario 4 (surrogate tree visualisation).**
-§8 picks Random Forest specifically — not because it wins H1 on
+8 picks Random Forest specifically - not because it wins H1 on
 Lexical but because the surrogate exercise only makes sense for a teacher whose
 own decision regions are
 already axis-aligned tree splits, so a single `rpart` student has a
-realistic chance of reproducing them. §8 reuses the RF fitted in §5.1
-as a *teacher* for a single `rpart` surrogate — i.e. a tree fitted on
+realistic chance of reproducing them. 8 reuses the RF fitted in 5.1
+as a *teacher* for a single `rpart` surrogate - i.e. a tree fitted on
 the RF's own predictions rather than on the ground-truth label. The
 point is to render a human-readable diagram of the RF's decision logic
 and quantify how faithfully a single tree reproduces the ensemble.
 Scenario 4 lives in this notebook because the
 surrogate's per-class fidelity (Sens vs RF / Spec vs RF) plugs into
-the same operating-point framing H1 uses — keeping a single metric
-vocabulary across both scenarios — and re-fitting RF elsewhere would
+the same operating-point framing H1 uses - keeping a single metric
+vocabulary across both scenarios - and re-fitting RF elsewhere would
 just duplicate the cache.
 
 ---
@@ -103,7 +103,7 @@ cat("Loaded", nrow(raw), "rows,", ncol(raw), "columns.\n")
 
 ## 2.2 Apply EDA feature exclusions
 
-The EDA (§3.3) dropped three groups of features. Repeating the same
+The EDA (3.3) dropped three groups of features. Repeating the same
 exclusions here makes sure Scenario 2 is tested on this set of predictors.
 
 ```{r exclusions}
@@ -213,7 +213,7 @@ Every model × tier combination uses **the same rows** for training, the
 **same 80/20 split**, and the **same 10-fold CV indices**. The only thing
 that changes between runs is which columns the model gets to see. That
 keeps every model-vs-model comparison directly paired at the fold level,
-so per-fold AUC and CV ROC ± SD reported below are read against a
+so per-fold AUC and CV ROC +/- SD reported below are read against a
 consistent baseline.
 
 ```{r splits}
@@ -229,8 +229,8 @@ cat("Train:", nrow(train_raw), "Test:", nrow(test_raw),
 ## 3.3 Preprocessing recipes
 
 We need two parallel recipes. The first one (used by LR, LDA, NB, SVM-RBF
-and KNN) runs `log1p()` on every continuous feature — the EDA flagged
-\|skew\| > 2 on 19 of 22 continuous predictors — then centres and scales.
+and KNN) runs `log1p()` on every continuous feature - the EDA flagged
+\|skew\| > 2 on 19 of 22 continuous predictors - then centres and scales.
 Binary features are left alone. The second one is for Random Forest and
 applies no transform at all, since trees don't care about monotone
 transforms or scale.
@@ -362,7 +362,7 @@ print_tier_summary <- function(res) {
 }
 ```
 
-`print_tier_summary` returns a table with CV ROC ± SD, held-out test AUC,
+`print_tier_summary` returns a table with CV ROC +/- SD, held-out test AUC,
 Accuracy, F1, Sensitivity, Specificity, and wall-clock train time. Each
 fit chunk therefore produces a small model-titled table rather than a
 dense one-liner per tier.
@@ -373,14 +373,14 @@ dense one-liner per tier.
 
 ## 4.1 Logistic Regression (ridge)
 
-EDA §4.3 showed a severe collinearity cluster around `URLLength`
+EDA 4.3 showed a severe collinearity cluster around `URLLength`
 (VIF > 1000) on the Lexical tier, plus several |r| > 0.7 pairs on the
 full 40-feature set. Plain logistic regression becomes numerically
-unstable in that setting — the coefficients swing wildly from fold to
+unstable in that setting - the coefficients swing wildly from fold to
 fold. So we use **ridge-regularised** LR (α = 0, λ = 0.01). `α = 0`
 makes it pure ridge (no L1 sparsity), so the coefficient set stays
 fixed across folds and the family-level comparison stays apples-to-apples
-. `λ = 0.01` is a small fixed shrinkage — large enough to stabilise the matrix
+. `λ = 0.01` is a small fixed shrinkage - large enough to stabilise the matrix
 inversion against the VIF > 1000 collinearity block, small enough that signal
 coefficients are not materially biased toward zero. We keep `λ` fixed at
 this value across all four tiers so that every LR result is read against
@@ -403,7 +403,7 @@ print_tier_summary(res_lr)
 ```
 
 On **Lexical** LR-Ridge sits at AUC 0.852
-with Sens 0.921 / Spec 0.716 — at threshold 0.5 the model blocks
+with Sens 0.921 / Spec 0.716 - at threshold 0.5 the model blocks
 roughly 28 % of legitimate URLs to keep 92 % of phish. For the
 corporate proxy this is unusable filter regime.
 From **Trust** onwards the Sens/Spec gap closes (≈ 0.86–0.99 across both
@@ -416,7 +416,7 @@ matrix. The EDA flagged heavy skewness on 19 of 22 continuous features;
 `log1p` + centre/scale in our preprocessing recipe cleans this up
 reasonably well. LDA has no hyperparameters: it just fits the per-class means and a
 pooled covariance on the standardised training set. That is exactly
-why we include it — it isolates what the Gaussian-shared-Σ prior buys
+why we include it - it isolates what the Gaussian-shared-Σ prior buys
 on top of the LR baseline.
 
 ```{r fit-lda}
@@ -434,7 +434,7 @@ print_tier_summary(res_lda)
 ```
 
 
-On **Lexical** LDA posts AUC 0.931 — visibly better than LR, yet the
+On **Lexical** LDA posts AUC 0.931 - visibly better than LR, yet the
 threshold-0.5 operating point is *worse*: Sens 0.971 / Spec 0.688, i.e.
 ~31 % of legitimate URLs blocked. AUC and the operating point disagree because
 the two metrics depend on different parts of the LDA fit:
@@ -451,8 +451,8 @@ operating point really disagree. LDA beats LR on AUC, but at threshold
 
 ## 4.3 Naive Bayes
 
-NB assumes features are **independent** given the class. EDA §4.3
-already showed this is not true here — |r| > 0.7 inside the URL-length
+NB assumes features are **independent** given the class. EDA 4.3
+already showed this is not true here - |r| > 0.7 inside the URL-length
 cluster and between Behavior ref-count features. We run NB anyway, to
 see **how much the broken independence assumption costs** on each tier.
 The hyperparameters are kept simple and the same across tiers:
@@ -460,7 +460,7 @@ The hyperparameters are kept simple and the same across tiers:
 Gaussian one, so a fold with a zero-variance binary feature does not
 crash; `fL = 1` adds Laplace smoothing so unseen 0/1 combinations in a
 small fold do not produce zero posteriors; `adjust = 1` keeps the
-kernel bandwidth at klaR's default. We do not tune them — the goal is
+kernel bandwidth at klaR's default. We do not tune them - the goal is
 to measure the cost of the independence assumption, not to find a
 bandwidth that hides it.
 
@@ -481,14 +481,14 @@ print_tier_summary(res_nb)
 ```
 
 NB is the case of AUC hiding operating-point pathology. On **Lexical**
-AUC is 0.849 — not terrible — but Sens 0.999 / Spec **0.383** means
+AUC is 0.849 - not terrible - but Sens 0.999 / Spec **0.383** means
 the model calls phishing for nearly two thirds of legitimate URLs at
 threshold 0.5. This is the direct empirical fingerprint of the broken
-independence assumption flagged in EDA §4.3: the URL-length cluster
+independence assumption flagged in EDA 4.3: the URL-length cluster
 contains multiple |r| > 0.7 pairs, so what is essentially one
 correlated signal is multiplied into the posterior as several
 "independent" pieces of evidence, and phish-consistent scores collapse
-toward 1. On **Behavior** the same violation *flips direction* —
+toward 1. On **Behavior** the same violation *flips direction* -
 Sens 0.732 / Spec 0.996. AUC on Behavior is a respectable 0.990, yet
 at the default threshold NB misses 27 % of phish. In our proxy terms:
 on Lexical NB would block too much legit traffic, on Behavior it would
@@ -503,13 +503,13 @@ ensemble of trees with piecewise-constant decision regions and does
 not care about monotone feature transforms. Two hyperparameters
 matter for our setup; we fix both and use the same values across
 tiers. `mtry = floor(sqrt(p))` is the standard classification default
-— it limits the features each split can choose from, which keeps the
+- it limits the features each split can choose from, which keeps the
 trees in the ensemble decorrelated. With our tier sizes this gives 4
 on Lexical, 3 on Trust, 4 on Behavior and 6 on FullLite. `ntree = 300`:
 AUC on this dataset stops improving at ~200–300 trees, so going higher
 just costs compute. We also leave the trees fully grown (no `nodesize`
 or `maxnodes` cap), so the ensemble's strength comes from tree depth
-and the 0.5 threshold is set entirely by the bagging vote — that is
+and the 0.5 threshold is set entirely by the bagging vote - that is
 exactly the effect the commentary below picks apart.
 
 ```{r fit-rf}
@@ -536,20 +536,20 @@ Sens 0.967 / Spec 0.745. Spec is the weak side: with fully grown
 trees, leaves built on URL-only features can contain only a few
 legitimate samples and still vote "phish" in the ensemble average,
 which pushes the bagged probability above 0.5 for borderline legit
-URLs. From **Trust** upward the model is symmetric — Behavior
-0.972 / 0.978, FullLite 0.997 / 0.996 — because once trust-tier
+URLs. From **Trust** upward the model is symmetric - Behavior
+0.972 / 0.978, FullLite 0.997 / 0.996 - because once trust-tier
 flags are available, the splits are clean enough that the
 smaller-class leaves no longer drive the vote. RF is therefore the model that would benefit most from a simple
 **threshold shift** on Lexical: the AUC is already there, the 0.5
 cut just is not the cost-optimal one. Unlike NB this is not a
 model assumption, only a calibration issue. The standard fix is
 **threshold tuning**. On Lexical the optimal threshold lands somewhere around
-0.6–0.7. We do not apply it in §5.1's tables because the H1
+0.6–0.7. We do not apply it in 5.1's tables because the H1
 evaluation is fixed at threshold 0.5 across every model.
 
 ## 5.2 SVM-RBF
 
-The RBF kernel fits smooth non-linear boundaries — a natural
+The RBF kernel fits smooth non-linear boundaries - a natural
 alternative to tree ensembles and distance-based methods. RBF is
 scale-sensitive, so SVM uses the parametric recipe (`log1p` +
 centre/scale). We fix both hyperparameters at kernlab's defaults for
@@ -559,7 +559,7 @@ the fit toward a hard margin and overfits, much smaller C lets the
 boundary slip past support vectors. `σ = 0.1` matches the kernel
 width to unit-variance features, so pairwise kernel values stay in a
 useful 0–1 range across our tier sizes.
-We do not tune further — the §5.2 results show this default
+We do not tune further - the 5.2 results show this default
 already saturates AUC and Sens/Spec on every tier, so there is
 nothing meaningful left for a grid search to improve.
 
@@ -582,9 +582,9 @@ print_tier_summary(res_svm)
 
 SVM-RBF is the only model that is **proxy-deployable at threshold
 0.5 without recalibration on every tier**. On **Lexical** it reaches
-AUC 0.995 with Sens 0.985 / Spec 0.983 — a ~1.5 % miss rate and
+AUC 0.995 with Sens 0.985 / Spec 0.983 - a ~1.5 % miss rate and
 ~1.7 % false-block rate, symmetric in both directions. Trust,
-Behavior and FullLite show the same symmetric profile. In EDA §1.1
+Behavior and FullLite show the same symmetric profile. In EDA 1.1
 terms, this is what "a non-parametric URL-only filter worth deploying"
 looks like in numbers: roughly 9 × fewer errors than LR-Ridge on
 Lexical (2 vs. 18 per 100 URLs), with no threshold tuning required.
@@ -596,7 +596,7 @@ training set and classifies each test point by a majority vote among
 its `k` closest neighbours, using Euclidean distance. Because it is
 distance-based, it uses the parametric recipe. We set `k = 25` and
 keep it fixed across tiers. Two reasons: 25 neighbours give the
-local class proportion a resolution of 1/25 = 4 percentage points —
+local class proportion a resolution of 1/25 = 4 percentage points -
 fine enough to carry useful AUC signal, but not so fine that one
 mislabelled neighbour flips the prediction and a smoother of this
 size hides the 1-NN boundary without merging the two classes.
@@ -604,7 +604,7 @@ size hides the 1-NN boundary without merging the two classes.
 There is one practical twist. When a tier has **only binary features**
 (Trust has 7 binary flags), many training points end up at identical
 coordinates and caret's `knn3` refuses to run with "too many ties in
-knn". We add a tiny Gaussian jitter (SD = 10⁻³, less than 0.1 % of
+knn". We add a tiny Gaussian jitter (SD = 10^-3³, less than 0.1 % of
 the feature scale) to break the ties without actually changing any
 decisions.
 
@@ -632,15 +632,15 @@ res_knn <- run_or_load("knn", function() {
 print_tier_summary(res_knn)
 ```
 
-On **Lexical** it reaches AUC 0.987 with Sens 0.944 / Spec 0.923 —
+On **Lexical** it reaches AUC 0.987 with Sens 0.944 / Spec 0.923 -
 symmetric, deployable, ~6–8 % error in either direction. On **Trust**
 AUC stays at 0.932 but Accuracy drops to 0.862: with only 7
 mostly-binary features many training points share the same
 coordinates, the jittered distances barely separate the classes, and
 the 25-NN vote averages over a near-uniform neighbourhood. Behavior
-and FullLite return to the symmetric ≥ 0.96 profile. There is one
+and FullLite return to the symmetric >= 0.96 profile. There is one
 cost AUC does not show but the proxy needs to care about: KNN's
-**inference cost grows with the training set** — every click would
+**inference cost grows with the training set** - every click would
 trigger ~24 k distance computations, which is the opposite of the
 "cheap before the page loads" constraint that motivated the URL-only
 filter. SVM-RBF wins on both quality and inference cost.
@@ -692,7 +692,7 @@ summary_tbl %>%
 
 **How to read the table.** A large `Train AUC − Test AUC` gap is
 expected for non-parametric models (RF/KNN/SVM-RBF can memorise their
-training set) and is not a problem on its own — the real check is
+training set) and is not a problem on its own - the real check is
 **`CV ROC` vs. `Test AUC`**, both out-of-sample. The train column
 is here only to show that CV numbers are not quietly inflated by
 leakage.
@@ -702,13 +702,13 @@ leakage.
 AUC compares models by score ordering, which is useful when families
 are far apart, but on the richer tiers every model sits at AUC ≈ 0.99
 and the ranking becomes hard to read. More importantly, AUC is
-**threshold-free** — it says nothing about what happens when the
+**threshold-free** - it says nothing about what happens when the
 proxy has to commit to a *block* or *allow* decision the moment the
 user clicks the link.
 
 So we add a second evaluation. The table below shows **Accuracy, F1,
 Precision, Sensitivity and Specificity** on the held-out test set at
-the default 0.5 threshold — the actual operating point of the proxy
+the default 0.5 threshold - the actual operating point of the proxy
 filter.
 
 In this proxy setting each side of the split matters on its own and
@@ -720,7 +720,7 @@ the two error types have **asymmetric cost**:
 
 Low precision matters because the ratio of "good page blocked" to
 "real phish caught" gets bad enough that users stop trusting the
-proxy and start asking for bypass rules — at which point the whole
+proxy and start asking for bypass rules - at which point the whole
 URL-only line of defence is gone.
 
 ```{r quality-table}
@@ -741,13 +741,13 @@ quality_tbl %>%
 
 ## 6.2 Per-tier deployment-metric gap (H1 C1, C2)
 
-The H1 gating criteria — C1 ($\Delta$ minSS on Lexical) and C2 (gap
-shrinks toward FullLite) — are read off the held-out test-set
+The H1 gating criteria - C1 ($\Delta$ minSS on Lexical) and C2 (gap
+shrinks toward FullLite) - are read off the held-out test-set
 Sens/Spec, where the operating point at threshold 0.5 actually matters
 for the proxy. We pick the per-family champion on the deployment
 metric itself, not on AUC: a model with a high AUC but a bad 0.5 cut
 (LDA on Lexical: Spec 0.69) is not the model the proxy would deploy.
-C3 (the ΔAUC sanity check) is read off the §6.1 summary table.
+C3 (the ΔAUC sanity check) is read off the 6.1 summary table.
 
 ```{r h1-minss}
 gap_tbl <- test_tbl %>%
@@ -767,7 +767,7 @@ gap_tbl %>%
   kable(caption = "Per-tier gap between best non-parametric and best parametric champion (selected on test-set minSS).")
 ```
 
-### 6.2.1 Statistical sanity check — paired Wilcoxon on per-fold AUC
+### 6.2.1 Statistical sanity check - paired Wilcoxon on per-fold AUC
 
 C1 / C2 are operational thresholds, not hypothesis tests, but it is
 still worth confirming that the per-tier gaps are larger than
@@ -775,7 +775,7 @@ fold-level noise. For each tier we pick the best non-parametric and
 best parametric champion (by test-set minSS, same selection rule as
 above) and run a paired Wilcoxon signed-rank test on their 10
 per-fold CV AUCs. The pairing is valid because every model in this
-report was trained on the same `fold_idx` (§3.2). One-sided
+report was trained on the same `fold_idx` (3.2). One-sided
 alternative: non-parametric > parametric, in line with H1.
 
 ```{r h1-wilcoxon}
@@ -818,42 +818,42 @@ wilcox_tbl %>%
 ```
 
 On **Lexical** and **Behavior** the test rejects equality at any
-conventional significance level — the non-parametric advantage is
+conventional significance level - the non-parametric advantage is
 not a fold-level artefact. On **Trust** and **FullLite** p-values
 are larger because the per-fold AUC differences are small
 (saturation), which is consistent with C2: the family advantage
 shrinks as the feature tier gets stronger. Note that with 10 paired
-folds the smallest achievable one-sided p-value is `2⁻¹⁰ ≈ 0.001`,
+folds the smallest achievable one-sided p-value is `2^-10 ≈ 0.001`,
 so a "0.001" entry means *every single fold* favours the
 non-parametric champion.
 
 On **Lexical** the minSS gap is the largest
-of any tier — SVM-RBF reaches minSS ≈ 0.98 while the best parametric
-champion stays in the 0.69–0.92 range — comfortably above the C1
+of any tier - SVM-RBF reaches minSS ≈ 0.98 while the best parametric
+champion stays in the 0.69–0.92 range - comfortably above the C1
 threshold of 0.10. On **FullLite** the gap collapses to zero: both
 families saturate at minSS ≈ 0.99, which is exactly the C2 gradient
-claim — *the deployment-relevant family difference shrinks as the
+claim - *the deployment-relevant family difference shrinks as the
 feature tier gets stronger.* Trust and Behavior land in between, with
 Behavior the narrowest non-Lexical gap once the six near-leaky page
-counts are removed. C3 (ΔAUC ≥ 0.02 on Lexical) is read off §6.1 and
+counts are removed. C3 (ΔAUC >= 0.02 on Lexical) is read off 6.1 and
 holds with margin.
 
 ---
 
-# 7. Summary — H1 gradient
+# 7. Summary - H1 gradient
 
-**H1 verdict against the three criteria from `phishing.rmd` §2.**
+**H1 verdict against the three criteria from `phishing.rmd` 2.**
 
-- **C1 (Δ minSS on Lexical ≥ 0.10):** holds. SVM-RBF posts minSS 0.983
+- **C1 (Δ minSS on Lexical >= 0.10):** holds. SVM-RBF posts minSS 0.983
   on Lexical; the best parametric champion (LDA) tops out at minSS
-  0.688 — Δ ≈ 0.295, an order of magnitude above the threshold.
+  0.688 - Δ ≈ 0.295, an order of magnitude above the threshold.
 - **C2 (gap shrinks toward FullLite):** holds. The Lexical minSS gap
   ≈ 0.30 collapses to ≈ 0.00 on FullLite where both families saturate
-  near 0.99 — exactly the gradient the hypothesis predicts.
-- **C3 (ΔAUC ≥ 0.02 on Lexical, sanity check):** holds. SVM 0.995 vs.
+  near 0.99 - exactly the gradient the hypothesis predicts.
+- **C3 (ΔAUC >= 0.02 on Lexical, sanity check):** holds. SVM 0.995 vs.
   LDA 0.931 → ΔAUC 0.064.
 
-H1 is therefore **supported on all three criteria** — both gating
+H1 is therefore **supported on all three criteria** - both gating
 criteria (C1, C2) by a wide margin. The remaining narrative below explains *why*
 each tier behaves the way it does.
 
@@ -863,45 +863,45 @@ each tier behaves the way it does.
    ways (digit runs × length × subdomain depth), and linear or Gaussian
    decision boundaries just can't capture those interactions.
 2. **Trust also favours non-parametric, but only barely.** With only
-   seven features — most of them plain binary flags — there's little
+   seven features - most of them plain binary flags - there's little
    non-linear structure left for non-parametric models to discover.
 3. **Behavior is the honest middle tier.** With the six near-leaky
    page counts (`LineOfCode`, `NoOfExternalRef`, `NoOfImage`,
-   `NoOfSelfRef`, `NoOfJS`, `NoOfCSS`) stripped out — each of which
-   individually gives univariate AUC ≥ 0.95 and single-handedly solves
-   the task — the remaining 14 Behavior features are a realistic
+   `NoOfSelfRef`, `NoOfJS`, `NoOfCSS`) stripped out - each of which
+   individually gives univariate AUC >= 0.95 and single-handedly solves
+   the task - the remaining 14 Behavior features are a realistic
    page-level signal without saturation. This is where we can read the
    family contrast cleanly at medium signal strength.
 
 **Threshold-0.5 quality (Precision / Sensitivity / Specificity).** The
-§6.1.1 table complements the AUC ranking with operating-point numbers.
+6.1.1 table complements the AUC ranking with operating-point numbers.
 Read per-model on the H1-critical Lexical tier:
 
-- **LR-Ridge.** Lexical Sens 0.921 / Spec 0.716 — at the 0.5 cut the
+- **LR-Ridge.** Lexical Sens 0.921 / Spec 0.716 - at the 0.5 cut the
   model would block ~28 % of legitimate URLs to keep ~92 % of phish.
   Unusable as a proxy filter; the imbalance closes from Trust onward.
-- **LDA.** Lexical Sens 0.971 / Spec 0.688 — at the 0.5 cut the model
+- **LDA.** Lexical Sens 0.971 / Spec 0.688 - at the 0.5 cut the model
   would block ~31 % of legitimate URLs to keep ~97 % of phish, a
   *worse* operating point than LR despite a higher AUC (0.931 vs.
   0.852). The clearest case in the report where ranking and threshold
-  disagree (see §4.2).
-- **NB.** Two-faced. Lexical: Sens 0.999, Spec 0.383, Prec 0.618 — at
+  disagree (see 4.2).
+- **NB.** Two-faced. Lexical: Sens 0.999, Spec 0.383, Prec 0.618 - at
   the 0.5 cut the model would block ~62 % of legitimate URLs to keep
   essentially 100 % of phish: a high-recall / low-precision flood that
   calls phish for almost everything. Behavior: Sens 0.732, Prec 0.995
-  — almost never calls phish, but is right when it does. Both
+  - almost never calls phish, but is right when it does. Both
   directions are symptoms of the same broken independence assumption.
-- **Random Forest.** Lexical Sens 0.967 / Spec 0.745 — at the 0.5 cut
+- **Random Forest.** Lexical Sens 0.967 / Spec 0.745 - at the 0.5 cut
   the model would block ~26 % of legitimate URLs to keep ~97 % of
   phish. Spec is the soft spot under fully grown trees; from Trust
-  onward the model is symmetric (≥ 0.97 on both axes). Pure
-  calibration issue, fixable by threshold tuning (§5.1).
+  onward the model is symmetric (>= 0.97 on both axes). Pure
+  calibration issue, fixable by threshold tuning (5.1).
 - **SVM-RBF.** The only model that keeps all three of Prec, Sens and
-  Spec at ≈ 0.98 simultaneously on Lexical — at the 0.5 cut it would
-  block only ~2 % of legitimate URLs while keeping ~99 % of phish —
+  Spec at ≈ 0.98 simultaneously on Lexical - at the 0.5 cut it would
+  block only ~2 % of legitimate URLs while keeping ~99 % of phish -
   and holds that symmetric profile across every other tier. No
   threshold recalibration needed.
-- **KNN.** Lexical Sens 0.944 / Spec 0.923 — at the 0.5 cut the
+- **KNN.** Lexical Sens 0.944 / Spec 0.923 - at the 0.5 cut the
   model would block ~8 % of legitimate URLs to keep ~94 % of phish:
   symmetric, deployable on quality grounds. Loses to SVM-RBF on
   inference cost: every proxy decision triggers ~24 k distance
@@ -916,13 +916,13 @@ into a corporate proxy is SVM-RBF.
 **When we would revisit the choice.** If the proxy pipeline later gains
 Behavior- or FullLite-grade signals and explainability becomes a
 requirement, LR-Ridge or LDA on that richer tier
-is a defensible downgrade — both reach AUC ≥ 0.99 there with balanced
+is a defensible downgrade - both reach AUC >= 0.99 there with balanced
 Sens/Spec, and their coefficients are interpretable. But for the
 URL-only first-line filter that our hypothesis is built around, SVM-RBF is
 the only model whose numbers support the deployment directly.
 ---
 
-# 8. Scenario 4 - Surrogate tree — visualising the RF decision rule
+# 8. Scenario 4 - Surrogate tree - visualising the RF decision rule
 
 **Reading of the task statement.** Task 4 says *"heatmaps **or**
 trees"* twice and asks us to *"compare how these visualisations differ
@@ -932,33 +932,33 @@ approaches"* in sentence 4 as **(visualisation, model)**, not as
 (heatmap, tree): sentence 2 anchors the comparison to the
 visualisation-vs-model axis, and the disjunctive *"or"* is repeated
 across sentences 1 and 3, not replaced by *"and"*. We therefore
-commit to **one visualisation** — a surrogate `rpart` tree trained on
-the RF's own predictions — and tune it explicitly against the model.
+commit to **one visualisation** - a surrogate `rpart` tree trained on
+the RF's own predictions - and tune it explicitly against the model.
 A heatmap variant was prototyped during EDA in earlier commits and
 dropped: hierarchical clustering visualises the geometry of the
 features, not the behaviour of any model, so under this reading it
 does not satisfy sentence 2 at all. The Sens-vs-RF / Spec-vs-RF
-decomposition in §7.3 and the `varImpPlot` cross-check in §7.4
+decomposition in 7.3 and the `varImpPlot` cross-check in 7.4
 directly answer the *"similarities and differences between the two
 approaches"* clause along the visualisation-vs-model axis.
 
-Random Forest is accurate but opaque — 300 unpruned bagged trees
-vote per prediction, with no single diagram to point at — so Task 4
+Random Forest is accurate but opaque - 300 unpruned bagged trees
+vote per prediction, with no single diagram to point at - so Task 4
 asks us to render a model-faithful visualisation alongside it and
 quantify how much of its behaviour that visualisation captures. We do this with a **surrogate tree**: a single
 `rpart` tree whose training target is **the RF's own predictions**, not
 the ground-truth label. The tree is therefore a student learning what
-the RF does, and its fidelity to the RF — not its accuracy against the
+the RF does, and its fidelity to the RF - not its accuracy against the
 truth.
 
 We run the exercise on two tiers: **Lexical** (where RF beats the
-parametric models by ≥ 0.10 AUC and a tree-level explanation is most
+parametric models by >= 0.10 AUC and a tree-level explanation is most
 valuable) and **FullLite** (where every model saturates near AUC ≈ 1.0
-and fidelity should be trivially high — a sanity check that the tuning
+and fidelity should be trivially high - a sanity check that the tuning
 procedure is unbiased). Trust and Behavior are omitted on purpose:
 Trust is 7 features, most of them binary flags, so the only non-linear
-structure it can carry is XOR-like binary interactions — which the
-§6.2 numbers rule out. Behavior sits between the two cases and would
+structure it can carry is XOR-like binary interactions - which the
+6.2 numbers rule out. Behavior sits between the two cases and would
 not add a new observation.
 
 ## 8.1 Teacher RF and surrogate utility
@@ -1023,7 +1023,7 @@ predictions.
 
   $$\text{fidelity} = \frac{1}{n_\text{test}} \sum_i \mathbf{1}\bigl[\hat{y}^{\text{tree}}_i = \hat{y}^{\text{RF}}_i\bigr].$$
 
-The rest of this report (§6.1.1, §7) judges classifiers on
+The rest of this report (6.1.1, 7) judges classifiers on
 **Sensitivity / Specificity**, not on overall accuracy, because a
 phishing-blocker's two error types have asymmetric cost. For the same
 reason we decompose fidelity the same way: `Sens vs RF` is the share
@@ -1131,10 +1131,10 @@ all_surr  <- bind_rows(surr_lex$results, surr_full$results)
 
 ## 8.3 Fidelity vs. depth
 
-The fidelity saturation curve — best fidelity per (tier, maxdepth)
-across all (cp, minbucket) — tells us how much tree expressiveness is
+The fidelity saturation curve - best fidelity per (tier, maxdepth)
+across all (cp, minbucket) - tells us how much tree expressiveness is
 needed before further depth stops buying alignment with the RF. RF
-reference AUCs come from §5.1.
+reference AUCs come from 5.1.
 
 ```{r task4-depth-curve}
 rf_ref <- tibble(
@@ -1171,14 +1171,14 @@ kable(depth_tbl,
       caption = "Best surrogate per (tier, maxdepth) on the S6 test set. Fidelity = overall tree/RF agreement; Sens vs RF / Spec vs RF = its per-class decomposition (treating RF prediction as target). Winning (cp, minbucket) picked by fidelity; ties broken by fewer leaves.")
 ```
 
-The §8.3 table reports the **fidelity ceiling** — the best rpart can do
+The 8.3 table reports the **fidelity ceiling** - the best rpart can do
 at each depth, regardless of readability. The `Sens vs RF` / `Spec vs RF`
 columns show *how* the remaining disagreement splits across the two
 classes: a fidelity of 0.96 with Sens-vs-RF 0.97 and Spec-vs-RF 0.95
 means the tree disagrees with the RF mostly on the legit side.
 
-For the plotted diagrams in §8.4 we pick a different tree: the
-surrogate with the highest fidelity under a readability cap of ≤ 15
+For the plotted diagrams in 8.4 we pick a different tree: the
+surrogate with the highest fidelity under a readability cap of =< 15
 leaves. A 37-leaf tree technically has a higher fidelity number, but
 it is visually unparseable on a slide. The price for the readability cap is small: fidelity drops by ~0.009
 on Lexical (from 0.967 with 37 leaves to 0.958 with 14 leaves) and
@@ -1251,8 +1251,8 @@ if (has_rpart_plot) {
 
 The surrogate's root split is a claim about what the RF thinks is the
 most discriminative single feature. To see whether that claim is
-faithful to the teacher — rather than an artefact of the one tree we
-plotted — we read the RF's own variable importance for the same teacher
+faithful to the teacher - rather than an artefact of the one tree we
+plotted - we read the RF's own variable importance for the same teacher
 and compare the ordering against the tree's top few splits.
 
 ```{r task4-varimp, fig.height=5, fig.width=11}
@@ -1275,7 +1275,7 @@ par(op)
 
 If the feature at the tree's root is also in the top few rows of the
 RF importance plot for the same tier, the surrogate isn't improvising
-— it's picking up the same signal ranking the RF itself assigns. That
+- it's picking up the same signal ranking the RF itself assigns. That
 is the evidence that lets us read the tree diagram as a visualisation
 of RF behaviour rather than a parallel classifier that happens to agree
 on the test set.
@@ -1302,7 +1302,7 @@ So the diagram does reflect what RF actually keys on, not just a
 second classifier that happens to agree on the test set.
 
 **What the surrogate cannot capture.** RF averages 300 bagged trees,
-each split seeing only `mtry = √p` features, which captures 3+ feature
+each split seeing only `mtry = (sqrt)p` features, which captures 3+ feature
 interactions a single tree cannot. That cost is visible on Lexical:
 Tree AUC 0.862 vs. RF AUC 0.969 (gap 0.107), and Sens drops 3.3 pp
 (0.968 → 0.934) when the surrogate stands in for RF. Spec only loses
@@ -1312,16 +1312,16 @@ is a structural picture of RF, not a deployable replacement for it.
 
 **Parameters and readability cap.** `maxdepth` is the binding lever:
 below 3 the surrogate underfits on Lexical (fidelity ~0.85), past 5–6
-it plateaus. `cp = 10⁻⁴` is permissive enough that depth, not pruning,
-sets the ceiling, and `minbucket ≥ 10` keeps leaves stable against
-teacher-label noise. The plotted trees in §8.4 add a ≤ 15-leaf cap so
+it plateaus. `cp = 10^-4` is permissive enough that depth, not pruning,
+sets the ceiling, and `minbucket >= 10` keeps leaves stable against
+teacher-label noise. The plotted trees in 8.4 add a =< 15-leaf cap so
 the diagram stays readable. This costs ~0.009 fidelity on Lexical
 and ~0.003 on FullLite.
 
 **Per-class fidelity.** `Sens vs RF` and `Spec vs RF` sit within a
 percent of each other on both tiers (Lexical 0.957 / 0.962, FullLite
 0.987 / 0.985), so the surrogate isn't just tracking the easy class.
-At depth 3 on Lexical the symmetry breaks — `Spec vs RF` falls to
-~0.87 while `Sens vs RF` holds at ~0.98 — and that 11 pp gap closes
+At depth 3 on Lexical the symmetry breaks - `Spec vs RF` falls to
+~0.87 while `Sens vs RF` holds at ~0.98 - and that 11 pp gap closes
 again by depth 6–7. Shallower diagrams therefore show only one side
 of RF's behaviour.
