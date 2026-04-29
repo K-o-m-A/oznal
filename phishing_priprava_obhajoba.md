@@ -812,6 +812,72 @@ A: Tri dôvody: (1) prahovo nezávislá, (2) interpretovateľná ako
 P(score(phishing) > score(legit)) pre náhodné páry, (3) dataset je
 vyvážený, takže AUC nie je zavádzajúca (na 99/1 dátach by bola).
 
+**Q: Ako odôvodňujete vetu *"the deployment cost is not a ranking — it
+is a single block/allow verdict at threshold 0.5 per click"*? Prečo
+práve threshold 0.5 a prečo binárne rozhodnutie ako gating metric, keď
+máte AUC?**
+
+A: Tá veta sa obhajuje cez tri previazané argumenty.
+
+**1. Reálny proxy nerobí ranking, robí binárne rozhodnutie.**
+Používateľ klikne na URL → proxy musí odpovedať buď *allow* (preposlanie
+spojenia) alebo *block* (warning stránka). Neexistuje stav „počkaj,
+najprv ohodnotím všetkých 235 tisíc URL a uvidím, kde si v poradí". AUC
+meria *kvalitu rebríčka* naprieč celým datasetom — to je užitočné pri
+výbere modelu, ale **nie pri klike**. Pri klike máš jednu URL, jeden
+score, jednu hranicu, jeden výrok. Toto je doménovo-fyzická vlastnosť
+proxy nasadenia, nie ľubovoľná voľba.
+
+**2. Threshold 0.5 je obhájiteľný default, nie arbitrárny.**
+Tri dôvody, prečo ho zvoliť:
+- **Bayes-optimal pri vyrovnaných triedach a neznámych nákladoch.**
+  Trieda balance je 57 % phishing / 43 % legitimate (§4.1.1 EDA) —
+  dostatočne blízko 50/50, aby 0.5 nebol skreslený. Asymetrický
+  threshold by vyžadoval explicitný **cost ratio** (false-block vs.
+  missed-phish), ktorý projekt nemá business-validovaný.
+- **Defaultný výstup `predict()` v R / caret.** Reprodukovateľnosť:
+  ktokoľvek to spustí, dostane tie isté čísla bez tunenia.
+- **Fair comparison medzi šiestimi modelmi.** Keby sme každému modelu
+  naladili optimálny per-model threshold z ROC kriviek, neporovnávali
+  by sme **inductive bias rodín** (čo H1 tvrdí), ale schopnosť modelu
+  byť doladený. Spoločný threshold 0.5 udržuje porovnanie čisté —
+  rozdiely v Sens/Spec odrážajú vlastnosti modelu, nie tuning.
+
+**3. Z toho vyplýva výber metricu.** Akonáhle prijmeš (1) + (2), AUC
+nemôže byť deployment metric — je z definície threshold-free. Sens a
+Spec pri 0.5 hovoria, koľko phishingu prejde a koľko legit URL je
+zablokovaných **v reálnom nasadení**. minSS = min(Sens, Spec) je
+*najslabší smer* — max z dvoch chybových typov pri zvolenom operating
+point. Manažérska otázka *"keď to nasadíme, koľko percent buď
+používateľov uvidí broken link, alebo phisher prejde?"* sa zodpovedá
+presne týmto číslom.
+
+**Ako to ustáť, ak komisia zatlačí ďalej:**
+
+- *„Prečo nie tuned threshold per model?"* → „Lebo to mení predmet
+  hypotézy. H1 testuje rozdiely medzi rodinami modelov pri **rovnakom**
+  operating point — tuned threshold by miešal rodinné rozdiely s
+  tuning-schopnosťou. Pri tom by SVM-RBF aj NB s prepočítaným cut-om
+  mohli vyzerať podobne, ale nasadenie by stále malo NB pathology — náš
+  metric to musí vidieť."
+- *„Prečo nie cost-sensitive threshold?"* → „Nemáme validovaný cost
+  ratio od stakeholdera. 0.5 je default, ktorý nepredpokladá nič; ak by
+  zákazník neskôr dodal pomer (napr. 10:1 v prospech catching phish),
+  threshold sa preladí, ale **rebríček modelov sa nezmení** — len
+  posunutý operating point. AUC + Sens/Spec krivka v `scenario_2.rmd`
+  §6 dávajú všetko, čo je na prepočet potrebné."
+- *„Prečo nie F1 alebo BalAcc?"* → „F1 ignoruje TN (Specificity) a v
+  proxy kontexte je false-block reálnym nákladom (helpdesk, broken
+  portal). BalAcc je priemer Sens a Spec — minSS je striktnejší (worst
+  case), čo lepšie zodpovedá manažérskej otázke 'aký je najhorší smer
+  chyby pri nasadení'."
+
+**Sumár jednou vetou na obhajobu:** *„Proxy je per-click binárny
+rozhodovač, threshold 0.5 je default zachovávajúci fair comparison
+medzi rodinami, takže jediný metric, ktorý meria reálne nasadenie, je
+threshold-závislý — a zo všetkých takých metrík je minSS najprísnejší
+voči asymetrickým nákladom, ktoré zatiaľ nemáme business-validované."*
+
 **Q: Ako viete, že rozdiely medzi foldami nie sú iba náhodný šum?**
 A: Párový Wilcoxonov test + veľkosť efektu.
 
