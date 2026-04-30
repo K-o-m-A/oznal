@@ -16,7 +16,7 @@ library(MASS, exclude = "select")
 library(klaR)
 library(randomForest)
 library(kernlab)
-library(pROC)
+library(yardstick)
 library(knitr)
 library(digest)
 
@@ -96,8 +96,8 @@ dataset_path <- if (file.exists("PhiUSIIL_Phishing_URL_Dataset.csv")) {
   "../PhiUSIIL_Phishing_URL_Dataset.csv"
 } else stop("PhiUSIIL_Phishing_URL_Dataset.csv not found")
 
-raw <- read_csv(dataset_path, show_col_types = FALSE)
-names(raw) <- map_chr(names(raw), ~ str_replace(.x, "^\ufeff", ""))
+raw <- read_csv(dataset_path, show_col_types = FALSE) %>%
+  rename_with(~ str_remove(.x, "^\ufeff"))
 cat("Loaded", nrow(raw), "rows,", ncol(raw), "columns.\n")
 ```
 
@@ -118,8 +118,7 @@ EXCLUDE_COLS     <- c(ID_COLS, SCORES, REDUNDANT_BINARY, RATIOS)
 df <- raw %>%
   mutate(label = factor(label, levels = c(1, 0),
                         labels = c("Phishing", "Legitimate"))) %>%
-  select(-all_of(EXCLUDE_COLS)) %>%
-  as.data.frame()
+  select(-all_of(EXCLUDE_COLS))
 
 cat("Feature matrix after exclusions:", ncol(df) - 1, "predictors.\n")
 ```
@@ -241,21 +240,33 @@ it keeps the code simple.
 
 ```{r recipes}
 feat <- df_sub %>% select(-label)
-binary_features     <- names(feat)[sapply(feat, function(x)
-                                   all(na.omit(x) %in% c(0, 1)))]
+binary_features <- feat %>%
+  select(where(~ all(na.omit(.x) %in% c(0, 1)))) %>%
+  names()
 continuous_features <- setdiff(names(feat), binary_features)
 
 apply_log <- function(d, cols) {
-  d[cols] <- lapply(d[cols], function(x) log1p(pmax(x, 0)))
-  d
+  d %>%
+    mutate(across(all_of(cols), ~ log1p(pmax(.x, 0))))
 }
 train_log <- apply_log(train_raw, continuous_features)
 test_log  <- apply_log(test_raw,  continuous_features)
 
-pp <- preProcess(train_log[, continuous_features], method = c("center", "scale"))
-train_std <- train_log; test_std  <- test_log
-train_std[, continuous_features] <- predict(pp, train_log[, continuous_features])
-test_std[,  continuous_features] <- predict(pp, test_log[,  continuous_features])
+pp <- train_log %>%
+  select(all_of(continuous_features)) %>%
+  preProcess(method = c("center", "scale"))
+
+replace_continuous <- function(d) {
+  scaled <- d %>%
+    select(all_of(continuous_features)) %>%
+    predict(pp, .)
+
+  d %>%
+    mutate(across(all_of(continuous_features), ~ scaled[[cur_column()]]))
+}
+
+train_std <- replace_continuous(train_log)
+test_std  <- replace_continuous(test_log)
 
 cat(length(continuous_features), "continuous,",
     length(binary_features), "binary features.\n")
@@ -270,8 +281,8 @@ and returns per-fold AUCs plus test-set metrics.
 
 ```{r fit-utility}
 fit_one_tier <- function(tier_features, data_train, data_test, method, tuneGrid = NULL, ...) {
-  tr <- data_train[, c("label", tier_features)]
-  te <- data_test[,  c("label", tier_features)]
+  tr <- data_train %>% select(label, all_of(tier_features))
+  te <- data_test %>% select(label, all_of(tier_features))
 
   ctrl <- trainControl(
     method          = "cv",
@@ -286,18 +297,18 @@ fit_one_tier <- function(tier_features, data_train, data_test, method, tuneGrid 
                       metric = "ROC", tuneGrid = tuneGrid, ...)
   elapsed <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
 
-  test_prob <- predict(fit, te, type = "prob")[, "Phishing"]
+  test_prob <- predict(fit, te, type = "prob") %>%
+    as_tibble() %>%
+    pull(Phishing)
   test_pred <- predict(fit, te)
-  test_auc  <- as.numeric(pROC::roc(te$label, test_prob,
-                                    levels = c("Legitimate", "Phishing"),
-                                    direction = "<", quiet = TRUE)$auc)
+  test_auc  <- roc_auc_vec(te$label, test_prob, event_level = "first")
   cm <- caret::confusionMatrix(test_pred, te$label, positive = "Phishing")
 
-  train_prob <- predict(fit, tr, type = "prob")[, "Phishing"]
+  train_prob <- predict(fit, tr, type = "prob") %>%
+    as_tibble() %>%
+    pull(Phishing)
   train_pred <- predict(fit, tr)
-  train_auc  <- as.numeric(pROC::roc(tr$label, train_prob,
-                                     levels = c("Legitimate", "Phishing"),
-                                     direction = "<", quiet = TRUE)$auc)
+  train_auc  <- roc_auc_vec(tr$label, train_prob, event_level = "first")
   train_cm   <- caret::confusionMatrix(train_pred, tr$label, positive = "Phishing")
 
   list(cv_per_fold = fit$resample,
@@ -313,7 +324,17 @@ fit_one_tier <- function(tier_features, data_train, data_test, method, tuneGrid 
 }
 
 tiers_fingerprint <- function(x)
-  digest::digest(lapply(x[sort(names(x))], sort))
+  x[sort(names(x))] %>%
+    map(sort) %>%
+    digest::digest()
+
+fit_tiers <- function(model, family, fitter) {
+  list(
+    model = model,
+    family = family,
+    by_tier = imap(tiers, fitter)
+  )
+}
 
 run_or_load <- function(name, fn) {
   path <- file.path(ARTIFACTS, paste0("res_", name, ".rds"))
@@ -335,8 +356,7 @@ run_or_load <- function(name, fn) {
 }
 
 print_tier_summary <- function(res) {
-  tbl <- map_dfr(names(res$by_tier), function(tier) {
-    r <- res$by_tier[[tier]]
+  tbl <- imap_dfr(res$by_tier, function(r, tier) {
     gap <- r$train_auc - r$test_auc
     tibble(
       Tier        = tier,
@@ -353,7 +373,7 @@ print_tier_summary <- function(res) {
       `Train (s)` = sprintf("%.1f", r$train_secs)
     )
   })
-  knitr::kable(
+  kable(
     tbl,
     align   = "lrrrrrrrrrr",
     caption = sprintf("%s - %s",
@@ -388,16 +408,14 @@ the same regularisation regime.
 
 ```{r fit-lr}
 res_lr <- run_or_load("lr", function() {
-  out <- list(model = "LogReg-Ridge", family = "parametric", by_tier = list())
-  for (tier in names(tiers)) {
+  fit_tiers("LogReg-Ridge", "parametric", function(feats, tier) {
     cat(sprintf("  LogReg-Ridge   [%-8s] fitting (%d features)...\n",
-                tier, length(tiers[[tier]])))
-    out$by_tier[[tier]] <- fit_one_tier(
-      tiers[[tier]], train_std, test_std,
+                tier, length(feats)))
+    fit_one_tier(
+      feats, train_std, test_std,
       method = "glmnet",
-      tuneGrid = data.frame(alpha = 0, lambda = 0.01))
-  }
-  out
+      tuneGrid = tibble(alpha = 0, lambda = 0.01))
+  })
 })
 print_tier_summary(res_lr)
 ```
@@ -421,14 +439,11 @@ on top of the LR baseline.
 
 ```{r fit-lda}
 res_lda <- run_or_load("lda", function() {
-  out <- list(model = "LDA", family = "parametric", by_tier = list())
-  for (tier in names(tiers)) {
+  fit_tiers("LDA", "parametric", function(feats, tier) {
     cat(sprintf("  LDA            [%-8s] fitting (%d features)...\n",
-                tier, length(tiers[[tier]])))
-    out$by_tier[[tier]] <- fit_one_tier(
-      tiers[[tier]], train_std, test_std, method = "lda")
-  }
-  out
+                tier, length(feats)))
+    fit_one_tier(feats, train_std, test_std, method = "lda")
+  })
 })
 print_tier_summary(res_lda)
 ```
@@ -466,16 +481,14 @@ bandwidth that hides it.
 
 ```{r fit-nb, message=FALSE, warning=FALSE}
 res_nb <- run_or_load("nb", function() {
-  out <- list(model = "NaiveBayes", family = "parametric", by_tier = list())
-  for (tier in names(tiers)) {
+  fit_tiers("NaiveBayes", "parametric", function(feats, tier) {
     cat(sprintf("  NaiveBayes     [%-8s] fitting (%d features)...\n",
-                tier, length(tiers[[tier]])))
-    out$by_tier[[tier]] <- suppressWarnings(fit_one_tier(
-      tiers[[tier]], train_std, test_std,
+                tier, length(feats)))
+    suppressWarnings(fit_one_tier(
+      feats, train_std, test_std,
       method = "nb",
-      tuneGrid = data.frame(fL = 1, usekernel = TRUE, adjust = 1)))
-  }
-  out
+      tuneGrid = tibble(fL = 1, usekernel = TRUE, adjust = 1)))
+  })
 })
 print_tier_summary(res_nb)
 ```
@@ -514,19 +527,17 @@ exactly the effect the commentary below picks apart.
 
 ```{r fit-rf}
 res_rf <- run_or_load("rf", function() {
-  out <- list(model = "RandomForest", family = "non-parametric", by_tier = list())
-  for (tier in names(tiers)) {
-    p    <- length(tiers[[tier]])
+  fit_tiers("RandomForest", "non-parametric", function(feats, tier) {
+    p    <- length(feats)
     mtry <- max(1, floor(sqrt(p)))
     cat(sprintf("  RandomForest   [%-8s] fitting (%d features, mtry=%d)...\n",
                 tier, p, mtry))
-    out$by_tier[[tier]] <- fit_one_tier(
-      tiers[[tier]], train_raw, test_raw,
+    fit_one_tier(
+      feats, train_raw, test_raw,
       method = "rf",
-      tuneGrid = data.frame(mtry = mtry),
+      tuneGrid = tibble(mtry = mtry),
       ntree = 300)
-  }
-  out
+  })
 })
 print_tier_summary(res_rf)
 ```
@@ -566,16 +577,14 @@ nothing meaningful left for a grid search to improve.
 
 ```{r fit-svm}
 res_svm <- run_or_load("svm", function() {
-  out <- list(model = "SVM-RBF", family = "non-parametric", by_tier = list())
-  for (tier in names(tiers)) {
+  fit_tiers("SVM-RBF", "non-parametric", function(feats, tier) {
     cat(sprintf("  SVM-RBF        [%-8s] fitting (%d features)...\n",
-                tier, length(tiers[[tier]])))
-    out$by_tier[[tier]] <- fit_one_tier(
-      tiers[[tier]], train_std, test_std,
+                tier, length(feats)))
+    fit_one_tier(
+      feats, train_std, test_std,
       method = "svmRadial",
-      tuneGrid = data.frame(C = 1, sigma = 0.1))
-  }
-  out
+      tuneGrid = tibble(C = 1, sigma = 0.1))
+  })
 })
 print_tier_summary(res_svm)
 ```
@@ -610,24 +619,21 @@ decisions.
 
 ```{r fit-knn}
 jitter_features <- function(d, cols, sd = 1e-3) {
-  for (c in cols) d[[c]] <- d[[c]] + rnorm(nrow(d), 0, sd)
-  d
+  d %>%
+    mutate(across(all_of(cols), ~ .x + rnorm(n(), 0, sd)))
 }
 
 res_knn <- run_or_load("knn", function() {
-  out <- list(model = "KNN", family = "non-parametric", by_tier = list())
-  for (tier in names(tiers)) {
-    feats <- tiers[[tier]]
+  fit_tiers("KNN", "non-parametric", function(feats, tier) {
     cat(sprintf("  KNN            [%-8s] fitting (%d features)...\n",
                 tier, length(feats)))
     tr_j  <- jitter_features(train_std, feats)
     te_j  <- jitter_features(test_std,  feats)
-    out$by_tier[[tier]] <- fit_one_tier(
+    fit_one_tier(
       feats, tr_j, te_j,
       method = "knn",
-      tuneGrid = data.frame(k = 25))
-  }
-  out
+      tuneGrid = tibble(k = 25))
+  })
 })
 print_tier_summary(res_knn)
 ```
@@ -653,15 +659,14 @@ filter. SVM-RBF wins on both quality and inference cost.
 all_results <- list(res_lr, res_lda, res_nb, res_rf, res_svm, res_knn)
 
 auc_long <- map_dfr(all_results, function(r) {
-  map_dfr(names(r$by_tier), function(tier)
-    r$by_tier[[tier]]$cv_per_fold %>%
+  imap_dfr(r$by_tier, function(tier_result, tier)
+    tier_result$cv_per_fold %>%
       transmute(model = r$model, family = r$family, tier = tier,
                 fold = Resample, auc = ROC))
 })
 
 test_tbl <- map_dfr(all_results, function(r) {
-  map_dfr(names(r$by_tier), function(tier) {
-    t <- r$by_tier[[tier]]
+  imap_dfr(r$by_tier, function(t, tier) {
     tibble(model = r$model, family = r$family, tier = tier,
            train_auc = t$train_auc, train_acc = t$train_acc,
            test_auc = t$test_auc, test_acc = t$test_acc,
@@ -764,7 +769,9 @@ gap_tbl <- test_tbl %>%
 
 gap_tbl %>%
   mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
-  kable(caption = "Per-tier gap between best non-parametric and best parametric champion (selected on test-set minSS).")
+  kable(
+    caption = "Per-tier gap between best non-parametric and best parametric champion (selected on test-set minSS)."
+  )
 ```
 
 ### 6.2.1 Statistical sanity check - paired Wilcoxon on per-fold AUC
@@ -786,7 +793,10 @@ champions <- test_tbl %>%
   ungroup() %>%
   select(tier, family, model)
 
-wilcox_tbl <- map_dfr(unique(champions$tier), function(t) {
+wilcox_tbl <- champions %>%
+  distinct(tier) %>%
+  pull(tier) %>%
+  map_dfr(function(t) {
   par_model    <- champions %>%
     filter(tier == t, family == "parametric")     %>% pull(model)
   nonpar_model <- champions %>%
@@ -814,7 +824,9 @@ wilcox_tbl <- map_dfr(unique(champions$tier), function(t) {
 wilcox_tbl %>%
   mutate(`Median ΔAUC` = round(`Median ΔAUC`, 4),
          `p-value`     = format.pval(`p-value`, digits = 2, eps = 1e-4)) %>%
-  kable(caption = "Paired Wilcoxon signed-rank test on per-fold CV AUC: best non-parametric vs. best parametric champion, one-sided.")
+  kable(
+    caption = "Paired Wilcoxon signed-rank test on per-fold CV AUC: best non-parametric vs. best parametric champion, one-sided."
+  )
 ```
 
 On **Lexical** and **Behavior** the test rejects equality at any
@@ -842,7 +854,7 @@ holds with margin.
 
 # 7. Summary - H1 gradient
 
-**H1 verdict against the three criteria from `phishing.rmd` 2.**
+**H1 verdict against the three criteria from `eda.rmd` 2.**
 
 - **C1 (Δ minSS on Lexical >= 0.10):** holds. SVM-RBF posts minSS 0.983
   on Lexical; the best parametric champion (LDA) tops out at minSS
@@ -975,11 +987,14 @@ if (has_rpart_plot) suppressPackageStartupMessages(library(rpart.plot))
 refit_rf_for_surrogate <- function(selected_tiers = c("Lexical", "FullLite"),
                                    ntree = 300) {
   path <- file.path(ARTIFACTS, "rf_for_surrogate.rds")
+  rf_seed <- 20260430L
   fp <- digest::digest(list(
     selected_tiers = selected_tiers,
-    features       = lapply(tiers[selected_tiers], sort),
+    features       = map(tiers[selected_tiers], sort),
     ntree          = ntree,
-    n_train        = nrow(train_raw)
+    n_train        = nrow(train_raw),
+    seed           = rf_seed,
+    schema         = "v3_seeded_teacher"
   ))
   if (file.exists(path)) {
     cached <- readRDS(path)
@@ -987,13 +1002,13 @@ refit_rf_for_surrogate <- function(selected_tiers = c("Lexical", "FullLite"),
   }
   cat("  [surrogate] refitting RF teacher on",
       paste(selected_tiers, collapse = ", "), "...\n")
-  by_tier <- list()
-  for (tier in selected_tiers) {
+  by_tier <- map(set_names(selected_tiers), function(tier) {
     feats <- tiers[[tier]]
     mtry  <- max(1, floor(sqrt(length(feats))))
+    set.seed(rf_seed + match(tier, selected_tiers))
     t0 <- Sys.time()
     fit <- randomForest(
-      x     = train_raw[, feats, drop = FALSE],
+      x     = train_raw %>% select(all_of(feats)),
       y     = train_raw$label,
       ntree = ntree,
       mtry  = mtry
@@ -1001,8 +1016,8 @@ refit_rf_for_surrogate <- function(selected_tiers = c("Lexical", "FullLite"),
     cat(sprintf("    %-10s %d features, mtry=%d, %.1fs\n",
                 tier, length(feats), mtry,
                 as.numeric(difftime(Sys.time(), t0, units = "secs"))))
-    by_tier[[tier]] <- fit
-  }
+    fit
+  })
   saveRDS(list(by_tier = by_tier, fp = fp), path)
   by_tier
 }
@@ -1039,8 +1054,8 @@ tune_surrogate_tree <- function(tier, rf_fit,
                                 cps        = c(1e-4, 1e-3, 1e-2),
                                 minbuckets = c(10, 30, 100)) {
   feats <- tiers[[tier]]
-  tr_x  <- train_raw[, feats, drop = FALSE]
-  te_x  <- test_raw[ , feats, drop = FALSE]
+  tr_x  <- train_raw %>% select(all_of(feats))
+  te_x  <- test_raw %>% select(all_of(feats))
 
   teacher_train <- predict(rf_fit, tr_x)
   teacher_test  <- predict(rf_fit, te_x)
@@ -1053,9 +1068,11 @@ tune_surrogate_tree <- function(tier, rf_fit,
   tr_data <- tr_x
   tr_data$teacher_label <- teacher_train
 
-  rows  <- list()
-  trees <- list()
-  for (md in maxdepths) for (cpv in cps) for (mb in minbuckets) {
+  scored <- crossing(maxdepth = maxdepths, cp = cps, minbucket = minbuckets) %>%
+    pmap_dfr(function(maxdepth, cp, minbucket) {
+    md  <- maxdepth
+    cpv <- cp
+    mb  <- minbucket
     key <- sprintf("md=%d_cp=%.0e_mb=%d", md, cpv, mb)
     tree <- rpart(
       teacher_label ~ ., data = tr_data,
@@ -1080,21 +1097,28 @@ tune_surrogate_tree <- function(tier, rf_fit,
     tree_sens <- mean(pr_class[truth_test == "Phishing"]   == "Phishing")
     tree_spec <- mean(pr_class[truth_test == "Legitimate"] == "Legitimate")
 
-    auc <- as.numeric(pROC::roc(truth_test, pr_prob,
-                                levels = c("Legitimate", "Phishing"),
-                                direction = "<", quiet = TRUE)$auc)
-    rows[[key]] <- tibble(
+    auc <- roc_auc_vec(truth_test, pr_prob, event_level = "first")
+    tibble(
+      key = key,
       tier = tier, maxdepth = md, cp = cpv, minbucket = mb,
       leaves = n_leaves,
       fidelity   = fidelity,
       sens_vs_rf = sens_vs_rf, spec_vs_rf = spec_vs_rf,
       tree_sens  = tree_sens,  tree_spec  = tree_spec,
       rf_sens    = rf_sens,    rf_spec    = rf_spec,
-      auc        = auc
+      auc        = auc,
+      tree       = list(tree)
     )
-    trees[[key]] <- tree
-  }
-  list(results = bind_rows(rows), trees = trees,
+  })
+
+  trees <- scored %>%
+    select(key, tree) %>%
+    deframe()
+
+  results <- scored %>%
+    select(-key, -tree)
+
+  list(results = results, trees = trees,
        teacher_test = teacher_test, truth_test = truth_test,
        rf_sens = rf_sens, rf_spec = rf_spec)
 }
@@ -1107,8 +1131,9 @@ load_surrogate <- function(tier, rf_fit) {
     features   = sort(tiers[[tier]]),
     n_train    = nrow(train_raw),
     rf_ntree   = rf_fit$ntree,
+    rf_teacher = digest::digest(rf_fit),
     tree_store = "model=TRUE",
-    schema     = "v2_sens_spec"
+    schema     = "v3_teacher_fp"
   ))
   if (file.exists(path)) {
     cached <- readRDS(path)
@@ -1155,7 +1180,8 @@ rf_ref <- tibble(
 
 depth_tbl <- all_surr %>%
   group_by(tier, maxdepth) %>%
-  slice_max(fidelity, n = 1, with_ties = FALSE) %>%
+  arrange(desc(fidelity), leaves, .by_group = TRUE) %>%
+  slice_head(n = 1) %>%
   ungroup() %>%
   left_join(rf_ref, by = "tier") %>%
   mutate(tier = factor(tier, levels = c("Lexical", "FullLite"))) %>%
@@ -1167,8 +1193,10 @@ depth_tbl <- all_surr %>%
             `Tree AUC`   = round(auc,        4),
             `RF AUC`     = round(rf_auc,     4))
 
-kable(depth_tbl,
-      caption = "Best surrogate per (tier, maxdepth) on the S6 test set. Fidelity = overall tree/RF agreement; Sens vs RF / Spec vs RF = its per-class decomposition (treating RF prediction as target). Winning (cp, minbucket) picked by fidelity; ties broken by fewer leaves.")
+kable(
+  depth_tbl,
+  caption = "Best surrogate per (tier, maxdepth) on the S6 test set. Fidelity = overall tree/RF agreement; Sens vs RF / Spec vs RF = its per-class decomposition (treating RF prediction as target). Winning (cp, minbucket) picked by fidelity; ties broken by fewer leaves."
+)
 ```
 
 The 8.3 table reports the **fidelity ceiling** - the best rpart can do
@@ -1202,7 +1230,9 @@ winners %>%
   select(tier, maxdepth, cp, minbucket, leaves,
          fidelity, sens_vs_rf, spec_vs_rf,
          tree_sens, tree_spec, rf_sens, rf_spec, auc) %>%
-  kable(caption = sprintf("Plotted surrogate tree per tier: highest fidelity subject to leaves <= %d. Ties broken by fewer leaves. `tree_sens`/`tree_spec` are vs. ground truth; `rf_sens`/`rf_spec` are the RF reference - the closer they are, the less the surrogate changes the operating point.", MAX_PLOT_LEAVES))
+  kable(
+    caption = sprintf("Plotted surrogate tree per tier: highest fidelity subject to leaves <= %d. Ties broken by fewer leaves. `tree_sens`/`tree_spec` are vs. ground truth; `rf_sens`/`rf_spec` are the RF reference - the closer they are, the less the surrogate changes the operating point.", MAX_PLOT_LEAVES)
+  )
 ```
 
 ## 8.4 Winning trees
