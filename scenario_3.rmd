@@ -330,6 +330,11 @@ lexical_diagnostic %>%
     H2_pass
   ) %>%
   kable(caption = "Primary Task 3 result: final selected counts, held-out AUC/Sensitivity/Specificity, and H2 criteria (C1: k <= 9, C2: AUC >= 0.95, C3: Sens >= 0.94 and Spec >= 0.75).")
+
+saveRDS(
+  list(table = as.data.frame(lexical_diagnostic), fp = fp_inputs),
+  file.path(ARTIFACTS, "d3_lexical_fs_metrics.rds")
+)
 ```
 
 Some URL-length features are heavily correlated, and both stepwise and lasso shrink the pool from 13 to **9 predictors** (a 31 % reduction). Elastic-net keeps 11 and so misses the C1 sparsity criterion. The smaller fits clear the operating-point thresholds: stepwise reaches **AUC 0.957, Sensitivity 0.949, Specificity 0.839**, and lasso lands at **AUC 0.951, Sensitivity 0.941, Specificity 0.764** - both pass all three H2 criteria, with stepwise the more comfortable margin on Specificity. Elastic-net (AUC 0.953, Sens 0.943, Spec 0.769) is operationally fine but fails the sparsity bound.
@@ -358,7 +363,6 @@ d1 %>% dplyr::select(-score) %>%
 ```
 
 
-NEEDS CHECK
 ## 6.2 Significance loss as predictors are added or removed
 
 ### Stepwise: p-value evolution along the AIC path

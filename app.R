@@ -76,7 +76,7 @@ winner_transform <- function(raw_row, w) {
 ui <- navbarPage(
   title = "Phishing Detection",
   id = "navbar",
-  selected = "eda",
+  selected = "scenario_2",
   header = tagList(
     useShinyjs(),
     tags$head(tags$style(HTML("
@@ -149,27 +149,27 @@ ui <- navbarPage(
   ),
 
   # ---- EDA tab ------------------------------------------------------------
-  tabPanel("EDA", value = "eda",
-    uiOutput("eda_data_hint"),
-    fluidRow(
-      column(7,
-        h4("Class balance"),
-        plotOutput("eda_class_balance", height = "320px")
-      ),
-      column(5,
-        h4("Feature counts per tier"),
-        tableOutput("eda_tier_counts"),
-        helpText("Tier definitions from ", code("build_tiers()"),
-                 " in fit_core.R; FullLite drops 6 leaky Behavior features.")
-      )
-    ),
-    hr(),
-    h5("Split info"),
-    verbatimTextOutput("split_info"),
-    br(),
-    h5("Train head"),
-    DTOutput("train_head_dt")
-  ),
+  # tabPanel("EDA", value = "eda",
+  #   uiOutput("eda_data_hint"),
+  #   fluidRow(
+  #     column(7,
+  #       h4("Class balance"),
+  #       plotOutput("eda_class_balance", height = "320px")
+  #     ),
+  #     column(5,
+  #       h4("Feature counts per tier"),
+  #       tableOutput("eda_tier_counts"),
+  #       helpText("Tier definitions from ", code("build_tiers()"),
+  #                " in fit_core.R; FullLite drops 6 leaky Behavior features.")
+  #     )
+  #   ),
+  #   hr(),
+  #   h5("Split info"),
+  #   verbatimTextOutput("split_info"),
+  #   br(),
+  #   h5("Train head"),
+  #   DTOutput("train_head_dt")
+  # ),
 
   # ---- Scenario 2 tab -----------------------------------------------------
   tabPanel("Scenario 2", value = "scenario_2",
@@ -378,46 +378,50 @@ ui <- navbarPage(
              code("scenario_3.rmd"), " to refresh."),
     verbatimTextOutput("s3_status"),
     br(),
-    h5("Primary Lexical URL-only H2 result (AUC, Sensitivity, Specificity)"),
+    h5("Primary Lexical URL-only H2 result (AUC, Sensitivity, Specificity, H2 criteria)"),
     DTOutput("s3_h2_dt"),
+    helpText("Final fits scored on the held-out 20% test split. AUC checks ",
+             "ranking; Sensitivity and Specificity check the threshold-0.5 ",
+             "operating point. C1/C2/C3 columns track the H2 criteria."),
     br(),
-    h5("D1: exact Lexical predictors retained by each method"),
+    h5("Selected predictors per method"),
     DTOutput("s3_d1_dt"),
-    helpText("This table is the main D1 output: x = retained by the FS method; blank = dropped."),
+    helpText("x = retained by the FS method; blank = dropped."),
     br(),
-    h5("D2: stepwise p-value path along the AIC selection"),
-    plotOutput("s3_step_path_plot", height = "450px"),
+    h5("Stepwise: p-value audit along the AIC path"),
     DTOutput("s3_step_path_dt"),
-    helpText("Each line is one predictor's two-sided z-test p-value ",
-             "across stepAIC steps. The plot is only an overview; the ",
-             "table below it gives the named feature-level audit. ",
-             "This is an audit of the selected logistic GLM, not a ",
-             "performance curve."),
+    helpText("Per-predictor audit of the two-sided z-test p-value across ",
+             "stepAIC steps: first/last step active, min/max/final p, and ",
+             "a flag for any movement across the 0.05 line. This is an ",
+             "audit of the selected logistic GLM, not a performance curve."),
     br(),
-    h5("D2: embedded coefficients retained at lambda.1se"),
+    h5("Lasso / Elastic-Net: coefficients retained at lambda.1se"),
     plotOutput("s3_embedded_coef_plot", height = "450px"),
-    helpText("This replaces the anonymous glmnet path plot with named ",
-             "features. Only non-zero coefficients are shown; zero means ",
-             "the feature was dropped by that embedded method."),
+    helpText("Only non-zero coefficients are shown; zero means the feature ",
+             "was dropped by that embedded method."),
     br(),
-    h5("D2: embedded feature robustness along the regularisation path"),
-    plotOutput("s3_embedded_lambda_plot", height = "450px"),
-    helpText("Further right means the feature remains active under ",
-             "stronger regularisation. Elastic-net often keeps groups of ",
-             "correlated URL predictors instead of dropping as aggressively ",
-             "as lasso."),
-    br(),
-    h5("D3: held-out test metrics of the reduced fits"),
-    DTOutput("s3_d3_dt"),
-    helpText("Method-native final fits scored on the same 20% test split ",
-             "as Scenario 2: stepwise/lasso/elastic-net final models only. ",
-             "AUC checks ranking; Sensitivity and ",
-             "Specificity check the threshold-0.5 deployment point."),
+    h5("Lasso / Elastic-Net: largest lambda where each predictor is active"),
+    DTOutput("s3_embedded_lambda_dt"),
+    helpText("Larger value = retained under stronger regularisation. ",
+             "'(never)' means the feature never enters the path. ",
+             "Elastic-net tends to keep groups of correlated URL predictors ",
+             "instead of dropping them as aggressively as lasso."),
     br(),
     h5("Secondary FullLite fallback predictor counts (10 outer CV folds)"),
     plotOutput("s3_perfold_plot", height = "350px"),
     helpText("Fallback-only diagnostic: selected-predictor counts on the 34-feature FullLite pool. ",
-             "This is not the primary Lexical Task 3 claim.")
+             "This is not the primary Lexical Task 3 claim."),
+    br(),
+    h5("Secondary FullLite fallback predictor counts"),
+    DTOutput("s3_perfold_dt"),
+    helpText("Per-fold selected-predictor counts for stepwise, lasso and elastic-net."),
+    br(),
+    h5("Average selected-predictor count across folds"),
+    DTOutput("s3_fulllite_mean_dt"),
+    helpText("One-decimal mean k values across the 10 CV folds. "),
+    br(),
+    h5("FullLite selection frequency across folds"),
+    DTOutput("s3_fulllite_freq_dt")
   )
 )
 
@@ -1234,6 +1238,32 @@ server <- function(input, output, session) {
     p
   })
 
+  output$s3_perfold_dt <- renderDT({
+    pf <- s3_perfold()
+    if (is.null(pf) || is.null(pf$k_step)) return(NULL)
+    tibble(
+      fold = seq_along(pf$k_step),
+      k_step = pf$k_step,
+      k_lasso = pf$k_lasso,
+      k_en = pf$k_en
+    ) %>%
+      datatable(options = list(dom = "tp", pageLength = 10), rownames = FALSE,
+                caption = "FullLite stress test: selected-predictor count per CV fold (out of 34 candidates).")
+  })
+
+  output$s3_fulllite_mean_dt <- renderDT({
+    pf <- s3_perfold()
+    if (is.null(pf) || is.null(pf$k_step)) return(NULL)
+    tibble(
+      metric = c("mean k (stepwise)", "mean k (lasso)", "mean k (elastic-net)"),
+      value = c(sprintf("%.1f", mean(pf$k_step)),
+                sprintf("%.1f", mean(pf$k_lasso)),
+                sprintf("%.1f", mean(pf$k_en)))
+    ) %>%
+      datatable(options = list(dom = "t"), rownames = FALSE,
+                caption = "Average selected-predictor count across folds for each FS method.")
+  })
+
   output$s3_d1_dt <- renderDT({
     fp <- s3_finals()
     if (is.null(fp)) return(NULL)
@@ -1266,22 +1296,6 @@ server <- function(input, output, session) {
       tibble(step = i, predictor = k_i$terms, p = k_i$p, AIC = k_i$AIC)
     }) %>% filter(predictor != "(Intercept)")
   }
-
-  output$s3_step_path_plot <- renderPlot({
-    fp <- s3_finals()
-    if (is.null(fp) || is.null(fp$stepwise_fit$keep)) return(NULL)
-    step_path <- s3_step_path_data(fp)
-    p_floor <- 1e-100
-    step_path_plot <- step_path %>% mutate(p_plot = pmax(p, p_floor))
-    ggplot(step_path_plot, aes(step, p_plot, group = predictor, colour = predictor)) +
-      geom_line(alpha = 0.7) + geom_point(size = 1.2) +
-      geom_hline(yintercept = 0.05, linetype = "dashed", colour = "red") +
-      scale_y_log10(limits = c(p_floor, 1),
-                    labels = scales::label_scientific()) +
-      labs(x = "stepAIC step",
-           y = "Pr(>|z|)  (log scale; floored for plotting)") +
-      theme_minimal(base_size = 12) + theme(legend.position = "none")
-  })
 
   output$s3_step_path_dt <- renderDT({
     fp <- s3_finals()
@@ -1376,6 +1390,37 @@ server <- function(input, output, session) {
     d3$table %>%
       mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
       datatable(options = list(dom = "t"), rownames = FALSE)
+  })
+
+  output$s3_fulllite_freq_dt <- renderDT({
+    pf <- s3_perfold()
+    if (is.null(pf) || is.null(pf$step_terms)) return(NULL)
+    n_folds <- length(pf$step_terms)
+    count_in_folds <- function(term_lists, term) {
+      sum(vapply(term_lists, function(tl) term %in% tl, logical(1)))
+    }
+    all_terms <- sort(unique(c(unlist(pf$step_terms),
+                               unlist(pf$lasso_terms),
+                               unlist(pf$en_terms))))
+    if (!length(all_terms)) return(NULL)
+    tibble(
+      predictor   = all_terms,
+      stepwise    = vapply(all_terms, count_in_folds, integer(1),
+                           term_lists = pf$step_terms),
+      lasso       = vapply(all_terms, count_in_folds, integer(1),
+                           term_lists = pf$lasso_terms),
+      elastic_net = vapply(all_terms, count_in_folds, integer(1),
+                           term_lists = pf$en_terms)
+    ) %>%
+      mutate(score = stepwise + lasso + elastic_net) %>%
+      arrange(desc(score), predictor) %>%
+      dplyr::select(-score) %>%
+      datatable(
+        options = list(dom = "tp", pageLength = 15),
+        rownames = FALSE,
+        caption = sprintf(
+          "FullLite predictors: number of CV folds (out of %d) in which each FS method retained each predictor.",
+          n_folds))
   })
 
   # ---------------------------------------------------------------------------
