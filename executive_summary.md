@@ -31,10 +31,16 @@ Is a non-parametric model (Random Forest, SVM-RBF, KNN) better than a parametric
 
 In case the managers prefer Random Forest over our recommendation, we trained a **surrogate decision tree** that mimics the Random Forest's predictions rather than the original labels. It reproduces ~96% of the RF's decisions with a tree small enough to present on a single slide, and its top split matches the RF's most important feature, confirming it's a faithful representation rather than a simplification.
 
-## Scenario 3 - Feature selection on the URL-only filter
+## Scenario 3 - Can the URL-only filter be made smaller without losing quality?
 
-*[To be added once Scenario 3 is finalised.]*
+A linear model with all 13 URL features works, but several of those features describe almost the same thing - URL length, letter count, and digit count tend to rise and fall together. We tested whether an automated procedure can drop the duplicates and keep the filter just as effective. Three trimming methods were compared, all on top of the same underlying linear model: a step-by-step search (**bidirectional stepwise**), and two methods that penalise extra features during fitting (**Lasso** and **Elastic-Net**).
+
+**Result on the URL-only filter.** Two of the three methods shrank the list from 13 features down to **9** (a 31 % cut). Stepwise gave the cleanest result: it caught about 95 % of phishing while wrongly blocking only 16 % of legitimate links. Lasso reached the same 9-feature size but with thinner margins (about 24 % legitimate links wrongly blocked). Elastic-Net kept 11 features and so missed the size target.
+
+**Same pattern on the larger feature pool.** When we ran the three methods on the richer FullLite pool (34 features), stepwise was again the most compact: it kept around **50 %** of the pool, while Lasso kept **76 %** and Elastic-Net **82 %**. Quality stayed near-perfect for all three on this pool because FullLite already contains very strong page-level signals, but stepwise reached that ceiling with by far the smallest filter.
+
+**Recommendation.** If a smaller, easy-to-review filter is preferred - for compliance or for a security team that wants to read the rules by hand - **stepwise is the best choice on both pools**. It gives the smallest feature set, the most comfortable error margins, and a step-by-step record of which features entered and left, which is useful for review.
 
 ## Summary
 
-URL strings already carry enough signal to catch most phishing without ever loading the page, but extracting that signal cleanly requires a non-linear model. **SVM-RBF is the recommended deployment.** If Random Forest is preferred instead, the surrogate tree gives the security team a readable explanation for every blocked URL. Linear models remain useful once richer features are available.
+URL strings already carry enough signal to catch most phishing without ever loading the page, but extracting that signal cleanly requires a non-linear model. **SVM-RBF is the recommended deployment** for raw quality. If Random Forest is preferred instead, the surrogate tree gives the security team a readable explanation for every blocked URL. If the priority is a small, auditable linear rule, **stepwise selection on the URL features** delivers a 9-feature filter that still clears the quality thresholds.
