@@ -73,9 +73,13 @@ winner_transform <- function(raw_row, w) {
 # UI
 # -----------------------------------------------------------------------------
 
-ui <- fluidPage(
-  useShinyjs(),
-  tags$head(tags$style(HTML("
+ui <- navbarPage(
+  title = "Phishing Detection",
+  id = "navbar",
+  selected = "eda",
+  header = tagList(
+    useShinyjs(),
+    tags$head(tags$style(HTML("
     details.hp-section {
       border: 1px solid #d1d5db;
       border-radius: 6px;
@@ -137,253 +141,283 @@ ui <- fluidPage(
       font-size: 12px;
     }
     .config-panel .config-empty { color: #9ca3af; font-style: italic; }
-  "))),
-  titlePanel("Phishing Detection"),
 
-  sidebarLayout(
-    sidebarPanel(
-      width = 4,
+    .navbar .container-fluid > .navbar-header .navbar-brand { font-weight: 600; }
+    .tab-content { padding-top: 12px; }
+    "
+    )))
+  ),
 
-      h4("1. Data"),
-      fileInput("csv_file", "Upload PhiUSIIL CSV (optional)",
-                accept = c(".csv")),
-      helpText("If empty, the app loads ",
-               code("PhiUSIIL_Phishing_URL_Dataset.csv"),
-               " from the working directory. Max upload: 200 MB."),
-      actionButton("load_btn", "Load & prepare data",
-                   icon = icon("download"),
-                   class = "btn-primary"),
-      br(), br(),
-      verbatimTextOutput("data_status"),
-
-      hr(),
-      h4("2. Splits"),
-      sliderInput("n_sub", "Stratified subsample size",
-                  min = 2000, max = 60000, value = 30000, step = 2000),
-      sliderInput("p_train", "Train share",
-                  min = 0.5, max = 0.9, value = 0.8, step = 0.05),
-      sliderInput("k_folds", "CV folds", min = 3, max = 10, value = 10),
-
-      hr(),
-      h4("3. Feature families (tiers)"),
-      checkboxInput("tier_all", strong("All (select every tier)"),
-                    value = TRUE),
-      checkboxGroupInput("tiers_sel", NULL,
-                         choices  = TIERS_ALL,
-                         selected = TIERS_ALL),
-
-      hr(),
-      h4("4. Models"),
-      checkboxInput("model_all", strong("All (select every model)"),
-                    value = TRUE),
-      checkboxGroupInput("models_sel", NULL,
-                         choices  = MODEL_CHOICES,
-                         selected = unname(MODEL_CHOICES)),
-      helpText("Unchecked models are hidden from all tabs immediately. ",
-               "Press Refit to (re)train the checked ones."),
-
-      hr(),
-      h4("5. Hyperparameters"),
-      helpText("Click a model to expand its tunable parameters. ",
-               "LDA has no tunable hyperparameters."),
-      tags$details(class = "hp-section",
-        tags$summary("LogReg-Ridge"),
-        sliderInput("lr_alpha",  "alpha (0=ridge,1=lasso)",
-                    0, 1, 0, step = 0.05),
-        sliderInput("lr_lambda", "lambda",
-                    0, 1, 0.01, step = 0.005)
+  # ---- EDA tab ------------------------------------------------------------
+  tabPanel("EDA", value = "eda",
+    uiOutput("eda_data_hint"),
+    fluidRow(
+      column(7,
+        h4("Class balance"),
+        plotOutput("eda_class_balance", height = "320px")
       ),
-      tags$details(class = "hp-section",
-        tags$summary("NaiveBayes"),
-        sliderInput("nb_fL",     "Laplace smoothing fL", 0, 5, 1, step = 0.5),
-        sliderInput("nb_adjust", "Kernel bandwidth adjust",
-                    0.5, 3, 1, step = 0.1)
-      ),
-      tags$details(class = "hp-section",
-        tags$summary("RandomForest"),
-        sliderInput("rf_ntree", "ntree",  50, 800, 300, step = 50),
-        sliderInput("rf_mtry",  "mtry (capped at #features)",
-                    1, 20, 5, step = 1)
-      ),
-      tags$details(class = "hp-section",
-        tags$summary("SVM-RBF"),
-        sliderInput("svm_C",     "Cost C",     0.1, 10, 1, step = 0.1),
-        sliderInput("svm_sigma", "RBF sigma", 0.01, 1, 0.1, step = 0.01)
-      ),
-      tags$details(class = "hp-section",
-        tags$summary("KNN"),
-        sliderInput("knn_k", "k", 1, 75, 25, step = 2)
-      ),
-
-      hr(),
-      actionButton("refit_btn", "Refit selected models",
-                   icon = icon("play"),
-                   class = "btn-success btn-block"),
-      actionButton("cancel_btn", "Cancel running fit",
-                   icon = icon("stop"),
-                   class = "btn-warning btn-block",
-                   style = "margin-top:6px;"),
-      actionButton("clear_btn", "Clear cached results",
-                   icon = icon("trash"),
-                   class = "btn-outline-danger btn-block",
-                   style = "margin-top:6px;"),
-      helpText("Fit runs in a background R process - the UI stays responsive ",
-               "and you can hit Cancel anytime. Results persist across page ",
-               "refreshes (cached in artifacts/app_session.rds)."),
-      br(),
-      div(style = "padding:8px;background:#F4F8FB;border-left:3px solid #4C78A8;",
-          strong("Status:"), br(),
-          verbatimTextOutput("fit_status", placeholder = TRUE))
+      column(5,
+        h4("Feature counts per tier"),
+        tableOutput("eda_tier_counts"),
+        helpText("Tier definitions from ", code("build_tiers()"),
+                 " in fit_core.R; FullLite drops 6 leaky Behavior features.")
+      )
     ),
+    hr(),
+    h5("Split info"),
+    verbatimTextOutput("split_info"),
+    br(),
+    h5("Train head"),
+    DTOutput("train_head_dt")
+  ),
 
-    mainPanel(
-      width = 8,
-      uiOutput("active_config_panel"),
-      tabsetPanel(
-        id = "main_tabs",
-        tabPanel("Winner showcase",
-          br(),
-          uiOutput("winner_info_card"),
-          uiOutput("winner_body")
+  # ---- Scenario 2 tab -----------------------------------------------------
+  tabPanel("Scenario 2", value = "scenario_2",
+    sidebarLayout(
+      sidebarPanel(
+        width = 4,
+
+        h4("1. Data"),
+        fileInput("csv_file", "Upload PhiUSIIL CSV (optional)",
+                  accept = c(".csv")),
+        helpText("If empty, the app loads ",
+                 code("PhiUSIIL_Phishing_URL_Dataset.csv"),
+                 " from the working directory. Max upload: 200 MB."),
+        actionButton("load_btn", "Load & prepare data",
+                     icon = icon("download"),
+                     class = "btn-primary"),
+        br(), br(),
+        verbatimTextOutput("data_status"),
+
+        hr(),
+        h4("2. Splits"),
+        sliderInput("n_sub", "Stratified subsample size",
+                    min = 2000, max = 60000, value = 30000, step = 2000),
+        sliderInput("p_train", "Train share",
+                    min = 0.5, max = 0.9, value = 0.8, step = 0.05),
+        sliderInput("k_folds", "CV folds", min = 3, max = 10, value = 10),
+
+        hr(),
+        h4("3. Feature families (tiers)"),
+        checkboxInput("tier_all", strong("All (select every tier)"),
+                      value = TRUE),
+        checkboxGroupInput("tiers_sel", NULL,
+                           choices  = TIERS_ALL,
+                           selected = TIERS_ALL),
+
+        hr(),
+        h4("4. Models"),
+        checkboxInput("model_all", strong("All (select every model)"),
+                      value = TRUE),
+        checkboxGroupInput("models_sel", NULL,
+                           choices  = MODEL_CHOICES,
+                           selected = unname(MODEL_CHOICES)),
+        helpText("Unchecked models are hidden from all tabs immediately. ",
+                 "Press Refit to (re)train the checked ones."),
+
+        hr(),
+        h4("5. Hyperparameters"),
+        helpText("Click a model to expand its tunable parameters. ",
+                 "LDA has no tunable hyperparameters."),
+        tags$details(class = "hp-section",
+          tags$summary("LogReg-Ridge"),
+          sliderInput("lr_alpha",  "alpha (0=ridge,1=lasso)",
+                      0, 1, 0, step = 0.05),
+          sliderInput("lr_lambda", "lambda",
+                      0, 1, 0.01, step = 0.005)
         ),
-        tabPanel("Summary table",
-          br(),
-          DTOutput("summary_dt"),
-          helpText(strong("Full overview"),
-                   ": CV AUC (mean+/-SD across folds), Train vs Test AUC, ",
-                   "train-test Gap (overfit indicator), and threshold-0.5 ",
-                   "metrics. Sensitivity / Specificity highlighted - they ",
-                   "drive the corporate-proxy decision (cf. scenario_2.rmd S6.1.1).")
+        tags$details(class = "hp-section",
+          tags$summary("NaiveBayes"),
+          sliderInput("nb_fL",     "Laplace smoothing fL", 0, 5, 1, step = 0.5),
+          sliderInput("nb_adjust", "Kernel bandwidth adjust",
+                      0.5, 3, 1, step = 0.1)
         ),
-        tabPanel("AUC by tier",
-          br(),
-          plotOutput("auc_plot", height = "520px"),
-          helpText("Mean CV ROC across folds with +/- 1 SD error bars. ",
-                   "X-axis is zoomed to the data range so small differences ",
-                   "are visible.")
+        tags$details(class = "hp-section",
+          tags$summary("RandomForest"),
+          sliderInput("rf_ntree", "ntree",  50, 800, 300, step = 50),
+          sliderInput("rf_mtry",  "mtry (capped at #features)",
+                      1, 20, 5, step = 1)
         ),
-        tabPanel("Quality @ 0.5",
-          br(),
-          DTOutput("quality_dt"),
-          helpText(strong("Stripped-down view"),
-                   " of the Summary table: only the classification metrics ",
-                   "at the default 0.5 probability threshold (no AUC, no ",
-                   "training cost). Useful when you only care about the ",
-                   "operating point that would actually ship.")
+        tags$details(class = "hp-section",
+          tags$summary("SVM-RBF"),
+          sliderInput("svm_C",     "Cost C",     0.1, 10, 1, step = 0.1),
+          sliderInput("svm_sigma", "RBF sigma", 0.01, 1, 0.1, step = 0.01)
         ),
-        tabPanel("ROC curves",
-          br(),
-          plotOutput("roc_plot", height = "550px")
+        tags$details(class = "hp-section",
+          tags$summary("KNN"),
+          sliderInput("knn_k", "k", 1, 75, 25, step = 2)
         ),
-        tabPanel("Sens vs Spec",
-          br(),
-          plotOutput("sens_spec_plot", height = "550px"),
-          helpText("Top-right corner = ideal model (catches all phish AND ",
-                   "lets all legit through). Each point is one (model, tier) ",
-                   "combination at the default 0.5 threshold.")
-        ),
-        tabPanel("Wilcoxon (H1)",
-          br(),
-          helpText("Per-tier paired Wilcoxon (non-parametric > parametric) ",
-                   "across CV folds - needs >=1 model from each family selected."),
-          DTOutput("wilcox_dt")
-        ),
-        tabPanel("Scenario 4 (Surrogate tree)",
-          br(),
-          helpText(strong("Task 4 - visualising the RF decision rule."),
-                   " A single rpart tree trained on the RF's own predictions ",
-                   "(not the ground-truth label). The metric we optimise is ",
-                   strong("fidelity = share of test rows on which the tree ",
-                          "and the RF agree"),
-                   "; it is decomposed into ",
-                   code("Sens vs RF"), " / ", code("Spec vs RF"),
-                   " so the per-class agreement is visible - same Sens/Spec ",
-                   "framing we use everywhere else."),
-          fluidRow(
-            column(4,
-              selectInput("task4_tier", "Tier",
-                          choices  = c("Lexical", "FullLite"),
-                          selected = "Lexical")
-            ),
-            column(4,
-              sliderInput("task4_maxdepth", "Max depth (upper bound)",
-                          min = 3, max = 7, value = 7, step = 1)
-            ),
-            column(4,
-              sliderInput("task4_max_leaves", "Readability cap (leaves)",
-                          min = 5, max = 30, value = 15, step = 1)
-            )
+
+        hr(),
+        actionButton("refit_btn", "Refit selected models",
+                     icon = icon("play"),
+                     class = "btn-success btn-block"),
+        actionButton("cancel_btn", "Cancel running fit",
+                     icon = icon("stop"),
+                     class = "btn-warning btn-block",
+                     style = "margin-top:6px;"),
+        actionButton("clear_btn", "Clear cached results",
+                     icon = icon("trash"),
+                     class = "btn-outline-danger btn-block",
+                     style = "margin-top:6px;"),
+        helpText("Fit runs in a background R process - the UI stays responsive ",
+                 "and you can hit Cancel anytime. Results persist across page ",
+                 "refreshes (cached in artifacts/app_session.rds)."),
+        br(),
+        div(style = "padding:8px;background:#F4F8FB;border-left:3px solid #4C78A8;",
+            strong("Status:"), br(),
+            verbatimTextOutput("fit_status", placeholder = TRUE))
+      ),
+
+      mainPanel(
+        width = 8,
+        uiOutput("active_config_panel"),
+        tabsetPanel(
+          id = "s2_tabs",
+          tabPanel("Summary table",
+            br(),
+            DTOutput("summary_dt"),
+            helpText(strong("Full overview"),
+                     ": CV AUC (mean+/-SD across folds), Train vs Test AUC, ",
+                     "train-test Gap (overfit indicator), and threshold-0.5 ",
+                     "metrics. Sensitivity / Specificity highlighted - they ",
+                     "drive the corporate-proxy decision (cf. scenario_2.rmd S6.1.1).")
           ),
-          verbatimTextOutput("task4_status"),
-          plotOutput("task4_tree_plot", height = "520px"),
-          br(),
-          h5("Selected tree vs RF (per-class agreement + deployment Sens/Spec)"),
-          DTOutput("task4_metrics_dt"),
-          br(),
-          h5("Fidelity saturation - best (cp, minbucket) per depth"),
-          DTOutput("task4_depth_dt")
-        ),
-        tabPanel("Scenario 3 (FS)",
-          br(),
-          helpText(strong("Task 3 - feature-selection comparison."),
-                   " Compares one algorithmic FS method (bidirectional ",
-                   "stepwise, AIC) and two embedded ones (lasso alpha=1, ",
-                   "elastic-net alpha=0.5). The primary result is Lexical ",
-                   "URL-only; FullLite is kept as a fallback benchmark. ",
-                   "All numbers come from cached fits in ",
-                   code("scenario_3/artifacts/"), "; re-knit ",
-                   code("scenario_3.rmd"), " to refresh."),
-          verbatimTextOutput("s3_status"),
-          br(),
-          h5("Primary Lexical URL-only H2 result (AUC, Sensitivity, Specificity)"),
-          DTOutput("s3_h2_dt"),
-          br(),
-          h5("D1: exact Lexical predictors retained by each method"),
-          DTOutput("s3_d1_dt"),
-          helpText("This table is the main D1 output: x = retained by the FS method; blank = dropped."),
-          br(),
-          h5("D2: stepwise p-value path along the AIC selection"),
-           plotOutput("s3_step_path_plot", height = "450px"),
-           DTOutput("s3_step_path_dt"),
-           helpText("Each line is one predictor's two-sided z-test p-value ",
-                    "across stepAIC steps. The plot is only an overview; the ",
-                    "table below it gives the named feature-level audit. ",
-                    "This is an audit of the selected logistic GLM, not a ",
-                    "performance curve."),
-           br(),
-           h5("D2: embedded coefficients retained at lambda.1se"),
-           plotOutput("s3_embedded_coef_plot", height = "450px"),
-           helpText("This replaces the anonymous glmnet path plot with named ",
-                    "features. Only non-zero coefficients are shown; zero means ",
-                    "the feature was dropped by that embedded method."),
-           br(),
-           h5("D2: embedded feature robustness along the regularisation path"),
-           plotOutput("s3_embedded_lambda_plot", height = "450px"),
-           helpText("Further right means the feature remains active under ",
-                    "stronger regularisation. Elastic-net often keeps groups of ",
-                    "correlated URL predictors instead of dropping as aggressively ",
-                    "as lasso."),
-           br(),
-          h5("D3: held-out test metrics of the reduced fits"),
-          DTOutput("s3_d3_dt"),
-          helpText("Method-native final fits scored on the same 20% test split ",
-                    "as Scenario 2: stepwise/lasso/elastic-net final models only. ",
-                    "AUC checks ranking; Sensitivity and ",
-                    "Specificity check the threshold-0.5 deployment point."),
-          br(),
-          h5("Secondary FullLite fallback predictor counts (10 outer CV folds)"),
-          plotOutput("s3_perfold_plot", height = "350px"),
-          helpText("Fallback-only diagnostic: selected-predictor counts on the 34-feature FullLite pool. ",
-                   "This is not the primary Lexical Task 3 claim.")
-        ),
-        tabPanel("Data preview",
-          br(),
-          verbatimTextOutput("split_info"),
-          h5("Train head"),
-          DTOutput("train_head_dt")
+          tabPanel("AUC by tier",
+            br(),
+            plotOutput("auc_plot", height = "520px"),
+            helpText("Mean CV ROC across folds with +/- 1 SD error bars. ",
+                     "X-axis is zoomed to the data range so small differences ",
+                     "are visible.")
+          ),
+          tabPanel("Quality @ 0.5",
+            br(),
+            DTOutput("quality_dt"),
+            helpText(strong("Stripped-down view"),
+                     " of the Summary table: only the classification metrics ",
+                     "at the default 0.5 probability threshold (no AUC, no ",
+                     "training cost). Useful when you only care about the ",
+                     "operating point that would actually ship.")
+          ),
+          tabPanel("ROC curves",
+            br(),
+            plotOutput("roc_plot", height = "550px")
+          ),
+          tabPanel("Sens vs Spec",
+            br(),
+            plotOutput("sens_spec_plot", height = "550px"),
+            helpText("Top-right corner = ideal model (catches all phish AND ",
+                     "lets all legit through). Each point is one (model, tier) ",
+                     "combination at the default 0.5 threshold.")
+          ),
+          tabPanel("Wilcoxon (H1)",
+            br(),
+            helpText("Per-tier paired Wilcoxon (non-parametric > parametric) ",
+                     "across CV folds - needs >=1 model from each family selected."),
+            DTOutput("wilcox_dt")
+          )
         )
       )
     )
+  ),
+
+  # ---- Winning Model tab --------------------------------------------------
+  tabPanel("Winning Model", value = "winner",
+    br(),
+    uiOutput("winner_info_card"),
+    uiOutput("winner_body")
+  ),
+
+  # ---- Scenario 4 tab -----------------------------------------------------
+  tabPanel("Scenario 4", value = "scenario_4",
+    br(),
+    helpText(strong("Task 4 - visualising the RF decision rule."),
+             " A single rpart tree trained on the RF's own predictions ",
+             "(not the ground-truth label). The metric we optimise is ",
+             strong("fidelity = share of test rows on which the tree ",
+                    "and the RF agree"),
+             "; it is decomposed into ",
+             code("Sens vs RF"), " / ", code("Spec vs RF"),
+             " so the per-class agreement is visible - same Sens/Spec ",
+             "framing we use everywhere else."),
+    fluidRow(
+      column(4,
+        selectInput("task4_tier", "Tier",
+                    choices  = c("Lexical", "FullLite"),
+                    selected = "Lexical")
+      ),
+      column(4,
+        sliderInput("task4_maxdepth", "Max depth (upper bound)",
+                    min = 3, max = 7, value = 7, step = 1)
+      ),
+      column(4,
+        sliderInput("task4_max_leaves", "Readability cap (leaves)",
+                    min = 5, max = 30, value = 15, step = 1)
+      )
+    ),
+    verbatimTextOutput("task4_status"),
+    plotOutput("task4_tree_plot", height = "520px"),
+    br(),
+    h5("Selected tree vs RF (per-class agreement + deployment Sens/Spec)"),
+    DTOutput("task4_metrics_dt"),
+    br(),
+    h5("Fidelity saturation - best (cp, minbucket) per depth"),
+    DTOutput("task4_depth_dt")
+  ),
+
+  # ---- Scenario 3 tab -----------------------------------------------------
+  tabPanel("Scenario 3", value = "scenario_3",
+    br(),
+    helpText(strong("Task 3 - feature-selection comparison."),
+             " Compares one algorithmic FS method (bidirectional ",
+             "stepwise, AIC) and two embedded ones (lasso alpha=1, ",
+             "elastic-net alpha=0.5). The primary result is Lexical ",
+             "URL-only; FullLite is kept as a fallback benchmark. ",
+             "All numbers come from cached fits in ",
+             code("scenario_3/artifacts/"), "; re-knit ",
+             code("scenario_3.rmd"), " to refresh."),
+    verbatimTextOutput("s3_status"),
+    br(),
+    h5("Primary Lexical URL-only H2 result (AUC, Sensitivity, Specificity)"),
+    DTOutput("s3_h2_dt"),
+    br(),
+    h5("D1: exact Lexical predictors retained by each method"),
+    DTOutput("s3_d1_dt"),
+    helpText("This table is the main D1 output: x = retained by the FS method; blank = dropped."),
+    br(),
+    h5("D2: stepwise p-value path along the AIC selection"),
+    plotOutput("s3_step_path_plot", height = "450px"),
+    DTOutput("s3_step_path_dt"),
+    helpText("Each line is one predictor's two-sided z-test p-value ",
+             "across stepAIC steps. The plot is only an overview; the ",
+             "table below it gives the named feature-level audit. ",
+             "This is an audit of the selected logistic GLM, not a ",
+             "performance curve."),
+    br(),
+    h5("D2: embedded coefficients retained at lambda.1se"),
+    plotOutput("s3_embedded_coef_plot", height = "450px"),
+    helpText("This replaces the anonymous glmnet path plot with named ",
+             "features. Only non-zero coefficients are shown; zero means ",
+             "the feature was dropped by that embedded method."),
+    br(),
+    h5("D2: embedded feature robustness along the regularisation path"),
+    plotOutput("s3_embedded_lambda_plot", height = "450px"),
+    helpText("Further right means the feature remains active under ",
+             "stronger regularisation. Elastic-net often keeps groups of ",
+             "correlated URL predictors instead of dropping as aggressively ",
+             "as lasso."),
+    br(),
+    h5("D3: held-out test metrics of the reduced fits"),
+    DTOutput("s3_d3_dt"),
+    helpText("Method-native final fits scored on the same 20% test split ",
+             "as Scenario 2: stepwise/lasso/elastic-net final models only. ",
+             "AUC checks ranking; Sensitivity and ",
+             "Specificity check the threshold-0.5 deployment point."),
+    br(),
+    h5("Secondary FullLite fallback predictor counts (10 outer CV folds)"),
+    plotOutput("s3_perfold_plot", height = "350px"),
+    helpText("Fallback-only diagnostic: selected-predictor counts on the 34-feature FullLite pool. ",
+             "This is not the primary Lexical Task 3 claim.")
   )
 )
 
@@ -505,6 +539,44 @@ server <- function(input, output, session) {
     if (is.null(s)) return(NULL)
     datatable(head(s$train_raw, 50), options = list(scrollX = TRUE, dom = "tip"))
   })
+
+  # ---- EDA tab outputs -----------------------------------------------------
+  output$eda_data_hint <- renderUI({
+    if (!is.null(rv$df)) return(NULL)
+    div(class = "config-panel",
+        strong("Data nie su nahrane. "),
+        span(class = "config-meta",
+             "Otvor tab ", tags$code("Scenario 2"),
+             " a klikni na ", tags$code("Load & prepare data"),
+             ". EDA grafy sa potom vykreslia automaticky."))
+  })
+
+  output$eda_class_balance <- renderPlot({
+    req(rv$df)
+    rv$df %>%
+      count(label) %>%
+      mutate(pct = n / sum(n)) %>%
+      ggplot(aes(label, n, fill = label)) +
+      geom_col(width = 0.6, show.legend = FALSE) +
+      geom_text(aes(label = sprintf("%s (%.1f%%)",
+                                    format(n, big.mark = ","),
+                                    100 * pct)),
+                vjust = -0.4, size = 4.4) +
+      scale_fill_manual(values = c(Phishing   = "#C62828",
+                                   Legitimate = "#2E7D32")) +
+      scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+      labs(x = NULL, y = "Pocet URL") +
+      theme_minimal(base_size = 13)
+  })
+
+  output$eda_tier_counts <- renderTable({
+    req(rv$df)
+    tiers <- build_tiers()
+    tibble(
+      Tier     = names(tiers),
+      Features = vapply(tiers, length, integer(1))
+    )
+  }, striped = TRUE, bordered = TRUE, align = "lc", digits = 0)
 
   # ---- REFIT (spawns background worker) ------------------------------------
   observeEvent(input$refit_btn, {

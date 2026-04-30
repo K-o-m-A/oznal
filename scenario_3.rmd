@@ -353,13 +353,13 @@ The URL-length features are heavily correlated, and both stepwise and lasso shri
 A 13-row matrix with one column per method, marking which lexical URL predictors made it. Sorted by total times selected so the "core" set rises to the top.
 
 ```{r d1-table}
-all_terms <- sort(unique(c(finals$sw_terms, finals$lasso_terms, finals$en_terms,
+all_terms <- sort(unique(c(lexical_final$sw_terms, lexical_final$lasso_terms, lexical_final$en_terms,
                            primary_predictors)))
 d1 <- tibble(
   predictor = all_terms,
-  stepwise    = ifelse(predictor %in% finals$sw_terms,    "x", ""),
-  lasso       = ifelse(predictor %in% finals$lasso_terms, "x", ""),
-  elastic_net = ifelse(predictor %in% finals$en_terms,    "x", "")
+  stepwise    = ifelse(predictor %in% lexical_final$sw_terms,    "x", ""),
+  lasso       = ifelse(predictor %in% lexical_final$lasso_terms, "x", ""),
+  elastic_net = ifelse(predictor %in% lexical_final$en_terms,    "x", "")
 ) %>%
   mutate(score = (stepwise == "x") + (lasso == "x") + (elastic_net == "x")) %>%
   arrange(desc(score), predictor)
@@ -386,7 +386,7 @@ the line are individually significant in that temporary GLM; missing points
 mean that the predictor was not yet in the active model at that step.
 
 ```{r d2-stepwise, fig.height=7, fig.width=10}
-keep_mat <- finals$stepwise_fit$keep
+keep_mat <- lexical_final$stepwise_fit$keep
 n_steps <- if (is.matrix(keep_mat)) ncol(keep_mat) else length(keep_mat)
 
 step_path <- map_dfr(seq_len(n_steps), function(i) {
@@ -479,8 +479,8 @@ coef_at_lambda <- function(cvfit, label, s = "lambda.1se") {
 }
 
 embedded_coefs <- bind_rows(
-  coef_at_lambda(finals$lasso_fit, "lasso"),
-  coef_at_lambda(finals$en_fit,    "elastic-net")
+  coef_at_lambda(lexical_final$lasso_fit, "lasso"),
+  coef_at_lambda(lexical_final$en_fit,    "elastic-net")
 )
 
 embedded_coefs %>%
@@ -515,8 +515,8 @@ active_lambda_table <- function(cvfit, label) {
 }
 
 embedded_lambda <- bind_rows(
-  active_lambda_table(finals$lasso_fit, "lasso"),
-  active_lambda_table(finals$en_fit,    "elastic-net")
+  active_lambda_table(lexical_final$lasso_fit, "lasso"),
+  active_lambda_table(lexical_final$en_fit,    "elastic-net")
 )
 
 embedded_lambda %>%

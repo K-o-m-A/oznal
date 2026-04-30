@@ -1,6 +1,6 @@
 FROM rocker/r-ver:4.5.3
 
-ENV R_REPOS="https://packagemanager.posit.co/cran/__linux__/jammy/2026-04-15"
+ENV R_REPOS="https://packagemanager.posit.co/cran/__linux__/noble/2026-04-15"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pandoc \
@@ -12,8 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfribidi-dev \
     libfreetype6-dev \
     libpng-dev \
-    libtiff5-dev \
     libjpeg-dev \
+    libuv1-dev \
+    libwebpmux3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -25,4 +26,4 @@ COPY . /app
 
 EXPOSE 3838
 
-CMD ["Rscript", "-e", "shiny::runApp('/app/app.R', host='0.0.0.0', port=3838, launch.browser=FALSE)"]
+CMD ["Rscript", "-e", "cat('\\nOpen http://localhost:3838 in your browser\\n\\n'); shiny::runApp('/app/app.R', host='0.0.0.0', port=3838, launch.browser=FALSE, quiet=TRUE)"]
