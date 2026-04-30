@@ -177,7 +177,7 @@ run_or_load <- function(name, fn) {
 
 ## 4.1 Bidirectional stepwise
 
-`MASS::stepAIC` at each step considers every possible move, add an unused predictor or drop a current one, and picks the one that improves AIC the most. AIC rewards better fit but charges a small penalty for every extra predictor, so a feature only stays if it earns its keep. We start from the intercept only and grow toward the feature pool we pass in Lexical for the primary Scenario 3 analysis and FullLite for the fallback benchmark.
+`MASS::stepAIC` at each step considers every possible move, add an unused predictor or drop a current one, and picks the one that improves AIC the most. AIC rewards better fit but charges a small penalty for every extra predictor, so a feature only stays if it earns its keep. We start from the intercept only and grow toward the feature pool we pass in Lexical for the primary Scenario 3 analysis and FullLite for the secondary stress test.
 
 We use the **bidirectional** variant because we want the selection to be robust to its starting point and to ordering effects, rather than an artefact of either end of the path. Forward-only cannot revisit early decisions, backward-only starts from the full model, which can be sensitive to collinearity.
 
@@ -330,6 +330,11 @@ lexical_diagnostic %>%
     H2_pass
   ) %>%
   kable(caption = "Primary Task 3 result: final selected counts, held-out AUC/Sensitivity/Specificity, and H2 criteria (C1: k <= 9, C2: AUC >= 0.95, C3: Sens >= 0.94 and Spec >= 0.75).")
+
+saveRDS(
+  list(table = as.data.frame(lexical_diagnostic), fp = fp_inputs),
+  file.path(ARTIFACTS, "d3_lexical_fs_metrics.rds")
+)
 ```
 
 Some URL-length features are heavily correlated, and both stepwise and lasso shrink the pool from 13 to **9 predictors** (a 31 % reduction). Elastic-net keeps 11 and so misses the C1 sparsity criterion. The smaller fits clear the operating-point thresholds: stepwise reaches **AUC 0.957, Sensitivity 0.949, Specificity 0.839**, and lasso lands at **AUC 0.951, Sensitivity 0.941, Specificity 0.764** - both pass all three H2 criteria, with stepwise the more comfortable margin on Specificity. Elastic-net (AUC 0.953, Sens 0.943, Spec 0.769) is operationally fine but fails the sparsity bound.
@@ -358,23 +363,13 @@ d1 %>% dplyr::select(-score) %>%
 ```
 
 
-NEEDS CHECK
 ## 6.2 Significance loss as predictors are added or removed
 
 ### Stepwise: p-value evolution along the AIC path
 
-`stepAIC` recorded a snapshot of `summary(model)$coefficients` at every step via the `keep` callback. We unpack it and watch how each predictor's two-sided z-test p-value moves as terms are added or dropped along the AIC path. Here **GLM** means **Generalized Linear Model**; concretely we use `glm(..., family = binomial)`, i.e. logistic regression for the binary phishing / legitimate label. The summary tables below are therefore not a performance curve - they are a per-feature audit of the selected logistic-regression model along the AIC path. For each predictor we report the first / last step at which it was active, its min / max / final p-value, and whether it ever crossed the descriptive 0.05 threshold.
+At each step, `stepAIC` saved a snapshot of the coefficient table via the `keep` callback, so we have every predictor's p-value at every step of the AIC path. The table below is is an audit of which predictors were active and whether their individual significance changed as features were added or dropped. For each predictor we report the first and last step it was active, its smallest, largest and final p-value, and a `crosses_05` flag that is `TRUE` if its p-value ever moved across the 0.05 line.
 
-Here **GLM** means **Generalized Linear Model**; concretely we use
-`glm(..., family = binomial)`, i.e. logistic regression for the binary phishing
-/ legitimate label. The stepwise D2 figure is therefore not a performance
-curve: it is an audit plot of the selected logistic-regression model. The x-axis
-is the AIC selection step, the y-axis is the coefficient p-value on a log scale,
-and the red dashed line is the usual descriptive 0.05 threshold. Points below
-the line are individually significant in that temporary GLM; missing points
-mean that the predictor was not yet in the active model at that step.
-
-```{r d2-stepwise, fig.height=7, fig.width=10}
+```{r stepwise}
 keep_mat <- lexical_final$stepwise_fit$keep
 n_steps <- if (is.matrix(keep_mat)) ncol(keep_mat) else length(keep_mat)
 
@@ -386,20 +381,6 @@ step_path <- map_dfr(seq_len(n_steps), function(i) {
          AIC = k_i$AIC)
 }) %>%
   filter(predictor != "(Intercept)")
-
-P_FLOOR <- 1e-100
-step_path_plot <- step_path %>%
-  mutate(p_plot = pmax(p, P_FLOOR))
-
-ggplot(step_path_plot, aes(step, p_plot, group = predictor, colour = predictor)) +
-  geom_line(alpha = 0.7) + geom_point(size = 1.3) +
-  geom_hline(yintercept = 0.05, linetype = "dashed", colour = "red") +
-  scale_y_log10(limits = c(P_FLOOR, 1),
-                labels = scales::label_scientific()) +
-  labs(x = "stepAIC step", y = "Pr(>|z|)  (log scale; floored for plotting)",
-       title = "D2 (stepwise): per-step coefficient p-values along the AIC path",
-       subtitle = "Overview only: red dashed line = 0.05; exact feature-level audit is in the table below") +
-  theme_minimal() + theme(legend.position = "none")
 
 step_path_summary <- step_path %>%
   group_by(predictor) %>%
@@ -417,44 +398,25 @@ step_path_summary <- step_path %>%
 
 step_path_summary %>%
   mutate(across(c(min_p, max_p, final_p), ~ signif(.x, 3))) %>%
-  kable(caption = "D2 (stepwise): named p-value audit for predictors active along the AIC path.")
-
-step_path_summary %>%
-  arrange(desc(crosses_05), max_p) %>%
-  mutate(across(c(min_p, max_p), ~ signif(.x, 3))) %>%
-  filter(crosses_05) %>%
-  kable(caption = "D2 (stepwise): predictors that crossed the 0.05 line during the AIC path.")
+  kable(caption = "Stepwise: named p-value audit for predictors active along the AIC path. The crosses_05 column flags predictors whose p-value moved across the 0.05 line at any step.")
 ```
 
-In the rendered Lexical run no predictor has `crosses_05 = TRUE`: nothing moved
-from significant to non-significant (or back) across the AIC path. That does not mean
-every final AIC-selected term has a small Wald p-value. The late binary terms
-`IsDomainIP` and `NoOfQMarkInURL` are useful enough to reduce AIC but have
-unstable individual z-tests, so these p-values are reported descriptively rather
-than as formal post-selection inference.
-
-What we learn from this plot-and-table pair: the stable lexical signal is the URL
-length/count/special-character cluster, which stays extremely far below 0.05.
-The weaker late binary indicators are not the main statistical evidence; they
-are small AIC improvements kept by the algorithm. This is exactly why we treat
-D2 as an interpretability/audit deliverable, not as a new hypothesis test.
+In this run no predictor has `crosses_05 = TRUE`, nothing went from significant
+to non-significant (or back) along the AIC path. The strong evidence sits in
+the URL length / count / special-character features, whose p-values stay far
+below 0.05 throughout. The binary flags `IsDomainIP` and `NoOfQMarkInURL` are kept only because
+they lower the AIC, their own p-values are noisy and we read them descriptively.
 
 ### Lasso / Elastic-Net: labelled embedded summaries
 
-Embedded methods do not give per-step frequentist p-values - they give the
-*order in which predictors enter or leave the active set as the penalty
-changes*. The default `glmnet` coefficient-path plot is useful for debugging,
-but it is a weak presentation figure here: 13 coloured lines overlap and the
-colours do not identify the feature names. For the report we therefore use two
-labelled summaries that carry the same information more directly:
+Embedded methods don't produce p-values, they tell us the *order* in which
+predictors drop out as the penalty λ grows. We summarise this with two outputs:
 
-1. the named non-zero coefficients at our final `lambda.1se`, and
-2. the largest lambda at which each predictor is active.
-
-If a coefficient is zero at `lambda.1se`, that feature is dropped by the
-embedded method. A feature that is active already at a larger lambda is more
-robust to regularisation; a feature that appears only at a very small lambda is
-weaker or mostly redundant with stronger URL predictors.
+1. **Coefficients at `lambda.1se`** - if a coefficient is zero here, the method
+   dropped that feature.
+2. **Largest λ at which each predictor is still active** - bigger value means the
+   feature survives a stronger penalty. A feature that
+   only appears at small λ is weak or redundant with the stronger URL predictors.
 
 ```{r d2-embedded-coefs, fig.height=6, fig.width=10}
 coef_at_lambda <- function(cvfit, label, s = "lambda.1se") {
@@ -480,7 +442,7 @@ embedded_coefs %>%
   facet_wrap(~ method, scales = "free_y") +
   geom_vline(xintercept = 0, colour = "grey50") +
   labs(
-    title = "D2 (embedded): named coefficients retained at lambda.1se",
+    title = "Named coefficients retained at lambda.1se",
     subtitle = "Only non-zero coefficients are shown; zero means the feature was dropped",
     x = "Coefficient at lambda.1se",
     y = NULL
@@ -513,47 +475,28 @@ embedded_lambda %>%
   mutate(across(c(lasso, `elastic-net`),
                 ~ ifelse(is.na(.x), "(never)", signif(.x, 3)))) %>%
   arrange(predictor) %>%
-  kable(caption = "D2 (embedded): largest lambda at which each predictor is active. Larger = retained under stronger regularisation.")
+  kable(caption = "Largest lambda at which each predictor is active. Larger = retained under stronger regularisation.")
 ```
 
-```{r d2-embedded-lambda-plot, fig.height=6, fig.width=10}
-embedded_lambda %>%
-  filter(!is.na(active_lambda)) %>%
-  mutate(predictor = reorder(predictor, active_lambda)) %>%
-  ggplot(aes(active_lambda, predictor, colour = method)) +
-  geom_point(size = 2.5, alpha = 0.9,
-             position = position_dodge(width = 0.45)) +
-  scale_x_log10() +
-  labs(
-    title = "D2 (embedded): feature robustness along the regularisation path",
-    subtitle = "Further right = active even under stronger regularisation; absent = never active",
-    x = "Largest lambda where coefficient is non-zero (log scale)",
-    y = NULL,
-    colour = "Method"
-  ) +
-  theme_minimal()
-```
+ In this run lasso and stepwise converge on the **same 9 features**: `URLLength`,
+`NoOfLettersInURL`, `NoOfDegitsInURL`, `NoOfOtherSpecialCharsInURL`, `NoOfSubDomain`,
+`NoOfQMarkInURL`, `CharContinuationRate`, `TLDLength` and `IsDomainIP`. Two
+completely different selection mechanisms agreeing
+on the same support is a strong consistency signal for the lexical URL filter.
 
-What we learn from the embedded paths: lasso is the more aggressive selector and
-keeps the Lexical model compact at 9 predictors, while elastic-net keeps 11
-because its ridge component tends to preserve groups of correlated URL features.
-That is a useful robustness check rather than a contradiction: lasso answers
-"which single sparse support is enough?", elastic-net answers "which correlated
-URL signals remain useful when shrinkage is softened?".
+Elastic-net adds `DomainLength` and `NoOfEqualsInURL` on top of that 9-feature
+core. Both are correlated with some features lasso kept (`DomainLength` with the
+URL / letter-count features, `NoOfEqualsInURL` with the special-character
+features). Lasso picks one and drops the rest, elastic-net keeps the whole group.
 
 
 ---
 
-# 7. Secondary FullLite fallback benchmark
+# 7. Secondary FullLite stress test for FS methods
 
-The primary Lexical analysis is evaluated on a single 80/20 hold-out because H2 is defined operationally (absolute AUC / Sensitivity / Specificity thresholds), the 13-feature pool is small with a dominant URL-length signal, and the selected support is in practice deterministic - a fold distribution would only widen the interval around the result. On Fulllite we are not looking at operational quality (which is near-perfect for all three methods on this pool) but **how many features each method keeps and how stable that count is**. With 34 mixed-tier candidates and several correlated columns, a single fit gives one number per method. The 10-fold loop therefore exists to produce a *distribution of selected-predictor counts*.
+We evaluate the Lexical pool on a single 80/20 hold-out. H2 asks whether the AUC / Sensitivity / Specificity thresholds are met, and with only 13 features dominated by a URL-length signal the selected support is stable. Extra folds would only add noise around clear result. On Fulllite we are not looking at operational quality (which is near-perfect for all three methods on this pool) but **how many features each method keeps and how stable that count is**. With 34 mixed-tier candidates a single fit gives one number per method. The 10-fold turns thath into a *distribution of selected-predictor counts*.
 
-For each of the 10 outer CV folds we fit all three methods on the in-fold
-training rows and record only the count of selected predictors. This loop is a
-selected-predictor-count diagnostic, not a fold-level performance estimate.
-
-Here we intentionally reuse the Scenario 2 train-split preprocessing for parity,
-and `glmnet` standardises columns internally again during fitting.
+We reuse the Scenario 2 preprocessing to keep the comparison consistent.
 
 ```{r perfold-fit}
 perfold <- run_or_load("perfold", function() {
@@ -604,37 +547,25 @@ tibble(
   k_lasso = perfold$k_lasso,
   k_en    = perfold$k_en
 ) %>%
-  kable(caption = "Secondary FullLite fallback: selected-predictor count per CV fold (out of 34 candidates).")
+  kable(caption = "FullLite stress test: selected-predictor count per CV fold (out of 34 candidates).")
 ```
 
-## 7.1 FullLite lasso-vs-stepwise diagnostic
-
-```{r fulllite-diagnostic}
-wt <- wilcox.test(perfold$k_lasso, perfold$k_step,
-                  paired = TRUE, alternative = "less", exact = FALSE)
-wt_opposite <- wilcox.test(perfold$k_lasso, perfold$k_step,
-                           paired = TRUE, alternative = "greater", exact = FALSE)
+```{r fulllite-mean}
 mean_step  <- mean(perfold$k_step)
 mean_lasso <- mean(perfold$k_lasso)
 mean_en    <- mean(perfold$k_en)
-old_fulllite_expectation_supported <- mean_lasso < mean_step && wt$p.value < 0.05
 
 tibble(
-  metric = c("mean k (stepwise)", "mean k (lasso)", "mean k (elastic-net)",
-              "Wilcoxon V", "p-value (diagnostic: lasso < step)",
-             "descriptive p-value (opposite direction)",
-              "old FullLite expectation"),
+  metric = c("mean k (stepwise)", "mean k (lasso)", "mean k (elastic-net)"),
   value  = c(sprintf("%.1f", mean_step),
              sprintf("%.1f", mean_lasso),
-             sprintf("%.1f", mean_en),
-             sprintf("%.0f", unname(wt$statistic)),
-             signif(wt$p.value, 3),
-             signif(wt_opposite$p.value, 3),
-             ifelse(old_fulllite_expectation_supported, "supported", "not supported"))
-) %>% kable()
+             sprintf("%.1f", mean_en))
+) %>% kable(caption = "Average selected-predictor count across folds for each FS method.")
 ```
 
-The old FullLite lasso-vs-stepwise expectation is not supported. In this run the observed direction is **stepwise smaller than lasso**: stepwise retains **17.6 predictors** on average across the 10 folds, lasso retains **26.2**, and elastic-net **28.0**. The opposite-direction p-value is shown only as a descriptive diagnostic, not as a replacement hypothesis.
+The boxplot below complements the table by showing the **distribution of selected-predictor counts across the folds**. The position of each box on the y-axis indicates how aggressively a method shrinks the pool, while its height reflects whether the method keeps a similar count regardless of the fold. The dashed line marks the full FullLite as a reference ceiling.
+
+**Stepwise** sits clearly lowest but also has the widest spread, ranging from 16 to 20 predictors, so it is the most aggressive but the least stable of the three. **Elastic-net** sits highest, with the most consistent count across folds. **Lasso** lands in between with a moderately wider box than elastic-net. None of the methods come close to the 34-predictor ceiling, so all three perform meaningful reduction.
 
 ```{r fulllite-perfold-plot, fig.height=4, fig.width=8}
 perfold_long <- tibble(
@@ -652,13 +583,13 @@ ggplot(perfold_long, aes(method, k, fill = method)) +
            label = sprintf("FullLite pool = %d", length(predictors)),
            hjust = 0, size = 3.2, colour = "grey30") +
   labs(x = NULL, y = "selected predictors per fold",
-       title = "Secondary FullLite fallback: per-fold predictor count (10 CV folds)") +
+       title = "FullLite stress test: per-fold predictor count (10 CV folds)") +
   theme_minimal() + theme(legend.position = "none")
 ```
 
 ## 7.2 Selection frequency across folds
 
-The per-fold loop already stored the actual term lists, so we can ask the same question as 6.1 but in a more honest way: instead of reading off a single fit, we count for each FullLite predictor how many of the 10 folds each FS method retained it. Predictors selected in all 10 folds are the robust "core" of the fallback; predictors selected only occasionally are weaker or correlated stand-ins.
+Instead of reading off a single fit, we count for each FullLite predictor how many of the 10 folds each FS method retained it. Predictors selected in all 10 folds are the robust "core" of the FullLite support, predictors selected only occasionally are weaker or correlated.
 
 ```{r fulllite-selection-frequency}
 n_folds <- length(fold_idx)
@@ -693,11 +624,13 @@ d1_full %>%
     n_folds))
 ```
 
+**A universal core of 12 predictors** is retained 10/10 by every method - `DomainLength`, `IsHTTPS`, the URL counts (`NoOfLettersInURL`, `NoOfDegitsInURL`, `NoOfEmptyRef`) and the HTML `Has*` flags. These are the signal all three methods agree on. **Stepwise and the regularised methods disagree on a handful of predictors**: stepwise keeps `URLLength` 10/10 but lasso only 4/10; `Crypto`, `IsDomainIP`, `NoOfSelfRedirect` and `NoOfURLRedirect` are kept by lasso/EN but dropped by stepwise. The tail (`Bank`, `HasExternalFormSubmit`, `NoOfQMarkInURL`) is rare across all methods, and three candidates were never selected at all.
+
 ---
 
 # 8. Conclusion
 
 The primary Lexical URL-only result supports the project story. Stepwise and lasso reduce the deployable URL filter from 13 predictors to **9 each** (elastic-net to 11), and the reduced fits meet the explicit AUC => 0.95, Sensitivity => 0.94 and Specificity => 0.75 thresholds: stepwise (AUC 0.957 / Sens 0.949 / Spec 0.839) clears all three by a comfortable margin, lasso (0.951 / 0.941 / 0.764) clears them tightly.
 
-The FullLite fold benchmark still answers a real fallback question with a negative lasso-vs-stepwise result: on this exact FullLite setup, **lasso is not the sparsest combined-tier fallback; stepwise is** (17.6 predictors per fold against 26.2 for lasso and 28.0 for elastic-net, out of a 34-predictor pool). The held-out test metrics on the full-train fits sit at AUC 0.9999 for every method, with stepwise reaching that ceiling on 17 predictors versus 26 for lasso and 29 for elastic-net. The regularised models still matter because they provide a stable embedded-selection baseline and a coefficient path, but the smallest fallback feature set in this experiment comes from the algorithmic AIC path. If a downstream stakeholder wants an audit log of which terms entered and left, stepwise is also the more interpretable deliverable. If the priority is embedded shrinkage with less post-selection instability, elastic-net/lasso remain useful but not more parsimonious here.
+FullLite is treated as a sparsity-stress test only so the question was *how compactly* each method gets there. All three agree on a 12-predictor core, the extra width of lasso/EN comes from weak or correlated predictors that stepwise drops but L1/L2 keeps. The smallest feature set comes from stepwise. Lasso and elastic-net are still useful, but on this pool they do not pick fewer predictors than stepwise.
 
