@@ -179,7 +179,7 @@ run_or_load <- function(name, fn) {
 
 `MASS::stepAIC` at each step considers every possible move, add an unused predictor or drop a current one, and picks the one that improves AIC the most. AIC rewards better fit but charges a small penalty for every extra predictor, so a feature only stays if it earns its keep. We start from the intercept only and grow toward the feature pool we pass in Lexical for the primary Scenario 3 analysis and FullLite for the fallback benchmark.
 
-We use the **bidirectional** variant because the alternatives fail in this setting. Forward-only cannot undo early decisions, so a predictor that gets in first stays in even when later additions make it redundant. Backward-only starts from the full model, which is numerically unstable here because some URL-length features are heavily correlated.
+We use the **bidirectional** variant because we want the selection to be robust to its starting point and to ordering effects, rather than an artefact of either end of the path. Forward-only cannot revisit early decisions, backward-only starts from the full model, which can be sensitive to collinearity.
 
 ```{r stepwise-helper}
 step_keep <- function(model, AIC) {
@@ -210,7 +210,7 @@ fit_stepwise <- function(train_df, features = predictors) {
 
 ## 4.2 Lasso (embedded, α = 1)
 
-`cv.glmnet` tries a grid of regularisation strengths λ and uses an internal 5-fold cross-validation to score each. We pick `lambda.1se`, the largest λ whose CV error is still within one standard error of the best one. This is the standard parsimony-favouring choice. It gives up a tiny bit of fit in exchange for a smaller and more stable feature set than the strict best-fit `lambda.min` typically returns.
+`cv.glmnet` tries many penalty values λ and uses 5-fold cross-validation to see which one fits best. We don't pick the very best λ (`lambda.min`) but we pick `lambda.1se`, the largest λ that is still almost as good. Bigger λ means a stronger penalty, which keeps fewer features. So this choice gives up a tiny bit of accuracy and gets a smaller, more stable feature set in return.
 
 ```{r lasso-helper}
 fit_glmnet <- function(train_df, alpha) {
@@ -229,16 +229,13 @@ count_nonzero <- function(cvfit, s = "lambda.1se") {
 
 ## 4.3 Elastic-Net (embedded, α = 0.5)
 
-Same wrapper as lasso, only with `alpha = 0.5`. We add elastic-net because lasso has a known weakness with correlated features. It picks one more or less at random and drops the rest. Elastic-net adds a small ridge penalty that stabilises the choice and tends to keep correlated features together. We fix α = 0.5 instead of tuning it, so the comparison stays about the selection method, not hyperparameters.
-
-[//]: # Zvážiť tú poslednú vetu()
+Same wrapper as lasso, only with `alpha = 0.5`. We add elastic-net because lasso has weakness with correlated features. Elastic-net adds a small ridge penalty that stabilises the choice and tends to keep correlated features together. We use α = 0.5, the standard midpoint between lasso (α = 1) and ridge (α = 0), so every method enters the comparison with its conventional setting.
 
 ---
 
 # 5. Primary Lexical URL-only H2 check
 
-The primary objective in Scenario 3 is the URL-only version, because it matches what the
-proxy can decide before loading the page. We fit the same three
+The primary objective in Scenario 3 is the URL-only version. We fit the three
 feature-selection methods once on the 80% training split, then score them on the
 held-out 20%. Besides AUC we explicitly report
 **Sensitivity** and **Specificity** at threshold 0.5, because those are the
@@ -335,14 +332,14 @@ lexical_diagnostic %>%
   kable(caption = "Primary Task 3 result: final selected counts, held-out AUC/Sensitivity/Specificity, and H2 criteria (C1: k <= 9, C2: AUC >= 0.95, C3: Sens >= 0.94 and Spec >= 0.75).")
 ```
 
-The URL-length features are heavily correlated, and both stepwise and lasso shrink the pool from 13 to **9 predictors** (a 31 % reduction). Elastic-net keeps 11 and so misses the C1 sparsity criterion. The smaller fits clear the operating-point thresholds: stepwise reaches **AUC 0.957, Sensitivity 0.949, Specificity 0.839**, and lasso lands at **AUC 0.951, Sensitivity 0.941, Specificity 0.764** - both pass all three H2 criteria, with stepwise the more comfortable margin on Specificity. Elastic-net (AUC 0.953, Sens 0.943, Spec 0.769) is operationally fine but fails the sparsity bound.
+Some URL-length features are heavily correlated, and both stepwise and lasso shrink the pool from 13 to **9 predictors** (a 31 % reduction). Elastic-net keeps 11 and so misses the C1 sparsity criterion. The smaller fits clear the operating-point thresholds: stepwise reaches **AUC 0.957, Sensitivity 0.949, Specificity 0.839**, and lasso lands at **AUC 0.951, Sensitivity 0.941, Specificity 0.764** - both pass all three H2 criteria, with stepwise the more comfortable margin on Specificity. Elastic-net (AUC 0.953, Sens 0.943, Spec 0.769) is operationally fine but fails the sparsity bound.
 
 ---
 
 # 6. Lexical final fits and diagnostics
 ### 6.1 Selected predictors per method
 
-A 13-row matrix with one column per method, marking which lexical URL predictors made it. Sorted by total times selected so the "core" set rises to the top.
+A matrix with one column per method, marking which lexical URL predictors made it. Sorted by total times selected so the "core" set rises to the top.
 
 ```{r d1-table}
 all_terms <- sort(unique(c(lexical_final$sw_terms, lexical_final$lasso_terms, lexical_final$en_terms,
