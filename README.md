@@ -1,6 +1,6 @@
 # Phishing Detection — Capstone Project
 
-R Markdown notebooks (`phishing.rmd`, `scenario_2.rmd`, `scenario_3.rmd`)
+R Markdown notebooks (`eda.rmd`, `scenario_2.rmd`, `scenario_3.rmd`)
 plus a Shiny application (`app.R`) for interactive model exploration.
 
 ## Run via Docker (recommended for evaluators)
@@ -62,7 +62,7 @@ The app expects `PhiUSIIL_Phishing_URL_Dataset.csv` next to `app.R`
 
 | File                         | Purpose                              |
 |------------------------------|--------------------------------------|
-| `phishing.rmd`               | EDA notebook                         |
+| `eda.rmd`                    | EDA notebook                         |
 | `scenario_2.rmd`             | Scenario 2 modelling notebook (parametric vs non-parametric) |
 | `scenario_3.rmd`             | Scenario 3 notebook (stepwise vs lasso vs elastic-net feature selection) |
 | `app.R`                      | Shiny application                    |

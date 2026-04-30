@@ -4,7 +4,7 @@ pkgs <- c(
   "shiny", "DT", "tidyverse", "caret", "glmnet", "MASS", "klaR",
   "randomForest", "kernlab", "pROC", "digest", "rpart", "rpart.plot",
   "e1071", "ggrepel", "shinyjs", "callr",
-  "corrplot", "scales", "knitr", "rmarkdown"
+  "ggcorrplot", "yardstick", "scales", "knitr", "rmarkdown"
 )
 # Use repos from R options if set (e.g. PPM in Docker), else fall back to CRAN.
 repos <- getOption("repos")

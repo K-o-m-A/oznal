@@ -9,9 +9,9 @@ output:
 ---
 ```{r libraries, message=FALSE, warning=FALSE}
 library(tidyverse)
-library(corrplot)
 library(scales)
-library(pROC)
+library(ggcorrplot)
+library(yardstick)
 ```
 
 ---
@@ -117,15 +117,9 @@ strong held-out operating quality.
 # 3. Data Loading & Cleaning
 
 ```{r load-data}
-raw <- read_csv(
-  "PhiUSIIL_Phishing_URL_Dataset.csv",
-  show_col_types = FALSE
-)
-
-# Strip UTF-8 BOM that appears on the first column name
-names(raw) <- map_chr(names(raw), ~ str_replace(.x, "^\ufeff", ""))
-
-# glimpse(raw)
+# Strip UTF-8 BOM that can appear on the first column name.
+raw <- read_csv("PhiUSIIL_Phishing_URL_Dataset.csv", show_col_types = FALSE) %>%
+  rename_with(~ str_remove(.x, "^\uFEFF"))
 ```
 
 ```{r define-roles}
@@ -163,7 +157,6 @@ free lexical clue. Treating it as Lexical would let the URLOnly tier cheat
 off a binary that is, in practice, a deployment/trust signal.
 
 ```{r family-map}
-
 family_map <- tribble(
   ~feature,                    ~family,
   "URLLength",                 "Lexical",
@@ -234,11 +227,11 @@ output, not the URL itself.
 
 ```{r exclude-scores}
 SCORES <- c(
-  "URLSimilarityIndex",   # similarity to known-phishing URL patterns
-  "TLDLegitimateProb",    # P(TLD is legitimate) from an external lookup
-  "URLCharProb",          # P(character sequence) from a language model
-  "DomainTitleMatchScore",# computed domain↔title consistency score
-  "URLTitleMatchScore"    # computed URL↔title consistency score
+  "URLSimilarityIndex",    # similarity to known-phishing URL patterns
+  "TLDLegitimateProb",     # P(TLD is legitimate) from an external lookup
+  "URLCharProb",           # P(character sequence) from a language model
+  "DomainTitleMatchScore", # computed domain-title consistency score
+  "URLTitleMatchScore"     # computed URL-title consistency score
 )
 cat("Computed scores to remove:", paste(SCORES, collapse = ", "), "\n")
 ```
@@ -261,8 +254,8 @@ perfect linear dependence and no extra signal.
 
 ```{r exclude-ratios}
 RATIOS <- c(
-  "LetterRatioInURL",      # = NoOfLettersInURL   / URLLength
-  "DegitRatioInURL",       # = NoOfDegitsInURL    / URLLength
+  "LetterRatioInURL",      # = NoOfLettersInURL / URLLength
+  "DegitRatioInURL",       # = NoOfDegitsInURL / URLLength
   "ObfuscationRatio",      # = NoOfObfuscatedChar / URLLength
   "SpacialCharRatioInURL"  # = NoOfOtherSpecialCharsInURL / URLLength
 )
@@ -295,12 +288,6 @@ continuous_features <- setdiff(names(features), binary_features)
 ```
 
 ## 3.4 Feature Tiers Used in Modeling
-//TODO: check
-To test H1 we define three nested feature tiers. The modeling notebook
-reads these tier definitions directly from here, so both notebooks stay
-in sync. The `tier_full` built here (40 features) is the EDA baseline;
-the scenario_2 modeling notebook replaces it with **FullLite**
-(34 features) by stripping six Behavior near-leakers.
 
 ```{r feature-tiers}
 tier_lexical  <- family_map %>% filter(family == "Lexical")  %>% pull(feature)
@@ -308,16 +295,15 @@ tier_trust    <- family_map %>% filter(family == "Trust")    %>% pull(feature)
 tier_behavior <- family_map %>% filter(family == "Behavior") %>% pull(feature)
 tier_full     <- c(tier_lexical, tier_trust, tier_behavior)
 
-cat("URLOnly tier (Lexical, ",  length(tier_lexical),  " features)\n", sep = "")
-cat("Trust tier              (",  length(tier_trust),    " features)\n", sep = "")
-cat("Behavior tier           (",  length(tier_behavior), " features)\n", sep = "")
-cat("Full tier               (",  length(tier_full),     " features)\n", sep = "")
+cat("URLOnly tier (Lexical, ", length(tier_lexical),  " features)\n", sep = "")
+cat("Trust tier              (", length(tier_trust),    " features)\n", sep = "")
+cat("Behavior tier           (", length(tier_behavior), " features)\n", sep = "")
+cat("Full tier               (", length(tier_full),     " features)\n", sep = "")
 ```
 
 ---
 
 # 4. Exploratory Data Analysis
-
 
 ## 4.1 Data Overview
 
@@ -329,11 +315,10 @@ df %>%
   mutate(pct = n / sum(n)) %>%
   ggplot(aes(label_bin, n, fill = label_bin)) +
   geom_col(width = 0.5, show.legend = FALSE) +
-  geom_text(aes(label = scales::percent(pct, 0.1)), vjust = -0.4, size = 4) +
+  geom_text(aes(label = percent(pct, 0.1)), vjust = -0.4, size = 4) +
   scale_fill_manual(values = c("steelblue", "firebrick")) +
-  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, .1))) +
-  labs(title = "Class distribution",
-       x = NULL, y = "Count") +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, .1))) +
+  labs(title = "Class distribution", x = NULL, y = "Count") +
   theme_minimal(base_size = 12)
 ```
 
@@ -361,7 +346,7 @@ effect-size measure for a 2×2 contingency table, on the same 0–1 scale
 as |correlation|.
 
 ```{r discriminative-power, fig.height=7, fig.width=8}
-# --- Continuous features: standardised mean difference ----------------------
+# Continuous features: standardised mean difference.
 smd_df <- df %>%
   select(label, all_of(continuous_features)) %>%
   pivot_longer(-label, names_to = "feature", values_to = "value") %>%
@@ -370,14 +355,13 @@ smd_df <- df %>%
             .groups = "drop") %>%
   pivot_wider(names_from = label, values_from = c(m, s),
               names_glue = "{.value}_{label}") %>%
-  mutate(
-    pooled_sd = sqrt((s_0^2 + s_1^2) / 2),
-    effect    = abs(m_1 - m_0) / (pooled_sd + 1e-9),
-    metric    = "SMD (continuous)"
-  ) %>%
-  select(feature, effect, metric)
+  transmute(
+    feature,
+    effect = abs(m_1 - m_0) / sqrt((s_0^2 + s_1^2) / 2 + 1e-9),
+    metric = "SMD (continuous)"
+  )
 
-# --- Binary features: Cramer's V on a 2x2 contingency table -----------------
+# Binary features: Cramér's V on a 2x2 contingency table.
 cramers_v <- function(x, y) {
   tab <- table(x, y)
   if (any(dim(tab) < 2)) return(NA_real_)
@@ -411,10 +395,9 @@ ggplot(discrim_df, aes(x = reorder(feature, effect), y = effect, fill = family))
 Effect-size distribution per family (continuous features only):
 
 ```{r smd-by-family, fig.height=4, fig.width=6}
-smd_family <- discrim_df %>%
-  filter(metric == "SMD (continuous)", family != "Other")
-
-ggplot(smd_family, aes(family, effect, fill = family)) +
+discrim_df %>%
+  filter(metric == "SMD (continuous)", family != "Other") %>%
+  ggplot(aes(family, effect, fill = family)) +
   geom_boxplot(alpha = 0.7, show.legend = FALSE) +
   geom_jitter(width = 0.15, alpha = 0.5, size = 2) +
   scale_fill_brewer(palette = "Set2") +
@@ -436,22 +419,21 @@ to stabilise estimates. Trust and Behavior are mostly uncorrelated binary flags 
 
 ### 4.3.1 Lexical Correlation Matrix
 
-```{r cor-lexical, fig.height=6, fig.width=7}
+```{r cor-lexical, fig.height=6, fig.width=7, warning=FALSE}
 lexical_cor <- features %>%
   select(all_of(tier_lexical)) %>%
   cor(use = "pairwise.complete.obs")
 
-  corrplot(
-  lexical_cor,
-  method  = "color",
-  order   = "hclust",
-  tl.cex  = 0.7,
-  tl.col  = "black",
-  col     = colorRampPalette(c("firebrick", "white", "steelblue"))(200),
-  title   = "Correlation - Lexical features",
-  mar     = c(0, 0, 1.5, 0),
-  addCoef.col = "black",
-  number.cex  = 0.55
+suppressWarnings(
+  ggcorrplot(
+    lexical_cor,
+    type     = "lower",
+    hc.order = TRUE,
+    lab      = TRUE,
+    lab_size = 2.5,
+    colors   = c("firebrick", "white", "steelblue"),
+    title    = "Correlation - Lexical features"
+  )
 )
 ```
 
@@ -461,29 +443,22 @@ sit inside this Lexical count cluster.
 ### 4.3.2 Variance Inflation Factors
 
 ```{r vif}
-library(knitr)
+X_vif <- features %>% select(all_of(continuous_features))
 
-# Target-free VIF from the design matrix (avoids non-converged GLM).
-X_vif <- features %>%
-  select(all_of(continuous_features)) %>%
-  as.data.frame()
-
-vif_values <- vapply(seq_along(X_vif), function(i) {
-  r2 <- summary(lm(X_vif[[i]] ~ ., data = X_vif[, -i, drop = FALSE]))$r.squared
-  1 / (1 - r2)
-}, numeric(1))
-names(vif_values) <- names(X_vif)
-
+# Regress each continuous feature on the remaining continuous features.
 vif_df <- tibble(
-  feature = names(vif_values),
-  vif     = as.numeric(vif_values)
+  feature = names(X_vif),
+  vif = map_dbl(names(X_vif), ~ {
+    fmla <- reformulate(setdiff(names(X_vif), .x), response = .x)
+    1 / (1 - summary(lm(fmla, data = X_vif))$r.squared)
+  })
 ) %>%
   left_join(family_map, by = "feature") %>%
   replace_na(list(family = "Other")) %>%
   mutate(severity = case_when(
-    vif > 10            ~ "severe (> 10)",
-    vif >= 5 & vif <= 10 ~ "moderate (5-10)",
-    TRUE                ~ "ok (< 5)"
+    vif > 10 ~ "severe (> 10)",
+    vif >= 5 ~ "moderate (5-10)",
+    TRUE     ~ "ok (< 5)"
   )) %>%
   arrange(desc(vif))
 
@@ -492,16 +467,15 @@ vif_df %>%
             Family  = family,
             VIF     = round(vif, 2),
             Severity = severity) %>%
-  kable(caption = "Variance Inflation Factors - continuous features")
+  knitr::kable(caption = "Variance Inflation Factors - continuous features")
 ```
 
 **Takeaway:** `URLLength`, `NoOfLettersInURL` and `NoOfDegitsInURL` stay
 near-collinear because they measure overlapping properties of the same URL
-string. Two consequences for the modelling notebooks:
+string. Consequence for modeling:
 
-- **Scenario 2:** unpenalised LR is numerically unstable here - Ridge
-  (α = 0) is the minimal fix that bounds the coefficients without
-  collapsing the cluster.
+Unpenalised LR is numerically unstable here - Ridge (α = 0) is the minimal
+fix that bounds the coefficients without collapsing the cluster.
 
 ## 4.4 Skewness Assessment *(Scenario 2 preparation)*
 
@@ -515,16 +489,16 @@ skewness_fn <- function(x) {
   (n / ((n-1)*(n-2))) * sum(((x - m) / s)^3)
 }
 
-skew_df <- tibble(
-  feature  = continuous_features,
-  skewness = map_dbl(continuous_features, ~ skewness_fn(features[[.x]]))
-) %>%
+# Apply the same skewness function to every continuous predictor.
+skew_df <- features %>%
+  select(all_of(continuous_features)) %>%
+  summarise(across(everything(), skewness_fn)) %>%
+  pivot_longer(everything(), names_to = "feature", values_to = "skewness") %>%
   left_join(family_map, by = "feature") %>%
   replace_na(list(family = "Other")) %>%
-  mutate(abs_skew = abs(skewness)) %>%
-  arrange(desc(abs_skew))
+  arrange(desc(abs(skewness)))
 
-ggplot(skew_df, aes(x = reorder(feature, abs_skew), y = skewness, fill = family)) +
+ggplot(skew_df, aes(reorder(feature, abs(skewness)), skewness, fill = family)) +
   geom_col() +
   coord_flip() +
   geom_hline(yintercept = c(-2, 2), linetype = "dashed", colour = "grey40") +
@@ -534,12 +508,10 @@ ggplot(skew_df, aes(x = reorder(feature, abs_skew), y = skewness, fill = family)
   theme_minimal(base_size = 10) +
   theme(legend.position = "top")
 
-# Count features with |skewness| > 2
-n_heavy_skew <- sum(skew_df$abs_skew > 2)
-cat("\nFeatures with |skewness| > 2:", n_heavy_skew, "of",
-    length(continuous_features), "\n")
+cat("Features with |skewness| > 2:",
+    sum(abs(skew_df$skewness) > 2), "of", nrow(skew_df), "\n")
 cat("These are:\n")
-skew_df %>% filter(abs_skew > 2) %>% select(feature, skewness, family) %>% print()
+skew_df %>% filter(abs(skewness) > 2) %>% select(feature, skewness, family) %>% print()
 ```
 
 
@@ -558,26 +530,21 @@ understand the scope of the problem for H1, we measure their **univariate AUC**
 fitting:
 
 ```{r near-leaker-auc}
-# Compute univariate AUC for each Behavior feature
 behavior_feats <- family_map %>% filter(family == "Behavior") %>% pull(feature)
+label_factor   <- factor(df$label, levels = c(0, 1))
 
 univariate_aucs <- tibble(
   feature = behavior_feats,
-  auc = map_dbl(behavior_feats, function(f) {
-    as.numeric(
-      pROC::roc(
-        df$label,
-        df[[f]],
-        levels = c(0, 1),
-        direction = "<",
-        quiet = TRUE
-      )$auc
+  auc = map_dbl(behavior_feats, ~
+    roc_auc_vec(
+      truth       = label_factor,
+      estimate    = features[[.x]],
+      event_level = "second"
     )
-  })
+  )
 ) %>%
   arrange(desc(auc))
 
-# Identify near-leakers: AUC > 0.95
 LEAKY_BEHAVIOR <- univariate_aucs %>%
   filter(auc > 0.95) %>%
   pull(feature)
@@ -622,18 +589,8 @@ primarily on the **URLOnly tier**, where the family contrast has the
 most room to show, and the family gradient (C2) is measured against
 **FullLite**, not Full.
 
-//TODO: check
-This near-perfect separability is a dataset-internal finding, not a production
-claim. A random split of PhiUSIIL preserves the same collection process,
-website templates and campaign mix on both train and test; a real deployment
-would face temporal drift, new phishing kits and domain/campaign shift. Any
-0.99+ FullLite result should therefore be read as an upper-bound benchmark for
-this curated dataset. A production-grade     claim would require a temporal or
-external holdout.
-
 ## 5.1 Implications for modeling scenarios
 | Finding | Scenario 2 implication (H1) | Additional EDA implication |
 |---------|----------------------------|----------------------------|
 | Lexical SMD lowest + features must be combined | Largest parametric/non-parametric AUC gap expected on URLOnly | Feature interactions matter more than single-feature thresholds in URL-only detection |
 | Heavy skewness in 19 of 22 continuous features | Log-transform + standardisation for LR/LDA; trees/RF unaffected | Keep one consistent preprocessing recipe across model families for fair comparisons |
-|---------|----------------------------|----------------------------|----------------------------|

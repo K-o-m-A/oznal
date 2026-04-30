@@ -19,6 +19,6 @@ services:
     command:
       - "Rscript"
       - "-e"
-      - "rmarkdown::render('/app/phishing.rmd', output_dir='/app/rendered'); rmarkdown::render('/app/scenario_2.rmd', output_dir='/app/rendered'); rmarkdown::render('/app/scenario_3.rmd', output_dir='/app/rendered')"
+      - "rmarkdown::render('/app/eda.rmd', output_dir='/app/rendered'); rmarkdown::render('/app/scenario_2.rmd', output_dir='/app/rendered'); rmarkdown::render('/app/scenario_3.rmd', output_dir='/app/rendered')"
     volumes:
       - ./rendered:/app/rendered
