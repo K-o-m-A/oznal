@@ -378,20 +378,6 @@ step_path <- map_dfr(seq_len(n_steps), function(i) {
 }) %>%
   filter(predictor != "(Intercept)")
 
-P_FLOOR <- 1e-100
-step_path_plot <- step_path %>%
-  mutate(p_plot = pmax(p, P_FLOOR))
-
-ggplot(step_path_plot, aes(step, p_plot, group = predictor, colour = predictor)) +
-  geom_line(alpha = 0.7) + geom_point(size = 1.3) +
-  geom_hline(yintercept = 0.05, linetype = "dashed", colour = "red") +
-  scale_y_log10(limits = c(P_FLOOR, 1),
-                labels = scales::label_scientific()) +
-  labs(x = "stepAIC step", y = "Pr(>|z|)  (log scale; floored for plotting)",
-       title = "D2 (stepwise): per-step coefficient p-values along the AIC path",
-       subtitle = "Overview only: red dashed line = 0.05; exact feature-level audit is in the table below") +
-  theme_minimal() + theme(legend.position = "none")
-
 step_path_summary <- step_path %>%
   group_by(predictor) %>%
   arrange(step, .by_group = TRUE) %>%
