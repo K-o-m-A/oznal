@@ -13,7 +13,7 @@ library(tidyverse)
 library(caret)
 library(glmnet)
 library(MASS, exclude = "select")
-library(pROC)
+library(yardstick)
 library(knitr)
 library(digest)
 
@@ -21,13 +21,15 @@ set.seed(2026)
 
 ARTIFACTS <- "scenario_3/artifacts"
 dir.create(ARTIFACTS, recursive = TRUE, showWarnings = FALSE)
+GLMNET_LAMBDA_MIN_RATIO <- 1e-3
+STEPWISE_GLM_MAXIT <- 100L
 ```
 
 ---
 
 # 1. Scenario & Hypothesis
 
-Scenario 2 fixed the predictor pool and asked which **model family** extracts more signal. Scenario 3 holds a single linear classifier (logistic regression) constant and ask which **feature-selection method** keeps the most compact predictor set without losing predictive power.
+Scenario 2 fixed the predictor pool and asked which **model family** extracts more signal. Scenario 3 holds a single linear classifier (logistic regression) constant and asks which **feature-selection method** keeps the most compact predictor set without losing predictive power.
 
 We pick **bidirectional stepwise** (`MASS::stepAIC`, `direction = "both"`) for the algorithmic side because it reconsiders previously-included terms instead of locking decisions in  pure forward / backward variants. For the embedded pair we pick **Lasso (α = 1)** and **Elastic-Net (α = 0.5)**.
 
@@ -37,11 +39,11 @@ The primary classification task is the same first-line deployment case as the ED
 
 | # | Criterion | Threshold |
 |---|-----------|-----------|
-| C1 | Sparsity | at least one FS method keeps **=< 9 / 13** lexical predictors (=>30% reduction) |
-| C2 | Ranking quality | held-out **AUC => 0.95** |
-| C3 | Operating point | held-out **Sensitivity => 0.94** and **Specificity => 0.75** at threshold 0.5 |
+| C1 | Sparsity | at least one FS method keeps **<= 9 / 13** lexical predictors (>= 30% reduction) |
+| C2 | Ranking quality | held-out **AUC >= 0.95** |
+| C3 | Operating point | held-out **Sensitivity >= 0.94** and **Specificity >= 0.75** at threshold 0.5 |
 
-We evaluate this on the same 80/20 split as Scenario 2 by comparing the three selected feature-selection methods : bidirectional stepwise, lasso and elastic-net.
+We evaluate this on the same 80/20 split as Scenario 2 by comparing the three selected feature-selection methods: bidirectional stepwise, lasso and elastic-net.
 
 ---
 
@@ -54,8 +56,8 @@ dataset_path <- if (file.exists("PhiUSIIL_Phishing_URL_Dataset.csv")) {
   "../PhiUSIIL_Phishing_URL_Dataset.csv"
 } else stop("PhiUSIIL_Phishing_URL_Dataset.csv not found")
 
-raw <- read_csv(dataset_path, show_col_types = FALSE)
-names(raw) <- map_chr(names(raw), ~ str_replace(.x, "^﻿", ""))
+raw <- read_csv(dataset_path, show_col_types = FALSE) %>%
+  rename_with(~ str_remove(.x, "^\ufeff"))
 cat("Loaded", nrow(raw), "rows,", ncol(raw), "columns.\n")
 ```
 
@@ -89,7 +91,7 @@ cat("Feature matrix after exclusions:", ncol(df) - 1, "predictors.\n")
 
 ## 3.1 Stratified sub-sampling and split
 
-Identical to Scenario 2 3.1-3.2 for parity. The 30k stratified subsample (15k / 15k) is inherited from Scenario 2's SVM-driven budget. For Scenario 3 we keep it so the reduced-fit AUCs in 6.3 can be compared directly to LogReg-Ridge from Scenario 2 without a sample-size confound.
+Identical to Scenario 2 3.1-3.2 for parity. The 30k stratified subsample (15k / 15k) is inherited from Scenario 2's SVM-driven budget. For Scenario 3 we keep it so the reduced-fit AUCs in the Lexical H2 check (Section 5) can be compared directly to LogReg-Ridge from Scenario 2 without a sample-size confound.
 
 ```{r subsample-split}
 N_SUB <- 30000
@@ -99,10 +101,11 @@ df_sub <- df %>%
   ungroup() %>%
   as.data.frame()
 
-idx       <- createDataPartition(df_sub$label, p = 0.8, list = FALSE)
-train_raw <- df_sub[idx, ]
-test_raw  <- df_sub[-idx, ]
-fold_idx  <- createFolds(train_raw$label, k = 10, returnTrain = TRUE)
+idx <- createDataPartition(df_sub$label, p = 0.8, list = FALSE) %>%
+  as.vector()
+train_raw <- df_sub %>% slice(idx)
+test_raw <- df_sub %>% slice(-idx)
+fold_idx <- createFolds(train_raw$label, k = 10, returnTrain = TRUE)
 
 cat("Train:", nrow(train_raw), "Test:", nrow(test_raw),
     "CV folds:", length(fold_idx), "\n")
@@ -113,22 +116,33 @@ cat("Train:", nrow(train_raw), "Test:", nrow(test_raw),
 
 ```{r recipes}
 feat <- df_sub %>% dplyr::select(-label)
-binary_features     <- names(feat)[sapply(feat, function(x)
-                                   all(na.omit(x) %in% c(0, 1)))]
+binary_features <- feat %>%
+  select(where(~ all(na.omit(.x) %in% c(0, 1)))) %>%
+  names()
 continuous_features <- setdiff(names(feat), binary_features)
 
 apply_log <- function(d, cols) {
-  d[cols] <- lapply(d[cols], function(x) log1p(pmax(x, 0)))
-  d
+  d %>%
+    mutate(across(all_of(cols), ~ log1p(pmax(.x, 0))))
 }
 train_log <- apply_log(train_raw, continuous_features)
 test_log  <- apply_log(test_raw,  continuous_features)
 
-pp <- preProcess(train_log[, continuous_features], method = c("center", "scale"))
-train_std <- train_log
-test_std  <- test_log
-train_std[, continuous_features] <- predict(pp, train_log[, continuous_features])
-test_std[,  continuous_features] <- predict(pp, test_log[,  continuous_features])
+pp <- train_log %>%
+  select(all_of(continuous_features)) %>%
+  preProcess(method = c("center", "scale"))
+
+replace_continuous <- function(d) {
+  scaled <- d %>%
+    select(all_of(continuous_features)) %>%
+    predict(pp, .)
+
+  d %>%
+    mutate(across(all_of(continuous_features), ~ scaled[[cur_column()]]))
+}
+
+train_std <- replace_continuous(train_log)
+test_std  <- replace_continuous(test_log)
 
 predictors <- setdiff(names(train_std), "label")
 lexical_predictors <- c("URLLength", "DomainLength", "IsDomainIP",
@@ -154,7 +168,9 @@ fp_inputs <- digest::digest(list(
   predictors = sort(predictors),
   n_train    = nrow(train_std),
   n_folds    = length(fold_idx),
-  fold_sizes = vapply(fold_idx, length, integer(1))
+  fold_sizes = map_int(fold_idx, length),
+  glmnet_lambda_min_ratio = GLMNET_LAMBDA_MIN_RATIO,
+  stepwise_glm_maxit = STEPWISE_GLM_MAXIT
 ))
 
 run_or_load <- function(name, fn) {
@@ -194,16 +210,33 @@ step_keep <- function(model, AIC) {
   )
 }
 
+STEPWISE_GLM_WARNINGS <- c(
+  "fitted probabilities numerically 0 or 1",
+  "algorithm did not converge"
+)
+
+muffle_stepwise_glm_warnings <- function(expr) {
+  withCallingHandlers(expr, warning = function(w) {
+    msg <- conditionMessage(w)
+    if (any(map_lgl(STEPWISE_GLM_WARNINGS, ~ grepl(.x, msg, fixed = TRUE)))) {
+      invokeRestart("muffleWarning")
+    }
+  })
+}
+
 fit_stepwise <- function(train_df, features = predictors) {
-  null_mod <- glm(label ~ 1, data = train_df, family = binomial)
+  null_mod <- muffle_stepwise_glm_warnings(
+    glm(label ~ 1, data = train_df, family = binomial,
+        control = glm.control(maxit = STEPWISE_GLM_MAXIT))
+  )
   full_fm  <- as.formula(paste("label ~", paste(features, collapse = " + ")))
-  out <- MASS::stepAIC(
+  out <- muffle_stepwise_glm_warnings(MASS::stepAIC(
     null_mod,
     scope     = list(lower = ~ 1, upper = full_fm),
     direction = "both",
     trace     = FALSE,
     keep      = step_keep
-  )
+  ))
   out
 }
 ```
@@ -217,13 +250,19 @@ fit_glmnet <- function(train_df, alpha) {
   X <- model.matrix(label ~ . - 1, data = train_df)
   y <- train_df$label
   cvfit <- cv.glmnet(X, y, family = "binomial", alpha = alpha,
-                     type.measure = "deviance", nfolds = 5)
+                     type.measure = "deviance", nfolds = 5,
+                     lambda.min.ratio = GLMNET_LAMBDA_MIN_RATIO)
   cvfit
 }
 
 count_nonzero <- function(cvfit, s = "lambda.1se") {
   beta <- as.numeric(coef(cvfit, s = s))[-1]   # drop intercept
   sum(beta != 0)
+}
+
+selected_glmnet_terms <- function(cvfit, term_names, s = "lambda.1se") {
+  beta <- as.numeric(coef(cvfit, s = s))[-1]   # drop intercept
+  term_names[beta != 0]
 }
 ```
 
@@ -243,19 +282,13 @@ operational quantities set in previous scenario.
 
 ```{r lexical-final-check}
 metrics_from_prob <- function(prob_phishing, truth = test_std$label) {
-  pred <- factor(ifelse(prob_phishing >= 0.5, "Phishing", "Legitimate"),
+  pred <- factor(if_else(prob_phishing >= 0.5, "Phishing", "Legitimate"),
                  levels = levels(truth))
-  tp <- sum(pred == "Phishing" & truth == "Phishing")
-  tn <- sum(pred == "Legitimate" & truth == "Legitimate")
-  fp <- sum(pred == "Phishing" & truth == "Legitimate")
-  fn <- sum(pred == "Legitimate" & truth == "Phishing")
   tibble(
-    test_auc = as.numeric(pROC::roc(truth, prob_phishing,
-                                    levels = c("Legitimate", "Phishing"),
-                                    direction = "<", quiet = TRUE)$auc),
-    sensitivity = tp / (tp + fn),
-    specificity = tn / (tn + fp),
-    accuracy = (tp + tn) / length(truth)
+    test_auc = roc_auc_vec(truth, prob_phishing, event_level = "first"),
+    sensitivity = sens_vec(truth, pred, event_level = "first"),
+    specificity = spec_vec(truth, pred, event_level = "first"),
+    accuracy = accuracy_vec(truth, pred)
   )
 }
 
@@ -269,7 +302,7 @@ predict_glmnet_phishing <- function(cvfit, test_df, s = "lambda.1se") {
 }
 
 lexical_final <- run_or_load("lexical_final", function() {
-  trn <- train_std[, c("label", lexical_predictors)]
+  trn <- train_std %>% select(label, all_of(lexical_predictors))
   sw <- fit_stepwise(trn, lexical_predictors)
   cvl <- fit_glmnet(trn, alpha = 1)
   cve <- fit_glmnet(trn, alpha = 0.5)
@@ -279,13 +312,13 @@ lexical_final <- run_or_load("lexical_final", function() {
     lasso_fit = cvl,
     en_fit = cve,
     sw_terms = setdiff(names(coef(sw)), "(Intercept)"),
-    lasso_terms = term_names[as.numeric(coef(cvl, s = "lambda.1se"))[-1] != 0],
-    en_terms = term_names[as.numeric(coef(cve, s = "lambda.1se"))[-1] != 0],
+    lasso_terms = selected_glmnet_terms(cvl, term_names),
+    en_terms = selected_glmnet_terms(cve, term_names),
     X_names = term_names
   )
 })
 
-test_lexical <- test_std[, c("label", lexical_predictors), drop = FALSE]
+test_lexical <- test_std %>% select(label, all_of(lexical_predictors))
 
 SPARSITY_MAX_K <- 9
 MIN_TEST_AUC <- 0.95
@@ -337,7 +370,7 @@ saveRDS(
 )
 ```
 
-Some URL-length features are heavily correlated, and both stepwise and lasso shrink the pool from 13 to **9 predictors** (a 31 % reduction). Elastic-net keeps 11 and so misses the C1 sparsity criterion. The smaller fits clear the operating-point thresholds: stepwise reaches **AUC 0.957, Sensitivity 0.949, Specificity 0.839**, and lasso lands at **AUC 0.951, Sensitivity 0.941, Specificity 0.764** - both pass all three H2 criteria, with stepwise the more comfortable margin on Specificity. Elastic-net (AUC 0.953, Sens 0.943, Spec 0.769) is operationally fine but fails the sparsity bound.
+Some URL-length features are heavily correlated, and both stepwise and lasso shrink the pool from 13 to **9 predictors** (a 31 % reduction). Elastic-net keeps **10 predictors** and so misses the C1 sparsity criterion. The smaller fits clear the operating-point thresholds: stepwise reaches **AUC 0.957, Sensitivity 0.949, Specificity 0.839**, and lasso lands at **AUC 0.952, Sensitivity 0.941, Specificity 0.764** - both pass all three H2 criteria, with stepwise the more comfortable margin on Specificity. Elastic-net (AUC 0.944, Sens 0.936, Spec 0.749) lands just below all three thresholds, so it is not the deployable H2 winner in this run.
 
 ---
 
@@ -351,9 +384,9 @@ all_terms <- sort(unique(c(lexical_final$sw_terms, lexical_final$lasso_terms, le
                            primary_predictors)))
 d1 <- tibble(
   predictor = all_terms,
-  stepwise    = ifelse(predictor %in% lexical_final$sw_terms,    "x", ""),
-  lasso       = ifelse(predictor %in% lexical_final$lasso_terms, "x", ""),
-  elastic_net = ifelse(predictor %in% lexical_final$en_terms,    "x", "")
+  stepwise    = if_else(predictor %in% lexical_final$sw_terms,    "x", ""),
+  lasso       = if_else(predictor %in% lexical_final$lasso_terms, "x", ""),
+  elastic_net = if_else(predictor %in% lexical_final$en_terms,    "x", "")
 ) %>%
   mutate(score = (stepwise == "x") + (lasso == "x") + (elastic_net == "x")) %>%
   arrange(desc(score), predictor)
@@ -367,7 +400,7 @@ d1 %>% dplyr::select(-score) %>%
 
 ### Stepwise: p-value evolution along the AIC path
 
-At each step, `stepAIC` saved a snapshot of the coefficient table via the `keep` callback, so we have every predictor's p-value at every step of the AIC path. The table below is is an audit of which predictors were active and whether their individual significance changed as features were added or dropped. For each predictor we report the first and last step it was active, its smallest, largest and final p-value, and a `crosses_05` flag that is `TRUE` if its p-value ever moved across the 0.05 line.
+At each step, `stepAIC` saved a snapshot of the coefficient table via the `keep` callback, so we have every predictor's p-value at every step of the AIC path. The table below is an audit of which predictors were active and whether their individual significance changed as features were added or dropped. For each predictor we report the first and last step it was active, its smallest, largest and final p-value, and a `crosses_05` flag that is `TRUE` if its p-value ever moved across the 0.05 line.
 
 ```{r stepwise}
 keep_mat <- lexical_final$stepwise_fit$keep
@@ -454,14 +487,17 @@ embedded_coefs %>%
 active_lambda_table <- function(cvfit, label) {
   beta_path <- as.matrix(coef(cvfit$glmnet.fit))[-1, , drop = FALSE]
   lambdas <- cvfit$glmnet.fit$lambda
-  active_lambda <- apply(beta_path, 1, function(row) {
-    nz <- which(row != 0)
-    if (!length(nz)) return(NA_real_)
-    max(lambdas[nz])
-  })
-  tibble(predictor = rownames(beta_path),
-         active_lambda = active_lambda,
-         method = label) %>%
+
+  beta_path %>%
+    as_tibble(rownames = "predictor") %>%
+    rename_with(~ as.character(seq_along(lambdas)), -predictor) %>%
+    pivot_longer(-predictor, names_to = "lambda_index", values_to = "coefficient") %>%
+    mutate(lambda = lambdas[as.integer(lambda_index)]) %>%
+    filter(coefficient != 0) %>%
+    summarise(active_lambda = max(lambda), .by = predictor) %>%
+    right_join(tibble(predictor = rownames(beta_path)), by = "predictor") %>%
+    mutate(method = label) %>%
+    select(predictor, active_lambda, method) %>%
     arrange(desc(active_lambda))
 }
 
@@ -473,7 +509,7 @@ embedded_lambda <- bind_rows(
 embedded_lambda %>%
   pivot_wider(names_from = method, values_from = active_lambda) %>%
   mutate(across(c(lasso, `elastic-net`),
-                ~ ifelse(is.na(.x), "(never)", signif(.x, 3)))) %>%
+                ~ if_else(is.na(.x), "(never)", as.character(signif(.x, 3))))) %>%
   arrange(predictor) %>%
   kable(caption = "Largest lambda at which each predictor is active. Larger = retained under stronger regularisation.")
 ```
@@ -484,60 +520,66 @@ embedded_lambda %>%
 completely different selection mechanisms agreeing
 on the same support is a strong consistency signal for the lexical URL filter.
 
-Elastic-net adds `DomainLength` and `NoOfEqualsInURL` on top of that 9-feature
-core. Both are correlated with some features lasso kept (`DomainLength` with the
-URL / letter-count features, `NoOfEqualsInURL` with the special-character
-features). Lasso picks one and drops the rest, elastic-net keeps the whole group.
+Elastic-net adds only `DomainLength` on top of that 9-feature core. It is
+correlated with the URL / letter-count features, so this is the expected
+elastic-net behaviour: it keeps one extra member of the correlated length group
+where lasso and stepwise stay at the stricter 9-feature support.
 
 
 ---
 
 # 7. Secondary FullLite stress test for FS methods
 
-We evaluate the Lexical pool on a single 80/20 hold-out. H2 asks whether the AUC / Sensitivity / Specificity thresholds are met, and with only 13 features dominated by a URL-length signal the selected support is stable. Extra folds would only add noise around clear result. On Fulllite we are not looking at operational quality (which is near-perfect for all three methods on this pool) but **how many features each method keeps and how stable that count is**. With 34 mixed-tier candidates a single fit gives one number per method. The 10-fold turns thath into a *distribution of selected-predictor counts*.
+We evaluate the Lexical pool on a single 80/20 hold-out. H2 asks whether the AUC / Sensitivity / Specificity thresholds are met, and with only 13 features dominated by a URL-length signal the selected support is stable. Extra folds would only add noise around a clear result. On FullLite we are not looking at operational quality (which is near-perfect for all three methods on this pool) but **how many features each method keeps and how stable that count is**. With 34 mixed-tier candidates a single fit gives one number per method. The 10-fold turns that into a *distribution of selected-predictor counts*.
 
 We reuse the Scenario 2 preprocessing to keep the comparison consistent.
 
 ```{r perfold-fit}
 perfold <- run_or_load("perfold", function() {
-  k_step <- numeric(length(fold_idx))
-  k_lasso <- numeric(length(fold_idx))
-  k_en   <- numeric(length(fold_idx))
-  step_terms_per_fold  <- vector("list", length(fold_idx))
-  lasso_terms_per_fold <- vector("list", length(fold_idx))
-  en_terms_per_fold    <- vector("list", length(fold_idx))
-
   t0 <- Sys.time()
-  for (k in seq_along(fold_idx)) {
-    trn <- train_std[fold_idx[[k]], c("label", predictors), drop = FALSE]
+
+  fit_fold <- function(rows, k) {
+    trn <- train_std %>%
+      slice(rows) %>%
+      select(label, all_of(predictors))
+
+    cat(sprintf("  fold %2d: fitting stepwise / lasso / EN...\n", k))
+    flush.console()
 
     sw   <- fit_stepwise(trn, predictors)
     sw_terms <- setdiff(names(coef(sw)), "(Intercept)")
-    k_step[k] <- length(sw_terms)
-    step_terms_per_fold[[k]] <- sw_terms
 
     cvl <- fit_glmnet(trn, alpha = 1)
-    lasso_beta <- as.numeric(coef(cvl, s = "lambda.1se"))[-1]
     lasso_names <- colnames(model.matrix(label ~ . - 1, data = trn))
-    lasso_terms <- lasso_names[lasso_beta != 0]
-    k_lasso[k] <- length(lasso_terms)
-    lasso_terms_per_fold[[k]] <- lasso_terms
+    lasso_terms <- selected_glmnet_terms(cvl, lasso_names)
 
     cve <- fit_glmnet(trn, alpha = 0.5)
-    en_beta <- as.numeric(coef(cve, s = "lambda.1se"))[-1]
-    en_terms <- lasso_names[en_beta != 0]
-    k_en[k] <- length(en_terms)
-    en_terms_per_fold[[k]] <- en_terms
+    en_terms <- selected_glmnet_terms(cve, lasso_names)
 
-    cat(sprintf("  fold %2d: step=%2d  lasso=%2d  EN=%2d\n",
-                k, k_step[k], k_lasso[k], k_en[k]))
+    cat(sprintf("  fold %2d done: step=%2d  lasso=%2d  EN=%2d\n",
+                k, length(sw_terms), length(lasso_terms), length(en_terms)))
+    flush.console()
+
+    tibble(
+      fold = k,
+      k_step = length(sw_terms),
+      k_lasso = length(lasso_terms),
+      k_en = length(en_terms),
+      step_terms = list(sw_terms),
+      lasso_terms = list(lasso_terms),
+      en_terms = list(en_terms)
+    )
   }
+
+  fold_results <- map2_dfr(fold_idx, seq_along(fold_idx), fit_fold)
   elapsed <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
 
-  list(k_step = k_step, k_lasso = k_lasso, k_en = k_en,
-       step_terms = step_terms_per_fold,
-       lasso_terms = lasso_terms_per_fold,
-       en_terms = en_terms_per_fold,
+  list(k_step = fold_results$k_step,
+       k_lasso = fold_results$k_lasso,
+       k_en = fold_results$k_en,
+       step_terms = fold_results$step_terms,
+       lasso_terms = fold_results$lasso_terms,
+       en_terms = fold_results$en_terms,
        elapsed_secs = elapsed)
 })
 
@@ -565,14 +607,16 @@ tibble(
 
 The boxplot below complements the table by showing the **distribution of selected-predictor counts across the folds**. The position of each box on the y-axis indicates how aggressively a method shrinks the pool, while its height reflects whether the method keeps a similar count regardless of the fold. The dashed line marks the full FullLite as a reference ceiling.
 
-**Stepwise** sits clearly lowest but also has the widest spread, ranging from 16 to 20 predictors, so it is the most aggressive but the least stable of the three. **Elastic-net** sits highest, with the most consistent count across folds. **Lasso** lands in between with a moderately wider box than elastic-net. None of the methods come close to the 34-predictor ceiling, so all three perform meaningful reduction.
+**Stepwise** sits clearly lowest but also has the widest spread, ranging from 16 to 20 predictors, so it is the most aggressive but the least stable of the three. **Elastic-net** sits highest and is almost constant at 25 predictors, with one fold at 24. **Lasso** lands in between, mostly around 22-23 predictors with one fold reaching 25. None of the methods come close to the 34-predictor ceiling, so all three perform meaningful reduction.
 
 ```{r fulllite-perfold-plot, fig.height=4, fig.width=8}
 perfold_long <- tibble(
-  fold = rep(seq_along(fold_idx), 3),
-  method = rep(c("stepwise", "lasso", "elastic-net"), each = length(fold_idx)),
-  k = c(perfold$k_step, perfold$k_lasso, perfold$k_en)
+  fold = seq_along(fold_idx),
+  stepwise = perfold$k_step,
+  lasso = perfold$k_lasso,
+  `elastic-net` = perfold$k_en
 ) %>%
+  pivot_longer(-fold, names_to = "method", values_to = "k") %>%
   mutate(method = factor(method, levels = c("stepwise", "elastic-net", "lasso")))
 
 ggplot(perfold_long, aes(method, k, fill = method)) +
@@ -595,24 +639,21 @@ Instead of reading off a single fit, we count for each FullLite predictor how ma
 n_folds <- length(fold_idx)
 
 count_in_folds <- function(term_lists, term) {
-  sum(vapply(term_lists, function(tl) term %in% tl, logical(1)))
+  sum(map_lgl(term_lists, ~ term %in% .x))
 }
 
 all_fulllite_terms <- sort(unique(c(
-  unlist(perfold$step_terms),
-  unlist(perfold$lasso_terms),
-  unlist(perfold$en_terms),
+  flatten_chr(perfold$step_terms),
+  flatten_chr(perfold$lasso_terms),
+  flatten_chr(perfold$en_terms),
   predictors
 )))
 
 d1_full <- tibble(
   predictor   = all_fulllite_terms,
-  stepwise    = vapply(all_fulllite_terms, count_in_folds, integer(1),
-                       term_lists = perfold$step_terms),
-  lasso       = vapply(all_fulllite_terms, count_in_folds, integer(1),
-                       term_lists = perfold$lasso_terms),
-  elastic_net = vapply(all_fulllite_terms, count_in_folds, integer(1),
-                       term_lists = perfold$en_terms)
+  stepwise    = map_int(predictor, ~ count_in_folds(perfold$step_terms, .x)),
+  lasso       = map_int(predictor, ~ count_in_folds(perfold$lasso_terms, .x)),
+  elastic_net = map_int(predictor, ~ count_in_folds(perfold$en_terms, .x))
 ) %>%
   mutate(score = stepwise + lasso + elastic_net) %>%
   arrange(desc(score), predictor) %>%
@@ -624,13 +665,13 @@ d1_full %>%
     n_folds))
 ```
 
-**A universal core of 12 predictors** is retained 10/10 by every method - `DomainLength`, `IsHTTPS`, the URL counts (`NoOfLettersInURL`, `NoOfDegitsInURL`, `NoOfEmptyRef`) and the HTML `Has*` flags. These are the signal all three methods agree on. **Stepwise and the regularised methods disagree on a handful of predictors**: stepwise keeps `URLLength` 10/10 but lasso only 4/10; `Crypto`, `IsDomainIP`, `NoOfSelfRedirect` and `NoOfURLRedirect` are kept by lasso/EN but dropped by stepwise. The tail (`Bank`, `HasExternalFormSubmit`, `NoOfQMarkInURL`) is rare across all methods, and three candidates were never selected at all.
+**A universal core of 12 predictors** is retained 10/10 by every method - `DomainLength`, `IsHTTPS`, the URL counts (`NoOfLettersInURL`, `NoOfDegitsInURL`, `NoOfEmptyRef`) and the HTML `Has*` flags. These are the signal all three methods agree on. **Stepwise and the regularised methods disagree on correlated or weaker predictors**: stepwise keeps `URLLength` 10/10 while lasso and elastic-net drop it in every fold; lasso/EN keep `Crypto` and `NoOfURLRedirect` 10/10 while stepwise almost never uses them. `IsDomainIP` is mostly a regularised-model feature (9/10 for lasso and EN, 0/10 for stepwise). Seven candidates were never selected by any method: `Bank`, `HasExternalFormSubmit`, `NoOfAmpersandInURL`, `NoOfEqualsInURL`, `NoOfObfuscatedChar`, `NoOfQMarkInURL` and `NoOfSelfRedirect`.
 
 ---
 
 # 8. Conclusion
 
-The primary Lexical URL-only result supports the project story. Stepwise and lasso reduce the deployable URL filter from 13 predictors to **9 each** (elastic-net to 11), and the reduced fits meet the explicit AUC => 0.95, Sensitivity => 0.94 and Specificity => 0.75 thresholds: stepwise (AUC 0.957 / Sens 0.949 / Spec 0.839) clears all three by a comfortable margin, lasso (0.951 / 0.941 / 0.764) clears them tightly.
+The primary Lexical URL-only result supports the project story. Stepwise and lasso reduce the deployable URL filter from 13 predictors to **9 each** (elastic-net to 10), and the reduced fits meet the explicit AUC >= 0.95, Sensitivity >= 0.94 and Specificity >= 0.75 thresholds: stepwise (AUC 0.957 / Sens 0.949 / Spec 0.839) clears all three by a comfortable margin, lasso (0.952 / 0.941 / 0.764) clears them tightly. Elastic-net is close but does not pass the H2 thresholds in this run.
 
 FullLite is treated as a sparsity-stress test only so the question was *how compactly* each method gets there. All three agree on a 12-predictor core, the extra width of lasso/EN comes from weak or correlated predictors that stepwise drops but L1/L2 keeps. The smallest feature set comes from stepwise. Lasso and elastic-net are still useful, but on this pool they do not pick fewer predictors than stepwise.
 

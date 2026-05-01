@@ -1168,6 +1168,7 @@ server <- function(input, output, session) {
   # notebook is the single source of truth for Task 3.
 
   S3_DIR <- "scenario_3/artifacts"
+  S3_FULLLITE_FEATURES <- build_tiers()[["FullLite"]]
 
   s3_read <- function(name) {
     path <- file.path(S3_DIR, paste0(name, ".rds"))
@@ -1176,7 +1177,6 @@ server <- function(input, output, session) {
   }
   s3_perfold <- reactive(s3_read("perfold"))
   s3_finals  <- reactive(s3_read("lexical_final"))
-  s3_full_finals <- reactive(s3_read("finals"))
   s3_d3_data <- reactive({
     s3_read("d3_lexical_fs_metrics")
   })
@@ -1207,8 +1207,7 @@ server <- function(input, output, session) {
   output$s3_perfold_plot <- renderPlot({
     pf <- s3_perfold()
     if (is.null(pf)) return(NULL)
-    fp <- s3_full_finals()
-    pool <- if (!is.null(fp)) length(fp$X_names) else NA_real_
+    pool <- length(S3_FULLLITE_FEATURES)
     long <- tibble(
       fold   = rep(seq_along(pf$k_step), 3),
       method = rep(c("stepwise", "lasso", "elastic-net"),
@@ -1222,14 +1221,11 @@ server <- function(input, output, session) {
       geom_point(position = position_jitter(width = 0.1, seed = 1), size = 1.6) +
       labs(x = NULL, y = "selected predictors per fold") +
       theme_minimal(base_size = 13) + theme(legend.position = "none")
-    if (!is.na(pool)) {
-      p <- p + geom_hline(yintercept = pool, linetype = "dashed",
-                          colour = "grey40") +
-        annotate("text", x = 0.6, y = pool + 0.3,
-                 label = sprintf("FullLite pool = %d", pool),
-                 hjust = 0, size = 3.4, colour = "grey30")
-    }
-    p
+    p + geom_hline(yintercept = pool, linetype = "dashed",
+                   colour = "grey40") +
+      annotate("text", x = 0.6, y = pool + 0.3,
+               label = sprintf("FullLite pool = %d", pool),
+               hjust = 0, size = 3.4, colour = "grey30")
   })
 
   output$s3_perfold_dt <- renderDT({
@@ -1325,16 +1321,17 @@ server <- function(input, output, session) {
   s3_active_lambda_table <- function(cvfit, label) {
     beta_path <- as.matrix(coef(cvfit$glmnet.fit))[-1, , drop = FALSE]
     lambdas <- cvfit$glmnet.fit$lambda
-    active_lambda <- apply(beta_path, 1, function(row) {
-      nz <- which(row != 0)
-      if (!length(nz)) return(NA_real_)
-      max(lambdas[nz])
-    })
-    tibble(
-      predictor = rownames(beta_path),
-      active_lambda = active_lambda,
-      method = label
-    )
+    beta_path %>%
+      as_tibble(rownames = "predictor") %>%
+      rename_with(~ as.character(seq_along(lambdas)), -predictor) %>%
+      pivot_longer(-predictor, names_to = "lambda_index",
+                   values_to = "coefficient") %>%
+      mutate(lambda = lambdas[as.integer(lambda_index)]) %>%
+      filter(coefficient != 0) %>%
+      summarise(active_lambda = max(lambda), .by = predictor) %>%
+      right_join(tibble(predictor = rownames(beta_path)), by = "predictor") %>%
+      mutate(method = label) %>%
+      select(predictor, active_lambda, method)
   }
 
   output$s3_embedded_coef_plot <- renderPlot({
@@ -1357,25 +1354,21 @@ server <- function(input, output, session) {
       theme_minimal(base_size = 12)
   })
 
-  output$s3_embedded_lambda_plot <- renderPlot({
+  output$s3_embedded_lambda_dt <- renderDT({
     fp <- s3_finals()
     if (is.null(fp)) return(NULL)
     bind_rows(
       s3_active_lambda_table(fp$lasso_fit, "lasso"),
       s3_active_lambda_table(fp$en_fit, "elastic-net")
     ) %>%
-      filter(!is.na(active_lambda)) %>%
-      mutate(predictor = reorder(predictor, active_lambda)) %>%
-      ggplot(aes(active_lambda, predictor, colour = method)) +
-      geom_point(size = 2.5, alpha = 0.9,
-                 position = position_dodge(width = 0.45)) +
-      scale_x_log10() +
-      labs(
-        x = "Largest lambda where coefficient is non-zero (log scale)",
-        y = NULL,
-        colour = "Method"
-      ) +
-      theme_minimal(base_size = 12)
+      pivot_wider(names_from = method, values_from = active_lambda) %>%
+      mutate(across(c(lasso, `elastic-net`),
+                    ~ if_else(is.na(.x), "(never)", as.character(signif(.x, 3))))) %>%
+      arrange(predictor) %>%
+      datatable(options = list(dom = "t", pageLength = 20),
+                rownames = FALSE,
+                caption = paste("Largest lambda at which each predictor is active.",
+                                "Larger = retained under stronger regularisation."))
   })
 
   output$s3_d3_dt <- renderDT({
@@ -1393,9 +1386,10 @@ server <- function(input, output, session) {
     count_in_folds <- function(term_lists, term) {
       sum(vapply(term_lists, function(tl) term %in% tl, logical(1)))
     }
-    all_terms <- sort(unique(c(unlist(pf$step_terms),
-                               unlist(pf$lasso_terms),
-                               unlist(pf$en_terms))))
+    all_terms <- sort(unique(c(unlist(pf$step_terms, use.names = FALSE),
+                               unlist(pf$lasso_terms, use.names = FALSE),
+                               unlist(pf$en_terms, use.names = FALSE),
+                               S3_FULLLITE_FEATURES)))
     if (!length(all_terms)) return(NULL)
     tibble(
       predictor   = all_terms,
