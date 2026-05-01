@@ -309,12 +309,6 @@ ui <- navbarPage(
             helpText("Top-right corner = ideal model (catches all phish AND ",
                      "lets all legit through). Each point is one (model, tier) ",
                      "combination at the default 0.5 threshold.")
-          ),
-          tabPanel("Wilcoxon (H1)",
-            br(),
-            helpText("Per-tier paired Wilcoxon (non-parametric > parametric) ",
-                     "across CV folds - needs >=1 model from each family selected."),
-            DTOutput("wilcox_dt")
           )
         )
       )

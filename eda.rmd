@@ -28,8 +28,8 @@ we can block the link for free. If it isn't, we have to fall back to a
 slower page-level check.
 
 The question is : **how much phishing signal is already in the URL?**
-If a URL-only model works well enough, it can sit at the front of the pipeline
-as a fast first-line filter. Where it fails, the slower trust- and behavior-level
+If a URL-only model works well enough, it can sit at the front
+as a fast first-line filter. Where it fails, the slower trust and behavior-level
 checks have to take over.
 
 The proxy does not output a confidence score - it outputs a
@@ -81,9 +81,7 @@ default 0.5 cut, with AUC kept as a complementary ranking criterion.
 | C3 | Sanity check on ranking discrimination: mean test AUC gap on Lexical | **ΔAUC >= 0.02** |
 
 H1 is **supported** only if C1 **and** C2 hold - both gated on the
-deployment metric (minSS at threshold 0.5), so the same number that
-determines whether a filter is usable in production also determines
-whether the hypothesis is supported. C3 is informative but not gating. It
+deployment metric (minSS at threshold 0.5). C3 is informative but not gating. It
 confirms the families also differ on the threshold-free metric, but a
 non-deployable model with a high AUC can't satisfy the project goal regardless of how it ranks.
 H1 is **rejected** if either C1 or C2 fails.
@@ -337,13 +335,10 @@ discriminative power is lowest in the Lexical family**.
 
 ### 4.2.1 Discriminative Power by Family
 
-We measure discriminative power separately for continuous and binary
-features. The standardised mean difference (SMD) only makes sense for
-continuous features. For binary features the "pooled SD" collapses to a
-function of the class proportion, so SMD stops being comparable across
-features. For those we use **Cramér's V** instead - the standard
-effect-size measure for a 2×2 contingency table, on the same 0–1 scale
-as |correlation|.
+For continuous features we use the **standardised
+mean difference (SMD)** - the gap between class means in SD units. SMD
+doesn't work for binary features, so for those we use **Cramér's V** instead. Both
+sit on a 0-1 scale, so the two charts are read the same way.
 
 ```{r discriminative-power, fig.height=7, fig.width=8}
 # Continuous features: standardised mean difference.
@@ -392,6 +387,19 @@ ggplot(discrim_df, aes(x = reorder(feature, effect), y = effect, fill = family))
   theme(legend.position = "top")
 ```
 
+**Takeaway (per-feature view):** The two panels split sharply by family.
+*Cramér's V (binary):* every high-effect binary feature is Behavior or
+Trust - `HasSocialNet`, `HasCopyrightInfo`, `HasDescription`, `IsHTTPS`
+all sit between 0.6 and 0.8. The only Lexical binary, `IsDomainIP`, is
+near the bottom at ~0.05. The URL string offers almost no
+single-flag binary signal.
+*SMD (continuous):* `CharContinuationRate` is the one Lexical standout
+at ~1.0, but the rest of the Lexical column clusters lower
+(`URLLength`, `NoOfDegitsInURL`, `NoOfQMarkInURL` ~0.35-0.5) with a
+long tail down to ~0.02. Behavior fills the 0.55-0.85 band more
+densely (`NoOfJS`, `NoOfSelfRef`, `NoOfImage`, `LineOfCode`,
+`NoOfExternalRef`).
+
 Effect-size distribution per family (continuous features only):
 
 ```{r smd-by-family, fig.height=4, fig.width=6}
@@ -406,9 +414,14 @@ discrim_df %>%
   theme_minimal(base_size = 12)
 ```
 
-**Takeaway (H1):** Among the continuous features, Lexical has the lowest
-median |SMD| and the smallest spread. Trust and Behavior carry more
-per-feature signal. This supports H1's claim that the URL-only tier has less signal in individual features and relies more on feature combinations.
+**Takeaway (boxplot view):** Only Behavior and Lexical show up - Trust
+has no continuous features. Lexical's median |SMD| (~0.33) is lower than
+Behavior's (~0.55), and most Lexical features sit in a tighter band. The
+exception is `CharContinuationRate` near 1.0, which stretches the Lexical
+range. So the typical Lexical feature is weaker than
+the typical Behavior feature, with one strong outlier - consistent with
+H1's expectation that URL-only models lean on feature combinations
+rather than single strong predictors.
 
 ## 4.3 Collinearity inside Lexical
 
@@ -474,7 +487,7 @@ vif_df %>%
 near-collinear because they measure overlapping properties of the same URL
 string. Consequence for modeling:
 
-Unpenalised LR is numerically unstable here - Ridge (α = 0) is the minimal
+Unpenalised LR is numerically unstable. Ridge (α = 0) is the minimal
 fix that bounds the coefficients without collapsing the cluster.
 
 ## 4.4 Skewness Assessment *(Scenario 2 preparation)*
@@ -507,11 +520,6 @@ ggplot(skew_df, aes(reorder(feature, abs(skewness)), skewness, fill = family)) +
        x = NULL, y = "Skewness", fill = "Family") +
   theme_minimal(base_size = 10) +
   theme(legend.position = "top")
-
-cat("Features with |skewness| > 2:",
-    sum(abs(skew_df$skewness) > 2), "of", nrow(skew_df), "\n")
-cat("These are:\n")
-skew_df %>% filter(abs(skewness) > 2) %>% select(feature, skewness, family) %>% print()
 ```
 
 
@@ -560,14 +568,14 @@ with minimal content, so the six near-leakers-`LineOfCode`, `NoOfExternalRef`,
 `NoOfImage`, `NoOfSelfRef`, `NoOfJS`, `NoOfCSS`-are nearly perfect phishing
 signals on their own:
 
-| Feature | Univariate AUC | Why it's near-perfect | Cost to include |
+| Feature | Univariate AUC | Why it's near-perfect |
 |---------|---------------|-----------------------|-----------------|
-| `LineOfCode` | >0.99 | Legit sites are complex; phish are ~50 LOC | Direct saturation |
-| `NoOfExternalRef` | 0.990 | Phish don't reference external resources | Direct saturation |
-| `NoOfImage` | 0.985 | Phish pages use almost no images | Direct saturation |
-| `NoOfSelfRef` | 0.980 | Legit sites self-reference heavily | Direct saturation |
-| `NoOfJS` | 0.970 | Phish avoid JavaScript (too recognizable) | Direct saturation |
-| `NoOfCSS` | 0.958 | Phish minimize stylesheets | Direct saturation |
+| `LineOfCode` | >0.99 | Legit sites are complex |
+| `NoOfExternalRef` | 0.990 | Phish don't reference external resources | 
+| `NoOfImage` | 0.985 | Phish pages use almost no images | 
+| `NoOfSelfRef` | 0.980 | Legit sites self-reference heavily | 
+| `NoOfJS` | 0.970 | Phish avoid JavaScript |
+| `NoOfCSS` | 0.958 | Phish minimize stylesheets | 
 
 If we include these six in any tier, any model, parametric or non-parametric
 reaches AUC ≈ 0.99+ because the signal is so strong, even a simple threshold on a single feature nearly solves the task.
@@ -575,9 +583,9 @@ reaches AUC ≈ 0.99+ because the signal is so strong, even a simple threshold o
 
 # 5. EDA Summary & Modeling Implications
 
-**A note on separability.** After the Section 3.3 exclusions, 40 features
+After the Section 3.3 exclusions, 40 features
 remain (13 Lexical + 7 Trust + 20 Behavior). On this reduced set the task
-is near-perfectly separable as soon as Behavior is included: six Behavior
+is near-perfectly separable as soon as Behavior is included. Six Behavior
 counts have univariate AUC > 0.95 on their own, so a naive Full tier
 saturates at AUC ≈ 1.0 and the parametric vs. non-parametric contrast
 just disappears.
