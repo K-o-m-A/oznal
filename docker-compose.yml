@@ -1,3 +1,45 @@
+# Návod: spustenie od nuly bez cache artefaktov
+#
+#  0) Predpoklad
+#
+#  Docker Desktop beží, si v koreni projektu (/mnt/c/Users/frede/PycharmProjects/oznal-project), a PhiUSIIL_Phishing_URL_Dataset.csv je v koreni.
+#
+#  1) Vyčisti staré artefakty (ak existujú)
+#
+#  rm -rf artifacts/ rendered/
+#
+#  2) Postav Docker image
+#
+#  docker compose build
+#  Trvá ~5–10 min prvý raz (R balíky sa cachujú do image-u).
+#
+#  3) Predfit víťazného modelu + (C, sigma) grid → artifacts/winner_svm_lexical.rds
+#
+#  docker compose --profile fit-winner run --rm fit-winner
+#  Trvá ~5–15 min. Vyfittuje sa headline SVM (10-fold CV) + 49 single-fit kombinácií pre slider lookup. Progres sa loguje do stdout.
+#
+#  4) Spusti Shiny apku
+#
+#  docker compose up app
+#
+#  5) Otvor v prehliadači
+#
+#  http://localhost:3838
+#
+#  6) (Voliteľné) Render eda.rmd, scenario_2.rmd, scenario_3.rmd do rendered/
+#
+#  docker compose --profile render run --rm render
+#
+#  7) (Voliteľné) Spusti unit testy
+#
+#  docker compose --profile test run --rm test
+#
+#  ---
+#  Poznámky:
+#  - Bez kroku 3 apka stále beží, len Winner showcase tab zobrazí žltú hlášku a odkaz ako artefakt vygenerovať.
+#  - Scenario 2/3 taby si svoje fits robia v rámci session a ukladajú do artifacts/app_session.rds — nezávisle od winner_svm_lexical.rds.
+#  - Zastavenie: Ctrl+C v termináli, alebo docker compose down.
+
 services:
   app:
     build: .
@@ -22,3 +64,12 @@ services:
       - "rmarkdown::render('/app/eda.rmd', output_dir='/app/rendered'); rmarkdown::render('/app/scenario_2.rmd', output_dir='/app/rendered'); rmarkdown::render('/app/scenario_3.rmd', output_dir='/app/rendered')"
     volumes:
       - ./rendered:/app/rendered
+
+  fit-winner:
+    build: .
+    image: oznal-phishing:latest
+    profiles: ["fit-winner"]
+    working_dir: /app
+    command: ["Rscript", "/app/fit_winner.R"]
+    volumes:
+      - ./artifacts:/app/artifacts

@@ -25,8 +25,8 @@ if (is.na(dataset_path))
 message("[winner] loading dataset: ", dataset_path)
 df <- load_and_clean(dataset_path)
 
-message("[winner] building splits (n_sub=10000, p_train=0.8, k=10)")
-splits <- make_splits(df, n_sub = 10000, p_train = 0.8, k_folds = 10)
+message("[winner] building splits (n_sub=30000, p_train=0.8, k=10)")
+splits <- make_splits(df, n_sub = 30000, p_train = 0.8, k_folds = 10)
 
 tiers <- build_tiers()
 lex   <- tiers$Lexical
@@ -62,6 +62,57 @@ roc_obj    <- pROC::roc(test_label, test_prob,
                         direction = "<", quiet = TRUE)
 message(sprintf("[winner] test AUC = %.4f", as.numeric(roc_obj$auc)))
 
+# Pre-fit a (C, sigma) grid so the Winner showcase tab in app.R can switch
+# hyperparameters via O(1) lookup instead of refitting on each slider drag.
+# Single fit per cell (no CV) - same eval as the headline model, ~30s each.
+#
+# sigma > 0.1 was dropped: kernlab's class-prob calc fails ("line search
+# fails") at high sigma + low C on this data, returning NAs and breaking the
+# downstream ROC. Combos below all converged in prior runs.
+C_GRID     <- c(0.1, 0.25, 0.5, 1, 2, 5, 10)
+SIGMA_GRID <- c(0.01, 0.025, 0.05, 0.1)
+hp_combos  <- expand.grid(C = C_GRID, sigma = SIGMA_GRID,
+                          KEEP.OUT.ATTRS = FALSE)
+n_combos   <- nrow(hp_combos)
+message(sprintf("[winner] pre-fitting (C, sigma) grid: %d combos", n_combos))
+
+ctrl_single <- caret::trainControl(method = "none", classProbs = TRUE)
+hp_results  <- list()
+g0 <- Sys.time()
+for (i in seq_len(n_combos)) {
+  C_val <- hp_combos$C[i]; s_val <- hp_combos$sigma[i]
+  key   <- sprintf("C=%g_s=%g", C_val, s_val)
+  ti    <- Sys.time()
+  cell <- tryCatch({
+    fit_i <- caret::train(
+      label ~ ., data = splits$train_std[, c("label", lex)],
+      method = "svmRadial", trControl = ctrl_single,
+      tuneGrid = data.frame(C = C_val, sigma = s_val)
+    )
+    prob_i <- as.numeric(
+      predict(fit_i, splits$test_std[, c("label", lex)], type = "prob")[, "Phishing"])
+    if (anyNA(prob_i))
+      stop("kernlab returned NA probabilities (numerical instability)")
+    auc_i <- as.numeric(pROC::roc(
+      splits$test_std$label, prob_i,
+      levels = c("Legitimate", "Phishing"), direction = "<", quiet = TRUE)$auc)
+    list(test_prob = prob_i, test_auc = auc_i)
+  }, error = function(e) {
+    message(sprintf("[grid %2d/%d] C=%-5g sigma=%-6g SKIPPED: %s",
+                    i, n_combos, C_val, s_val, conditionMessage(e)))
+    NULL
+  })
+  if (!is.null(cell)) {
+    hp_results[[key]] <- cell
+    message(sprintf("[grid %2d/%d] C=%-5g sigma=%-6g AUC=%.4f (%.1fs)",
+                    i, n_combos, C_val, s_val, cell$test_auc,
+                    as.numeric(difftime(Sys.time(), ti, units = "secs"))))
+  }
+}
+message(sprintf("[winner] grid done in %.1fs (%d/%d combos succeeded)",
+                as.numeric(difftime(Sys.time(), g0, units = "secs")),
+                length(hp_results), n_combos))
+
 raw_lex <- splits$train_raw[, lex]
 feature_stats <- lapply(raw_lex, function(x) {
   list(
@@ -96,6 +147,8 @@ bundle <- list(
   test_prob      = as.numeric(test_prob),
   test_label     = test_label,
   roc_obj        = roc_obj,
+  hp_grid        = list(C = C_GRID, sigma = SIGMA_GRID),
+  hp_results     = hp_results,
   meta = list(
     model      = "SVM-RBF",
     tier       = "Lexical",

@@ -58,17 +58,6 @@ clear_workdir <- function() {
   if (length(files)) unlink(files, force = TRUE)
 }
 
-# Transform a one-row data.frame of RAW lexical feature values into the
-# standardized space the SVM-RBF was trained on. Mirrors fit_core.R:148-160.
-winner_transform <- function(raw_row, w) {
-  for (c in w$pp_continuous)
-    raw_row[[c]] <- log1p(pmax(raw_row[[c]], 0))
-  if (length(w$pp_continuous))
-    raw_row[, w$pp_continuous] <- predict(
-      w$pp, raw_row[, w$pp_continuous, drop = FALSE])
-  raw_row[, w$features, drop = FALSE]
-}
-
 # -----------------------------------------------------------------------------
 # UI
 # -----------------------------------------------------------------------------
@@ -1413,12 +1402,27 @@ server <- function(input, output, session) {
 
   # ---------------------------------------------------------------------------
   # Winner showcase tab - SVM-RBF on Lexical (loaded from artifacts/winner_svm_lexical.rds).
-  # Two interactive controls: classification threshold + per-feature URL inputs.
-  # All visualizations recompute reactively without a refit.
+  # Controls: classification threshold + SVM hyperparameters (C, sigma).
+  # Threshold updates live; C/sigma trigger an in-app refit on Apply click.
   # ---------------------------------------------------------------------------
+
+  # Mutable state - initialized from the artifact, mutated on Apply refit.
+  rv_winner <- reactiveValues(initialized = FALSE)
+
+  observe({
+    req(winner, !isolate(rv_winner$initialized))
+    rv_winner$test_prob  <- winner$test_prob
+    rv_winner$test_label <- winner$test_label
+    rv_winner$roc_obj    <- winner$roc_obj
+    rv_winner$C          <- winner$meta$C
+    rv_winner$sigma      <- winner$meta$sigma
+    rv_winner$test_auc   <- winner$meta$test_auc
+    rv_winner$initialized <- TRUE
+  })
 
   output$winner_info_card <- renderUI({
     if (is.null(winner)) return(NULL)
+    if (!isTRUE(rv_winner$initialized)) return(NULL)
     m <- winner$meta
     div(class = "config-panel",
         strong("Winning model: "),
@@ -1428,11 +1432,12 @@ server <- function(input, output, session) {
                      m$n_features,
                      format(m$n_train, big.mark = ","),
                      format(m$n_test,  big.mark = ","),
-                     m$test_auc)),
+                     rv_winner$test_auc)),
         div(class = "config-row",
             span(class = "config-model",
                  strong("Hyperparams: "),
-                 tags$code(sprintf("C=%g, sigma=%g", m$C, m$sigma)))))
+                 tags$code(sprintf("C=%g, sigma=%g",
+                                   rv_winner$C, rv_winner$sigma)))))
   })
 
   output$winner_body <- renderUI({
@@ -1442,7 +1447,10 @@ server <- function(input, output, session) {
                  border-radius:4px;margin-top:10px;",
         h4("Winning model artefakt nenajdeny"),
         p("Subor ", tags$code(WINNER_PATH), " neexistuje. ",
-          "Spusti v R / RStudio (na Windows strane, nie WSL):"),
+          "Spusti niektorou z dvoch moznosti:"),
+        p(strong("A) Docker (odporucane):")),
+        tags$pre("docker compose --profile fit-winner run --rm fit-winner"),
+        p(strong("B) R / RStudio na Windows strane (nie WSL):")),
         tags$pre("setwd(\"C:/Users/frede/PycharmProjects/oznal-project\")\nsource(\"fit_winner.R\")"),
         p("Trvanie: par minut. Vytvori sa artefakt s natrenovanym SVM-RBF ",
           "modelom + test pravdepodobnostami, ktore tento tab pouziva na ",
@@ -1450,21 +1458,33 @@ server <- function(input, output, session) {
       ))
     }
 
-    feat_inputs <- lapply(winner$features, function(f) {
-      stat <- winner$feature_stats[[f]]
-      id   <- paste0("winner_", f)
-      if (isTRUE(stat$is_binary)) {
-        selectInput(id, f,
-                    choices  = c("0" = 0, "1" = 1),
-                    selected = as.character(round(stat$median)))
-      } else {
-        lo <- floor(stat$min); hi <- ceiling(stat$max)
-        # slider needs hi > lo - guard against degenerate constants
-        if (hi <= lo) hi <- lo + 1
-        sliderInput(id, f, min = lo, max = hi,
-                    value = round(stat$median), step = 1)
-      }
-    })
+    can_grid <- !is.null(winner$hp_grid) && !is.null(winner$hp_results)
+
+    refit_panel <- if (can_grid) {
+      C_choices <- setNames(as.character(winner$hp_grid$C),
+                            format(winner$hp_grid$C))
+      s_choices <- setNames(as.character(winner$hp_grid$sigma),
+                            format(winner$hp_grid$sigma))
+      tagList(
+        h4("SVM-RBF hyperparametre"),
+        selectInput("winner_C", "Cost (C)",
+                    choices  = C_choices,
+                    selected = as.character(winner$meta$C)),
+        selectInput("winner_sigma", "Sigma",
+                    choices  = s_choices,
+                    selected = as.character(winner$meta$sigma)),
+        helpText("Predikcie pre kazdu (C, sigma) kombinaciu su predpocitane v ",
+                 "artefakte (", length(winner$hp_results),
+                 " kombinacii). Prepnutie je instantne, bez refitu.")
+      )
+    } else {
+      div(style = "padding:10px;background:#FFF7E6;border-left:4px solid #E0A800;
+                   border-radius:4px;margin-top:10px;",
+          p(strong("Hyperparam grid nedostupny:"),
+            " artefakt neobsahuje predpocitane (C, sigma) predikcie."),
+          p("Regeneruj artefakt aktualnou verziou ",
+            tags$code("fit_winner.R"), "."))
+    }
 
     fluidRow(
       column(4,
@@ -1474,16 +1494,10 @@ server <- function(input, output, session) {
                     min = 0, max = 1, value = 0.5, step = 0.01),
         actionButton("winner_reset", "Reset na defaulty",
                      class = "btn-default", style = "margin-bottom:10px;"),
-        tags$details(class = "hp-section", open = NA,
-          tags$summary(sprintf("URL features (%d)", length(winner$features))),
-          helpText("Hodnoty pre hypoteticku URL. Predikcia sa prepocita ",
-                   "real-time pri kazdej zmene."),
-          do.call(tagList, feat_inputs))
+        hr(),
+        refit_panel
       ),
       column(8,
-        h4("Live predikcia hypotetickej URL"),
-        uiOutput("winner_verdict"),
-        br(),
         h4("Vykon na test sete pri zvolenom prahu"),
         uiOutput("winner_metrics_row"),
         br(),
@@ -1505,11 +1519,11 @@ server <- function(input, output, session) {
   })
 
   winner_metrics <- reactive({
-    req(winner)
+    req(rv_winner$initialized)
     thr <- input$winner_threshold
-    pred <- factor(ifelse(winner$test_prob >= thr, "Phishing", "Legitimate"),
+    pred <- factor(ifelse(rv_winner$test_prob >= thr, "Phishing", "Legitimate"),
                    levels = c("Phishing", "Legitimate"))
-    cm <- caret::confusionMatrix(pred, winner$test_label, positive = "Phishing")
+    cm <- caret::confusionMatrix(pred, rv_winner$test_label, positive = "Phishing")
     list(
       cm   = cm$table,
       acc  = unname(cm$overall["Accuracy"]),
@@ -1517,37 +1531,6 @@ server <- function(input, output, session) {
       spec = unname(cm$byClass["Specificity"]),
       f1   = unname(cm$byClass["F1"])
     )
-  })
-
-  winner_user_prob <- reactive({
-    req(winner)
-    vals <- lapply(winner$features, function(f) {
-      v <- input[[paste0("winner_", f)]]
-      req(v)
-      as.numeric(v)
-    })
-    raw <- as.data.frame(setNames(vals, winner$features),
-                         stringsAsFactors = FALSE)
-    std <- winner_transform(raw, winner)
-    as.numeric(predict(winner$fit, std, type = "prob")[, "Phishing"])
-  })
-
-  output$winner_verdict <- renderUI({
-    req(winner)
-    p   <- winner_user_prob()
-    thr <- input$winner_threshold
-    is_phish <- p >= thr
-    bg <- if (is_phish) "#FDECEA" else "#E8F5E9"
-    bd <- if (is_phish) "#C62828" else "#2E7D32"
-    label <- if (is_phish) "PHISHING" else "LEGITIMATE"
-    div(style = sprintf(
-        "padding:14px 18px;background:%s;border-left:6px solid %s;
-         border-radius:4px;font-size:18px;", bg, bd),
-        strong(style = sprintf("color:%s;font-size:22px;", bd), label),
-        span(style = "margin-left:14px;color:#333;",
-             sprintf("Prob(Phishing) = %.4f", p)),
-        span(style = "margin-left:14px;color:#666;font-size:13px;",
-             sprintf("(prah = %.2f)", thr)))
   })
 
   output$winner_metrics_row <- renderUI({
@@ -1575,11 +1558,11 @@ server <- function(input, output, session) {
   }, striped = TRUE, bordered = TRUE, align = "lcc", rownames = FALSE)
 
   output$winner_roc_plot <- renderPlot({
-    req(winner)
+    req(rv_winner$initialized)
     m <- winner_metrics()
     roc_df <- tibble(
-      fpr = 1 - winner$roc_obj$specificities,
-      tpr = winner$roc_obj$sensitivities
+      fpr = 1 - rv_winner$roc_obj$specificities,
+      tpr = rv_winner$roc_obj$sensitivities
     )
     op <- tibble(fpr = 1 - m$spec, tpr = m$sens)
     ggplot(roc_df, aes(fpr, tpr)) +
@@ -1597,10 +1580,10 @@ server <- function(input, output, session) {
   })
 
   output$winner_hist_plot <- renderPlot({
-    req(winner)
+    req(rv_winner$initialized)
     thr <- input$winner_threshold
-    df <- tibble(prob = winner$test_prob,
-                 class = winner$test_label)
+    df <- tibble(prob = rv_winner$test_prob,
+                 class = rv_winner$test_label)
     ggplot(df, aes(prob, fill = class)) +
       geom_histogram(bins = 50, position = "identity", alpha = 0.55,
                      colour = "white", linewidth = 0.1) +
@@ -1614,19 +1597,39 @@ server <- function(input, output, session) {
       theme(legend.position = "top")
   })
 
+  # O(1) lookup of pre-fitted (C, sigma) predictions. ROC is recomputed locally
+  # (cheap on test_label vector) - kept out of the artifact to keep size down.
+  observe({
+    req(winner, winner$hp_results, isTRUE(rv_winner$initialized))
+    C_val <- suppressWarnings(as.numeric(input$winner_C))
+    s_val <- suppressWarnings(as.numeric(input$winner_sigma))
+    req(!is.na(C_val), !is.na(s_val))
+
+    if (abs(rv_winner$C - C_val) < 1e-9 &&
+        abs(rv_winner$sigma - s_val) < 1e-9) return()
+
+    cell <- winner$hp_results[[sprintf("C=%g_s=%g", C_val, s_val)]]
+    if (is.null(cell)) return()
+
+    new_roc <- pROC::roc(rv_winner$test_label, cell$test_prob,
+                         levels = c("Legitimate", "Phishing"),
+                         direction = "<", quiet = TRUE)
+    rv_winner$test_prob <- cell$test_prob
+    rv_winner$roc_obj   <- new_roc
+    rv_winner$C         <- C_val
+    rv_winner$sigma     <- s_val
+    rv_winner$test_auc  <- cell$test_auc
+  })
+
   observeEvent(input$winner_reset, {
     req(winner)
-    for (f in winner$features) {
-      stat <- winner$feature_stats[[f]]
-      id   <- paste0("winner_", f)
-      if (isTRUE(stat$is_binary)) {
-        updateSelectInput(session, id,
-                          selected = as.character(round(stat$median)))
-      } else {
-        updateSliderInput(session, id, value = round(stat$median))
-      }
-    }
     updateSliderInput(session, "winner_threshold", value = 0.5)
+    if (!is.null(winner$hp_results)) {
+      updateSelectInput(session, "winner_C",
+                        selected = as.character(winner$meta$C))
+      updateSelectInput(session, "winner_sigma",
+                        selected = as.character(winner$meta$sigma))
+    }
   })
 
   # On disconnect: kill orphan background process so it doesn't keep burning CPU.
