@@ -537,6 +537,20 @@ Presne toto vidíme:
 
 To je dobrý výsledok, lebo správanie zodpovedá teórii.
 
+### 19.3 Rýchle vysvetlenie FS modelov a vplyv parametrov
+
+Pri Scenári 3 neporovnávame veľa klasifikátorov, ale tri mechanizmy výberu features. Pri ústnej obhajobe sa oplatí povedať, že všetky smerujú k menšiemu modelu, ale každá iným spôsobom.
+
+| Metóda | Ako funguje stručne | Hlavné parametre/voľby | Keď parameter zmeníme |
+|---|---|---|---|
+| **Bidirectional stepwise** | Začne s jednoduchším logistickým modelom a v krokoch skúša pridať alebo odobrať feature podľa AIC. | `direction = "both"`, AIC kritérium, `maxit = 100` pre GLM | Forward-only by len pridával a nevedel opraviť skoré rozhodnutia. Backward-only by začínal z plného modelu a bol citlivejší na kolinearitu. BIC namiesto AIC by silnejšie trestal počet features a pravdepodobne by vybral menší support. Vyššie `maxit` dá GLM viac iterácií pri ťažších prípadoch. |
+| **Lasso** | Logistická regresia s L1 penalizáciou; slabé alebo redundantné koeficienty padnú presne na nulu. | `alpha = 1`, `lambda.1se`, `lambda_min_ratio = 1e-3` | Väčšia `lambda` viac nuluje features a zmenšuje model, ale môže znížiť výkon. Menšia `lambda` nechá viac features. `lambda.min` by pravdepodobne nechalo širší support s mierne lepším fitom; `lambda.1se` preferuje jednoduchosť. |
+| **Elastic-Net** | Kombinuje L1 a L2 penalizáciu; vie vyhadzovať features, ale korelované features drží stabilnejšie než lasso. | `alpha = 0.5`, `lambda.1se` | Vyššie `alpha` sa blíži k lasso: viac sparsity, ale menej stability pri korelovaných features. Nižšie `alpha` sa blíži k ridge: stabilnejšie koeficienty, ale menej nulovania. Väčšia `lambda` zmenšuje support, menšia necháva viac features. |
+
+Krátka ústna verzia:
+
+> Stepwise vyberá features krokovaním podľa AIC. Lasso ich vyhadzuje tým, že koeficienty stlačí na nulu. Elastic-net je kompromis: stále vie vyhadzovať, ale pri korelovaných features je menej agresívny, preto u nás nechal viac features.
+
 ---
 
 ## 20. Ako čítať FullLite stress test

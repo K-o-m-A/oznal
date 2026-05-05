@@ -445,7 +445,7 @@ Tunujeme:
 - `cp` ako pruning parameter,
 - `minbucket` ako minimálna veľkosť listu.
 
-Hľadáme vysokú fidelity, ale zároveň čitateľnosť. Hlboký strom môže lepšie kopírovať RF, ale je nepoužiteľný na slajde.
+Hľadáme vysokú fidelity, ale zároveň čitateľnosť. Hlboký strom môže lepšie kopírovať RF, ale pri ústnom vysvetľovaní na projektore je nepoužiteľný.
 
 ### 9.7 Prečo cap <= 15 listov
 
@@ -653,6 +653,24 @@ Pre proxy to znamená:
 
 Preto KNN môže byť kvalitný model, ale nie najlepší praktický kandidát.
 
+### 14.7 Rýchle vysvetlenie modelov a vplyv parametrov
+
+Toto je časť, ktorú sa oplatí vedieť povedať ústne. Netreba zachádzať do matematických detailov; stačí vysvetliť princíp a čo by sa stalo, keby sme parameter zvýšili alebo znížili.
+
+| Model | Ako funguje stručne | Parametre v našom riešení | Keď parameter zmeníme |
+|---|---|---|---|
+| **Logistic Regression Ridge** | Učí váhy features a cez sigmoid z nich robí pravdepodobnosť phishingu. Ridge drží váhy menšie a stabilnejšie. | `alpha = 0`, `lambda = 0.01` | Väčšie `lambda` viac stláča koeficienty, model je stabilnejší, ale môže podfitovať. Menšie `lambda` sa blíži obyčajnej LR, pri kolinearite hrozia nestabilné koeficienty. `alpha = 0` je čistý ridge; vyššie `alpha` by išlo smerom k lasso a začalo by vyhadzovať features. |
+| **LDA** | Predstaví si každú triedu ako oblak bodov a hľadá lineárnu hranicu medzi triedami. | V `caret` bez tunovaného gridu | Nemáme hlavný tuning parameter ako pri SVM. Výsledok najviac ovplyvňuje preprocessing a platnosť predpokladu normálnych tried so spoločnou kovarianciou. Pri inom nastavení prior pravdepodobností by sa hranica posunula k triede, ktorú považujeme za častejšiu. |
+| **Naive Bayes** | Pre každý feature odhaduje, ako pravdepodobný je pri phishing/legit triede, a tieto dôkazy násobí. „Naive“ znamená, že predpokladá nezávislosť features. | `usekernel = TRUE`, `fL = 1`, `adjust = 1` | `usekernel = TRUE` robí hladší negaussovský odhad rozdelenia; `FALSE` by bolo jednoduchšie, ale menej flexibilné. Väčšie `fL` viac vyhladzuje nulové/riedke kombinácie, menšie `fL` môže byť ostrejšie a citlivejšie. Väčšie `adjust` viac vyhladí kernel hustoty, menšie ju spraví zubatejšou. |
+| **Random Forest** | Trénuje veľa rozhodovacích stromov a nechá ich hlasovať. Každý strom vidí trochu iné dáta a pri splite inú podmnožinu features. | `ntree = 300`, `mtry = sqrt(p)` | Väčšie `ntree` stabilizuje hlasovanie, ale predlžuje tréning; po istom bode už prínos saturuje. Menšie `ntree` je rýchlejšie, ale viac kolíše. Väčšie `mtry` dáva stromom viac features na výber, môžu byť silnejšie, ale podobnejšie. Menšie `mtry` zvyšuje rozmanitosť stromov, ale jednotlivé stromy môžu byť slabšie. |
+| **SVM-RBF** | Hľadá hranicu medzi triedami s čo najväčším marginom. RBF kernel umožní zakrivenú nelineárnu hranicu. | `C = 1`, `sigma = 0.1` | Väčšie `C` viac trestá chyby na tréningu, hranica sa snaží viac prispôsobiť dátam a môže overfitovať. Menšie `C` dovolí viac chýb a je hladšie/robustnejšie, ale môže podfitovať. Väčšie `sigma` robí RBF lokálnejší a hranica môže byť zložitejšia. Menšie `sigma` robí hranicu hladšiu a globálnejšiu. |
+| **KNN** | Pri novej URL nájde `k` najbližších tréningových príkladov a nechá ich hlasovať. | `k = 25`, jitter `sd = 1e-3` pri ties | Menšie `k` reaguje na lokálne detaily, ale je citlivé na šum. Väčšie `k` je stabilnejšie, ale môže zahladiť reálne lokálne rozdiely. Väčší jitter by mohol meniť význam binárnych features, menší jitter nemusí rozbiť ties. |
+| **Surrogate `rpart` strom** | Jeden rozhodovací strom sa učí napodobniť predikcie Random Forest, nie priamo label. | `maxdepth`, `cp`, `minbucket`, cap `<= 15` listov | Väčší `maxdepth` vie lepšie kopírovať RF, ale strom je menej čitateľný. Väčšie `cp` viac prerezáva strom a zjednodušuje ho. Menší `cp` dovolí viac splitov. Väčšie `minbucket` núti väčšie listy a stabilnejšie pravidlá; menšie môže zachytiť detaily, ale aj šum. |
+
+Krátka ústna verzia:
+
+> Parametrické modely sú jednoduchšie a majú pevnejší tvar hranice. Neparametrické modely sú flexibilnejšie: RF skladá veľa stromov, SVM-RBF kreslí hladkú nelineárnu hranicu a KNN hlasuje podľa podobných príkladov. Parametre väčšinou riadia kompromis medzi jednoduchosťou a prispôsobením tréningovým dátam.
+
 ---
 
 ## 15. Tier-by-tier hlboká interpretácia
@@ -847,7 +865,7 @@ Odpoveď:
 | KNN k = 25 | kompromis medzi šumom a prílišným vyhladením |
 | jitter 1e-3 | rozbije ties v binárnom Trust priestore bez zmeny významu |
 | maxdepth 3:7 | rozsah od čitateľného po dostatočne flexibilný surrogate |
-| max 15 listov | cap pre čitateľnosť na slajde |
+| max 15 listov | cap pre čitateľnosť na projektore / pri ústnom vysvetlení |
 
 ---
 

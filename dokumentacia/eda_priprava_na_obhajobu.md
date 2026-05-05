@@ -433,96 +433,62 @@ EDA ukazuje, že problém nie je triviálny iba na samotnom URL, ale URL obsahuj
 
 ---
 
-## 13. Slide-by-slide naratív pre prezentáciu
+## 13. Ústny scenár pre 15-minútovú obhajobu vo dvojici
 
-Táto časť je praktický scenár, ako EDA odprezentovať nahlas. Nie je nutné povedať všetko, ale pomáha držať logiku.
+Obhajoba bude ústna. Na projektore má byť primárne Shiny aplikácia a podľa potreby otvorený Rmd kód/notebook. Preto túto časť berte ako hovorený scenár: kto čo povie, kam v Shiny/Rmd ukázať a čo určite nevynechať.
 
-### Slide 1: Čo riešime
+### Rozdelenie dvojice
 
-Začal by som vetou:
+**Osoba A** by mala držať príbeh problému, EDA, dát a metodických rozhodnutí. **Osoba B** by mala držať modelovanie, výsledky, Shiny demo a závery. Pri otázkach je dobré odpovedať podľa témy: dáta/preprocessing A, modely/metriky B.
 
-> Riešime phishing detekciu v momente kliknutia na URL. Cieľ nie je len dostať vysoké AUC, ale vyrobiť rozhodnutie, ktoré vie proxy použiť okamžite: block alebo allow.
+### Orientačný časový plán
 
-Potom treba hneď vysvetliť, prečo je URL-only dôležité:
+| Čas | Kto | Čo povedať | Čo mať na projektore |
+|---:|---|---|---|
+| 0:00-1:30 | A | problém phishing proxy, prečo URL-only | Shiny úvod alebo app overview |
+| 1:30-3:30 | A | dataset, Lexical/Trust/Behavior, exclusions | Rmd EDA alebo Shiny časť s feature rodinami |
+| 3:30-5:00 | A | near-leakery a FullLite | Rmd EDA near-leaker časť / tabuľka |
+| 5:00-8:30 | B | Scenár 2: modelové rodiny, minSS, víťaz SVM-RBF | Shiny výsledky modelov |
+| 8:30-10:30 | B | stručne ako fungujú modely a čo robia parametre | Shiny/Rmd model setup |
+| 10:30-12:30 | B | Scenár 3: 9-feature core, stepwise/lasso/EN | Rmd Scenario 3 výsledková tabuľka |
+| 12:30-14:00 | A alebo B | Scenár 4: surrogate strom ako vysvetlenie RF | Shiny/vizualizácia stromu |
+| 14:00-15:00 | obaja | spoločný záver, limity, čo by bol follow-up | Shiny finálny model / summary |
 
-- URL máme k dispozícii ešte pred načítaním stránky.
-- Je to najlacnejší signál.
-- Ak URL-only model funguje, šetrí čas aj infraštruktúru.
-- Ak nefunguje, musíme ísť do drahších signálov.
+Časy sú orientačné, nie treba ich hovoriť nahlas. Slúžia len na to, aby sa obhajoba nerozpadla na príliš dlhú EDA a nestihli sa modely.
 
-### Slide 2: Dataset a rodiny features
+### Otváracia formulácia
 
-Tu treba ukázať tabuľku Lexical / Trust / Behavior.
+> Náš projekt rieši phishing detekciu v momente kliknutia na URL. Nechceli sme iba natrénovať model s vysokým AUC, ale riešiť situáciu, kde proxy musí okamžite povedať block alebo allow. Preto rozlišujeme lacný URL-only signál a drahšie trust/behavior signály.
 
-Hovorené vysvetlenie:
+### Ako prejsť z EDA do modelov
 
-> Dataset sme nerozdelili podľa toho, ako sa stĺpce volajú, ale podľa toho, koľko by stálo získať ich v reálnom proxy scenári. Lexical je takmer zadarmo, Behavior je najdrahší, pretože už vyžaduje poznať obsah stránky.
+> EDA nám ukázala dve kľúčové veci. Po prvé, Lexical features sú samostatne slabšie a korelované, takže očakávame výhodu flexibilnejších modelov. Po druhé, Behavior obsahuje šesť near-leakerov, ktoré by celý Full model spravili príliš ľahký. Preto používame FullLite.
 
-Dôležitá obhajobová veta:
+### Ako ukazovať Shiny počas ústnej obhajoby
 
-> Toto delenie je naše deploymentové rozhodnutie, nie vlastnosť datasetu.
+Pri Shiny nie je cieľ preklikať všetko. Treba ho použiť ako živý dôkaz, že výsledky nie sú len text v dokumente:
 
-### Slide 3: Čistenie features
+- ukázať, že aplikácia pracuje s rovnakým datasetom/modelmi,
+- ukázať výsledkovú tabuľku alebo winner showcase,
+- ukázať prípadne predikciu na URL/features,
+- ukázať surrogate strom alebo model summary, ak je dostupný.
 
-Treba vysvetliť tri kategórie:
+Dobrá veta:
 
-1. computed scores,
-2. redundantná binárka,
-3. redundantné ratios.
+> Shiny aplikácia je nadstavba nad tým istým riešením: ukazuje výsledky a víťazný model interaktívne, ale metodické rozhodnutia sú v Rmd notebookoch.
 
-Hovorená verzia:
+### Čo nehovoriť príliš dlho
 
-> Nechceli sme modelu nechať skratky. Ak v datasete existuje stĺpec, ktorý je už výstupom iného scoring systému, model by sa neučil phishing z URL, ale iba by kopíroval cudzie skóre. Ak existuje stĺpec odvodený z iných stĺpcov, nechceli sme zbytočne zavádzať kolinearitu.
+Nezachádzať do každého chunku kódu. Pri 15 minútach stačí povedať:
 
-### Slide 4: Diskriminačná sila
+- prečo sme čistili features,
+- prečo máme tiery,
+- prečo minSS,
+- ktorý model vyhral a prečo,
+- čo ukázal Scenár 3,
+- čo vysvetľuje surrogate strom.
 
-Tu treba povedať, prečo sú dva grafy alebo dve metriky.
-
-> Spojité features a binárne features sa nedajú férovo merať jednou jednoduchou mierou. Preto pre spojité používame SMD a pre binárne Cramérovo V. Čitateľsky ich berieme rovnako: vyššie znamená silnejší samostatný signál.
-
-Pointa:
-
-> Najsilnejšie samostatné binárne signály nie sú Lexical. Lexical je slabší per-feature, preto tam očakávame väčšiu výhodu modelov, ktoré vedia kombinovať features.
-
-### Slide 5: Kolinearita
-
-Tu treba vysvetliť, že korelácia nie je chyba datasetu, ale prirodzený dôsledok URL.
-
-> Dĺžka URL, počet písmen a počet číslic nie sú nezávislé. Dlhšia URL často obsahuje viac všetkého. Pre človeka je to intuitívne, pre lineárny model je to numerický problém.
-
-Prečo to dôležité:
-
-> Preto v Scenári 2 nepoužívame obyčajnú logistickú regresiu, ale ridge variant.
-
-### Slide 6: Šikmosť
-
-Hovorená verzia:
-
-> Count-features majú dlhé chvosty. Väčšina stránok má málo určitých prvkov, ale niektoré majú extrémne veľa. Log transformácia pomáha, aby pár extrémov neriadilo celý lineárny model.
-
-Treba zdôrazniť:
-
-- `log1p` je bezpečné pre nuly,
-- škálovanie je nutné pre SVM/KNN,
-- RF transformáciu nepotrebuje.
-
-### Slide 7: Near-leakers
-
-Toto je kritická časť.
-
-> Našli sme šesť Behavior features, ktoré majú samostatne AUC nad 0.95. To znamená, že jeden stĺpec takmer vyrieši klasifikáciu. Ak by sme ich nechali vo Full tieri, všetky modely by vyzerali perfektné a Scenár 2 by už neporovnával modelové rodiny.
-
-Treba povedať:
-
-> Preto nevznikol Full, ale FullLite.
-
-### Slide 8: Prechod do scenárov
-
-Záver EDA má byť most:
-
-- Scenár 2: či nelineárne modely lepšie využijú slabší Lexical signál.
-- Scenár 3: či z Lexical features vieme vybrať menší stabilný core.
-- Scenár 4: ako vysvetliť rozhodovanie zložitejšieho modelu.
+Detail chunkov a funkcií si nechať ako odpoveď na otázky alebo ukázať v Rmd, ak sa komisia spýta.
 
 ---
 
