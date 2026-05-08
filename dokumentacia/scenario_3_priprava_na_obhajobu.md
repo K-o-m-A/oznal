@@ -751,3 +751,191 @@ Stability selection by bola výborný follow-up, najmä pre korelované features
 - Viem vysvetliť FullLite stress test?
 - Viem priznať post-selection bias?
 - Viem formulovať finálny H2 verdikt jednou vetou?
+
+---
+
+## 29. Hlboké základy feature-selection metód
+
+V tejto časti vysvetlíme, ako presne každá metóda vyberá features, na čom je závislá a ako sa zmena hyperparametra prejaví na výsledku. Cieľom je, aby pri otázke „prečo presne lasso?“ alebo „čo by sa stalo, keby ste zvýšili lambdu?“ existovala kompletná odpoveď.
+
+### 29.1 Logistický základ — prečo všetky tri metódy zdieľajú rovnaký klasifikátor
+
+Stepwise, lasso aj elastic-net sú **rôzne spôsoby výberu features pre logistickú regresiu**. Klasifikátor je vo všetkých troch ten istý — log-likelihood maximalizácia s linkom `logit`. Rozdiel je v **regularizácii**:
+
+- stepwise: žiadna regularizácia, ale algoritmické pravidlo „pridať/odobrať podľa AIC“,
+- lasso: L1 regularizácia, embedded selection cez nuly v koeficientoch,
+- elastic-net: L1 + L2 regularizácia, kompromis medzi sparsity a stabilitou.
+
+Toto rozhodnutie zámerne **fixuje modelovú rodinu**, aby sa rozdiel medzi metódami dal pripísať feature selection mechanizmu, nie inému klasifikátoru. Keby sme menili aj klasifikátor (napr. lasso-LR vs SVM-RFE), nevedeli by sme oddeliť, čo spôsobuje rozdiel.
+
+### 29.2 Bidirectional stepwise — princíp a vplyv volieb
+
+**Princíp.** Stepwise drží aktuálnu množinu features `S`. V každom kroku skúša:
+- pridať každý feature, ktorý nie je v `S`,
+- odobrať každý feature, ktorý je v `S`,
+- spočíta AIC nového modelu pre každú variantu,
+- vyberie tú zmenu, ktorá AIC najviac zníži.
+
+Algoritmus skončí, keď žiadna zmena AIC nezníži.
+
+**AIC vs BIC.**
+```
+AIC = 2k − 2 × log L(model)
+BIC = log(n) × k − 2 × log L(model)
+```
+kde `k` je počet parametrov, `n` počet pozorovaní, `log L` log-likelihood. AIC trestá komplexitu konštantou 2, BIC `log(n)`. Pri 24 000 tréningových riadkoch je `log(24 000) ≈ 10`, čiže BIC by bol oveľa prísnejší.
+
+**Voľba `direction = "both"`.**
+- `forward` → začína od null modelu, len pridáva. Nevie sa vrátiť.
+- `backward` → začína od full modelu, len odoberá. Pri kolinearite je nestabilný.
+- `both` (naša voľba) → môže pridávať aj odoberať, takže opraví skoré chyby.
+
+**Vplyv `glm.control(maxit)`.** Pri silnej separácii (perfektná predikcia časti dát) GLM pri default 25 iteráciách nekonverguje a vyhadzuje warning. Zvýšenie na 100 mu dá dosť priestoru, aby buď konvergoval, alebo aspoň skončil v stabilnom stave.
+
+**Čo by sa stalo pri inom nastavení.**
+- BIC namiesto AIC → pravdepodobne by stepwise vybral 6–7 features namiesto 9. Risk: dropne slabší ale užitočný feature.
+- `forward` only → pri korelovaných Lexical features by mohol nesprávne začleniť dva korelované features hneď zo začiatku a nemohol ich dropnúť. Final support by bol väčší alebo iný.
+- `backward` only → začínal by z full modelu (13 features) a postupne by odoberal. Pri silnej kolinearite môže prvý drop byť aleatorický.
+
+### 29.3 Lasso — princíp a vplyv hyperparametrov
+
+**Princíp.** Lasso je logistická regresia s L1 penalizáciou:
+
+```
+minimalizuj:  −log L(β) + λ × Σ|βᵢ|
+```
+
+L1 norma má geometricky špeciálnu vlastnosť: jej kontúry sú diamanty (v 2D). Optimum je často v rohu diamantu, kde sa jeden z koeficientov rovná nule. Preto lasso „spontánne“ nastavuje koeficienty presne na nulu — to je jeho feature selection mechanizmus.
+
+**Hyperparameter `alpha`.** V `glmnet` definuje mix L1/L2:
+```
+penalty = λ × (alpha × Σ|βᵢ| + (1 − alpha) × ½ × Σβᵢ²)
+```
+- `alpha = 1` → čistý lasso (maximum sparsity).
+- `alpha = 0` → čistý ridge (žiadna sparsity).
+- `alpha = 0.5` → elastic-net (kompromis).
+
+**Hyperparameter `lambda`.** Sila penalizácie.
+- `λ = 0` → klasická LR, žiadne nuly, žiadna selection.
+- `λ malé (0.001)` → mierna penalizácia, zachová väčšinu features.
+- `λ stredné` → zvolené `lambda.min` alebo `lambda.1se` z CV.
+- `λ veľké` → všetky koeficienty padnú na nulu okrem najsilnejších.
+- `λ → ∞` → úplne null model (len intercept).
+
+**Voľba `lambda.1se` vs `lambda.min`.**
+- `lambda.min` — λ s minimálnou CV chybou. Často nechá viac features.
+- `lambda.1se` (naša voľba) — najväčšia λ, ktorej CV chyba je do 1 SE od minima. **Konzervatívnejšia, prefuje jednoduchší model s prakticky rovnakou kvalitou.**
+
+Naša voľba `lambda.1se` je opodstatnená cieľom Scenára 3 — kompaktný deployment model. Posledné desatiny AUC nestoja za zachovanie features, ktoré pridajú komplexitu bez zásadnej hodnoty.
+
+**Vplyv `lambda.min.ratio`.** `cv.glmnet` skúša lambda grid od `lambda.max` (= najmenšie λ, pri ktorom sú všetky koeficienty nula) po `lambda.min = lambda.max × ratio`. Default `ratio = 0.01`. My používame `1e-3`, čo dá širšiu cestu — viac kandidátov pri vysokej penalizácii, kde feature selection je rozlíšiteľnejšia.
+
+**Vplyv `nfolds`.** `cv.glmnet` interne robí CV na výber `lambda`. `nfolds = 5` (naša voľba) je rýchlejšia než default `10` a pri 24k tréningových bodoch dostatočne stabilná.
+
+### 29.4 Elastic-Net — princíp a vplyv hyperparametrov
+
+**Princíp.** Elastic-net je kombinácia L1 a L2:
+```
+penalty = λ × (alpha × Σ|βᵢ| + (1 − alpha) × ½ × Σβᵢ²)
+```
+- L1 zložka robí sparsity.
+- L2 zložka stabilizuje korelované features (drží ich v skupine).
+
+**Vplyv `alpha`.**
+- `alpha = 0.1` → viac ridge, takmer žiadna sparsity. Skoro všetky features ostanú.
+- `alpha = 0.5` (naša voľba) → vyrovnaný kompromis.
+- `alpha = 0.9` → takmer lasso, ale s malou stabilizáciou.
+- `alpha = 1` → lasso.
+
+**Prečo `alpha = 0.5`.** Reprezentatívny stred. Nechceme „skoro lasso“ ani „skoro ridge“ — chceme skutočný kompromis, ktorý komisii ukáže, čo elastic-net môže priniesť (stabilita) a čo stratí (sparsity).
+
+**Prečo elastic-net dropuje menej features než lasso.** Pri korelovanej skupine features lasso vyberie jeden a ostatné vynuluje (preferuje sparsity). Elastic-net naopak rozdelí váhu medzi všetkých členov skupiny (ridge zložka tlačí na rozdelenie). Preto elastic-net drží širší support — v našom prípade 10 features namiesto 9.
+
+### 29.5 Súhrnná tabuľka vplyvu hyperparametrov
+
+| Metóda | Parameter | Hodnota | Efekt zmeny smerom hore | Efekt zmeny smerom dole |
+|---|---|---|---|---|
+| Stepwise | `direction` | "both" | "forward": menej flexibilný, väčší support | "backward": citlivý na kolinearitu |
+| Stepwise | kritérium | AIC | BIC: prísnejšie, menej features | žiadne kritérium: nemá zmysel |
+| Stepwise | `glm.maxit` | 100 | dlhšie trvá, lepšia konvergencia | non-convergence warnings, možno horšie p-hodnoty |
+| Lasso | `alpha` | 1 | nemá hore | nižšie smerom k EN: viac features, menej sparsity |
+| Lasso | `lambda` | 1se | min: viac features, lepšie AUC marginálne | väčšia: agresívne nuly, podfitovanie |
+| Lasso | `lambda.min.ratio` | 1e-3 | širšia λ cesta | užšia, rovnaké λ.1se výsledky |
+| Lasso | `nfolds` | 5 | stabilnejšia CV | rýchlejšia, ale šumnejšia |
+| EN | `alpha` | 0.5 | smerom k 1: skoro lasso | smerom k 0: skoro ridge, žiadna sparsity |
+| EN | `lambda` | 1se | min: viac features | väčšia: agresívne nuly |
+
+### 29.6 Prečo presne tieto tri metódy a žiadne iné
+
+**Reprezentatívnosť rodín FS.** Existujú tri hlavné rodiny feature selection:
+- **Filter** (mutual information, chi-square, korelácia s target) — hodnotí features nezávisle.
+- **Wrapper** (stepwise, RFE, exhaustive search) — hodnotí features cez výkon klasifikátora.
+- **Embedded** (lasso, elastic-net, decision-tree importance) — výber je súčasťou fitovania.
+
+V Scenári 3 porovnávame **wrapper (stepwise) vs embedded (lasso, elastic-net)**. Filter metódy sme zámerne vynechali, lebo nezohľadňujú interakcie medzi features — pre lineárny logistický model je dôležité, ako spolupracujú, nie ako sú silné samostatne.
+
+Lasso a elastic-net boli vybrané ako embedded reprezentanti, lebo:
+- sú modernejšie a teoreticky lepšie podložené než ad-hoc filter prahy,
+- majú jasnú interpretáciu cez nulové koeficienty,
+- zhodujú sa s logistickým klasifikátorom, ktorý držíme fixne,
+- líšia sa medzi sebou v jednom kľúčovom parametri (`alpha`), takže rozdiel medzi nimi je interpretovateľný.
+
+Stepwise je vybraný ako wrapper reprezentant aj napriek známej kritike, pretože:
+- je široko známy a očakávaný v každej štatistickej obhajobe,
+- AIC kritérium je kompromisné (nie príliš prísne ako BIC),
+- bidirectional varianta odstraňuje hlavnú kritiku jednosmerných variantov,
+- pri primárnom audite p-hodnôt po fit-e nehláskujeme inferenčné nároky.
+
+### 29.7 Prečo NIE iné metódy
+
+| Metóda | Prečo nie |
+|---|---|
+| **Recursive Feature Elimination (RFE)** | Wrapper, ale podobný stepwise s iným pravidlom. Nepridá nový pohľad. |
+| **Boruta** | Random Forest based, čo by zmenilo klasifikačnú rodinu. |
+| **Mutual information** | Filter, neberie do úvahy interakcie ani lineárny model. |
+| **Chi-square** | Pre binárne features OK, pre spojité by sme museli diskretizovať. |
+| **PCA / faktorová analýza** | To nie je selection ale transformácia — vzniknú nové features, ktoré sú lineárne kombinácie pôvodných. Pre interpretovateľnosť horšie. |
+| **Stability selection** | Kvalitná metóda, ale výpočtovo náročnejšia (resampling × lasso). FullLite per-fold analýza je čiastočná aproximácia. |
+| **L0 regularizácia** | Teoreticky najlepšia sparsity, ale NP-hard. Nepoužíva sa štandardne. |
+
+---
+
+## 30. Detailné odôvodnenie výberu pre Scenár 3
+
+### 30.1 Prečo logistický klasifikátor a nie iný
+
+V Scenári 2 vyhral SVM-RBF. V Scenári 3 to napriek tomu **nie je** klasifikátor, na ktorom robíme feature selection. Dôvodov je niekoľko:
+
+1. **Interpretovateľnosť koeficientov.** SVM-RBF nedáva koeficienty per feature v originálnom priestore — všetka „logika“ je v kerneli. Lasso na SVM by potrebovalo wrapper (multiple kernel learning) alebo SVM-RFE, čo nepatrí medzi štandardné FS metódy a komplikuje porovnanie.
+2. **Konzistencia FS metód.** Stepwise, lasso a elastic-net sú prirodzene definované pre logistický model. Ak by sme zmenili klasifikátor, nešli by sme rovnako cez všetky tri.
+3. **Čistota experimentu.** Scenár 3 izoluje feature selection. Ak by sme zmenili klasifikátor aj selection, nevedeli by sme, čo spôsobuje rozdiel.
+4. **Deployment kontrast voči Scenáru 2.** Logistický model po feature selection je ľahší, rýchlejší a interpretovateľnejší než SVM. Je to alternatívny deployment kandidát pre situácie, kde SVM nie je vhodný.
+
+### 30.2 Prečo rovnaký 30k subsample a 80/20 split
+
+Aby sa **akýkoľvek rozdiel medzi Scenárom 2 a Scenárom 3 nedal pripísať inej dátovej vzorke**. Lexical AUC z LR-Ridge v Scenári 2 a Lexical AUC zo stepwise-redukovanej LR v Scenári 3 sú porovnateľné len vtedy, ak sú train aj test sety identické.
+
+### 30.3 Prečo prahy 9 / 0.95 / 0.94 / 0.75
+
+| Prah | Hodnota | Odôvodnenie |
+|---|---|---|
+| Sparsity (k) | ≤ 9 z 13 | Aspoň ~31% redukcia. 9 vs 13 je dosť na to, aby išlo o významné zmenšenie, nie kozmetické. |
+| AUC | ≥ 0.95 | Realistický benchmark vychádzajúci zo Scenára 2, kde plný 13-feature LR-Ridge dosiahol ~0.96 AUC. Pri redukcii o 4 features by AUC mohlo trochu klesnúť, ale nie pod 0.95. |
+| Sensitivity | ≥ 0.94 | Phishing nesmie unikať. 0.94 znamená, že 94 % útokov chytíme. |
+| Specificity | ≥ 0.75 | URL-only filter je prvá línia. Môže byť trochu opatrnejší a ešte nepustiť každú legit. 0.75 stále znamená, že 3 zo 4 legit URL prejdú. |
+
+Tieto prahy boli definované **pred fitovaním** (sú v RMD ako konštanty) — to je metodicky čisté.
+
+### 30.4 Prečo nehodnotíme FullLite tými istými prahmi
+
+FullLite má 34 features a oveľa silnejší signál. Všetky FS metódy by tam dosiahli AUC nad 0.99. Otázka by sa stala triviálnou. Preto na FullLite hodnotíme **stabilitu** výberu (per-fold počty, selection frequency), nie absolútnu kvalitu metrík.
+
+---
+
+## 31. SVM-RBF a Scenár 3 — krátka mostíková sekcia
+
+Ak komisia bude vyzývať „prečo nie SVM aj v Scenári 3?“, krátka odpoveď:
+
+> SVM-RBF dáva v Scenári 2 najlepší operačný bod, ale nie je prirodzená feature-selection metóda. RBF kernel pracuje nad celým vektorom features cez podobnosti, takže neexistuje koeficient na feature, ktorý by sme mohli vynulovať. Wrapper SVM selection (SVM-RFE) by bol drahý a vlastne by len kopíroval wrapper logiku stepwise. Embedded selection na SVM nie je štandardná.
+
+Detail (sekcia 29 v Scenári 2 priprave): SVM-RBF má slabinu interpretovateľnosti, ktorú akceptujeme. Scenár 3 rieši deployment-light alternatívu — kompaktný logistický filter.

@@ -783,3 +783,114 @@ par(op)
 **`par(op)` na konci** — obnoví pôvodné graphics nastavenia (best practice).
 
 **Účel:** Cross-check, či root split surrogate stromu je aj **top-feature RF**. Ak áno, strom skutočne reflektuje rozhodovaciu logiku RF, nie len iný model so zhodnou test-set predikciou.
+
+---
+
+## Dodatok: Ako funguje každý fitovaný model a vplyv hyperparametrov
+
+Tento dodatok rozširuje chunky `fit-lr`, `fit-lda`, `fit-nb`, `fit-rf`, `fit-svm`, `fit-knn`. Cieľom je, aby pri čítaní kódu bolo jasné nielen **čo** fitujeme, ale aj **prečo** v matematickom zmysle a **ako** by zmena hyperparametra zmenila výsledok.
+
+### Logistic Regression Ridge (`method = "glmnet"`, `alpha = 0`, `lambda = 0.01`)
+
+**Princíp.** Pre každý feature `xᵢ` model nájde váhu `βᵢ`. Pre nový vstup spočíta `z = β₀ + Σβᵢxᵢ` a výslednú pravdepodobnosť vráti cez `σ(z) = 1 / (1 + e^(-z))`. Optimalizuje sa `−log L(β) + ½ × λ × Σβᵢ²` (ridge L2 penalizácia).
+
+**Vplyv hyperparametrov:**
+- `alpha = 0` → čistý ridge. `alpha = 1` by spustilo lasso (feature selection). `alpha = 0.5` elastic-net.
+- `lambda = 0.01` → mierna stabilizácia. `lambda → 0`: nestabilné koeficienty pri kolinearite. `lambda → ∞`: všetky koeficienty stiahnuté k nule, model konverguje k trivialite.
+
+**Prečo `tuneGrid = data.frame(alpha = 0, lambda = 0.01)` a nie ladenie cez CV:** Scenár 2 fixuje hyperparametre, aby porovnanie modelových rodín nebolo skreslené ladením. `lambda = 0.01` nie je optimálny pre AUC, ale je **stabilizujúci**.
+
+### LDA (`method = "lda"`)
+
+**Princíp.** Aproximuje každú triedu ako gaussovský mrak so spoločnou kovarianciou. Hľadá lineárnu kombináciu features, ktorá maximalizuje pomer medzitriednej a vnútrotriednej variability (Fisher discriminant).
+
+**Učené parametre:** dva priemery (`μ_phishing`, `μ_legit`) a jedna kovariančná matica `Σ`. Predikcia: `arg max log P(y) − ½ × (x − μ_y)ᵀ Σ⁻¹ (x − μ_y)`.
+
+**Vplyv preprocessingu:** Bez `log1p` a štandardizácie predpoklad gaussovských tried zlyhá pri šikmých features, hranica je posunutá. To je dôvod, prečo LDA dostáva Recept A.
+
+**Žiadne tuning gridy:** LDA nemá hlavný hyperparameter v caret API. Mohli by sme meniť priors, ale držíme empirické.
+
+### Naive Bayes (`method = "nb"`, `fL = 1`, `usekernel = TRUE`, `adjust = 1`)
+
+**Princíp.** Predpokladá podmienenú nezávislosť: `P(x | y) = ∏ P(xᵢ | y)`. Tým redukuje učenie na odhad jednorozmerných distribúcií per (feature, class).
+
+**Vplyv hyperparametrov:**
+- `usekernel = TRUE` → kernel-density odhad spojitých features (flexibilný). `FALSE` → Gaussian NB (jednoduchý, ale zle sedí pre šikmé features).
+- `fL = 1` → Laplace smoothing pre kategoriálne (binárky). `0` by mohlo dať nulové pravdepodobnosti pri neviditeľných kombináciách.
+- `adjust = 1` → default šírka kernelu. >1 vyhladí, <1 zaostrí.
+
+**Prečo NB napriek zlomenému predpokladu:** EDA ukázala silné korelácie v Lexical poole, takže NB tu predpoklad nesplní. Napriek tomu ho fitujeme ako kontrolný experiment — výsledok ukazuje cenu zlomeného predpokladu (vysoká Sensitivity, nízka Specificity).
+
+### Random Forest (`method = "rf"`, `mtry = sqrt(p)`, `ntree = 300`)
+
+**Princíp.** 300 nezávisle natrénovaných CART stromov. Každý strom:
+1. dostane bootstrap vzorku (random sample s replacement),
+2. pri každom splite vidí náhodnú podmnožinu `mtry` features,
+3. delí dáta podľa najlepšieho splitu (znížený Gini).
+
+Predikcia: hlasovanie alebo priemer pravdepodobností.
+
+**Vplyv hyperparametrov:**
+- `ntree`. Pri 300 je AUC saturovaná. Veľmi nízke (≤ 50) → vysoká variancia hlasovania. Veľmi vysoké (1000+) → marginálny zisk za cenu času.
+- `mtry`. Pri Lexical (13 features) `sqrt(13) ≈ 3.6 → mtry = 3`. Vyššie → korelované stromy. Nižšie → diverse, ale slabé stromy.
+- Hĺbka stromov je default neobmedzená — RF sa spolieha na hlasovanie pre redukciu variance.
+
+**Recept B (žiadny preprocessing):** Stromy sú monotónne invariantné — `log1p` ani standardizácia nezmenia poradie hodnôt, takže nepomáhajú ani neškodia. Vynecháme pre čistejšiu pipeline.
+
+### SVM-RBF (`method = "svmRadial"`, `C = 1`, `sigma = 0.1`)
+
+**Princíp.** Hľadá hyperplochu v kernel-priestore, ktorá maximalizuje margin medzi triedami. RBF kernel `K(x, x') = exp(−σ × ‖x − x'‖²)` premieta dáta do nekonečno-rozmerného priestoru, kde sa nelineárne hranice stanú lineárne oddelitelné.
+
+Optimalizačný problém (duálna soft-margin forma):
+```
+max Σαᵢ − ½ ΣᵢΣⱼ αᵢαⱼ yᵢyⱼ K(xᵢ, xⱼ)
+s.t. 0 ≤ αᵢ ≤ C, Σαᵢyᵢ = 0
+```
+
+**Vplyv hyperparametrov:**
+
+`C` (regularizačný parameter, soft-margin trade-off):
+- `C → 0` → mäkký margin, model toleruje veľa chýb. Hladká hranica, underfitting.
+- `C = 1` (naša voľba) → konvenčný kompromis pre štandardizované dáta.
+- `C → ∞` → tvrdý margin, nulová tolerancia chýb. Hranica sa kriví okolo outlierov, overfitting.
+
+`sigma` (inverzia šírky kernelu):
+- `sigma → 0` → veľmi široký kernel, hranica skoro lineárna, underfitting.
+- `sigma = 0.1` (naša voľba) → blízko `1/p ≈ 0.077` (default v sklearn pre p = 13). Hranica je flexibilná, ale nie patchwork.
+- `sigma → ∞` → každý support vector vplýva iba na seba. Hranica je rozdrobená na mikro-bublíny, extrémny overfitting.
+
+**Interakcia `C` × `sigma`:**
+- vysoké `C` + vysoké `sigma` → katastrofický overfitting,
+- nízke `C` + nízke `sigma` → underfitting,
+- vyvážené stredné hodnoty → dobrá generalizácia.
+
+**Prečo RBF a nie iný kernel:**
+- **Linear** — ekvivalent LR, nezachytí nelinearitu (čo EDA očakáva).
+- **Polynomial** — viac hyperparametrov (`degree`, `scale`, `offset`), nemá lokalitu.
+- **RBF** — univerzálny aproximátor, lokálny, robustný default. **Štandardná voľba pre tabulárne dáta.**
+
+**Prečo škálovanie je kritické:** RBF kernel je založený na euklidovskej vzdialenosti `‖x − x'‖`. Bez štandardizácie by feature s veľkým rozsahom (napr. `URLLength` 0–500) dominoval vzdialenosť, ostatné by boli ignorované. Recept A (`log1p` + center/scale) je preto pre SVM nutný, nie kozmetický.
+
+### KNN (`method = "knn"`, `k = 25`)
+
+**Princíp.** Žiadne učenie sa nekoná — model si len uloží trénovacie dáta. Pri predikcii spočíta euklidovské vzdialenosti k všetkým trénovacím bodom, vyberie 25 najbližších a hlasuje.
+
+**Vplyv `k`:**
+- `k = 1` → predikcia podľa jediného suseda, extrémny overfitting na šum.
+- `k = 25` (naša voľba) → kompromis. Lokálny, ale stabilný.
+- `k → n` → globálna predikcia (väčšina v tréningu), underfitting.
+
+**Vplyv jitteru:** Pri Trust tieri má 7 features, z ktorých veľká väčšina je binárna. Veľa URL má identický feature vektor → KNN má „too many ties“. Jitter so `sd = 1e-3` rozbije ties; pre binárky je to zmena rádovo 10⁻³ od 0 alebo 1, čo nemení ich „trojhodnotový“ charakter (≈0, ≈1).
+
+**Prečo `k = 25` a nie ladenie:** Konvenčné nastavenie pre stredné datasety (24k tréningových). Pri ladení by sme museli mať externý val set, čo by zmenšilo CV štatistickú silu.
+
+### Surrogate `rpart` strom (Scenár 4)
+
+**Princíp.** CART rekurzívne delí priestor binárnymi splitmi `xᵢ < t`. Pri každom uzle vyberie split s najväčším poklesom Gini impurity. V Scenári 4 sa cieľovou premennou stáva **predikcia RF**, nie pôvodný label.
+
+**Vplyv hyperparametrov:**
+- `maxdepth`. 3 → max 8 listov, čitateľný ale možno underfit. 7 → max 128 listov, lepšia fidelity, horšia čitateľnosť.
+- `cp` (complexity parameter). Pruning prag. Vyššie → menšie stromy.
+- `minbucket`. Minimálny počet pozorovaní v liste. Vyššie → stabilnejšie pravidlá, menej outlier-driven splitov.
+
+**Cap `≤ 15 listov`:** Vizualizačné, nie metodické. Cap obetuje fidelity za čitateľnosť.

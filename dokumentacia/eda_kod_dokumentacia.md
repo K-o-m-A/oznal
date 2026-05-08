@@ -3,17 +3,6 @@
 Detailný popis každého chunku v EDA notebooku, s vysvetlením funkcií a dôvodov výberu balíkov.
 
 ---
-
-## Ako túto dokumentáciu čítať
-
-Každý chunk je popísaný v troch rovinách:
-
-1. **Účel chunku** — čo má daná časť analyticky dosiahnuť.
-2. **Mechanika kódu** — ako sa dáta transformujú krok po kroku.
-3. **Použité funkcie a balíky** — odkiaľ funkcie pochádzajú a prečo sme zvolili práve túto implementáciu.
-
-V EDA preferujeme **tidyverse štýl**, lebo notebook má byť čitateľný ako analytický príbeh. Pipe `%>%` umožňuje čítať transformáciu zhora nadol: „vezmi dáta, sprav krok 1, potom krok 2, potom vykresli“. Pri obhajobe je to zrozumiteľnejšie než veľa dočasných objektov a indexovania cez hranaté zátvorky.
-
 ### Základná tidyverse logika použitá v EDA
 
 | Funkcia | Balík | Laické vysvetlenie | Prečo tu |
@@ -562,3 +551,126 @@ Yardstick je **tidymodels-konzistentný** a má `_vec` varianty pre čisto vekto
 
 **Hranica 0.95:**  
 Empiricky stanovená — features s univariate AUC > 0.95 môžu samé takmer perfektne klasifikovať dataset, čím sa eliminuje potreba modelu. Tieto „near-leakers" identifikujeme tu a vyhodíme ich z FullLite tieru v Scenári 2 a 3.
+
+---
+
+## Dodatok: Hlbšie základy diagnostických metrík v EDA
+
+EDA zavádza viacero diagnostických metrík (SMD, Cramér V, VIF, skewness, univariate AUC). Tu sú ich matematické definície, intuícia a vplyv konkrétnych volieb na výsledok.
+
+### SMD — Standardised Mean Difference
+
+```
+SMD = |μ_phishing − μ_legit| / sqrt((σ²_phishing + σ²_legit) / 2)
+```
+
+**Intuícia:** rozdiel priemerov v jednotkách priemernej smerodajnej odchýlky. Bezrozmerné, takže porovnateľné cez features.
+
+**Interpretácia:**
+- `< 0.1` → veľmi slabý efekt,
+- `0.2–0.5` → slabý,
+- `0.5–0.8` → stredný,
+- `> 0.8` → silný,
+- `> 2` → extrémne silný (distribúcie sú prakticky disjunktné).
+
+**Vplyv ochrannej konštanty `1e-9`:** V kóde:
+```r
+effect = abs(m_1 - m_0) / sqrt((s_0^2 + s_1^2) / 2 + 1e-9)
+```
+Ak by `s_0 = s_1 = 0` (konštantný feature), bez ochrany by sme delili nulou. `1e-9` je tak malé, že pri reálnych dátach (typické SD ≥ 0.01) výsledok neovplyvní.
+
+### Cramérovo V
+
+```
+V = sqrt(χ² / (n × (min(rows, cols) − 1)))
+```
+
+**Intuícia:** normalizuje chi-squared štatistiku na škálu 0–1, nezávisle od veľkosti vzorky. Pre 2×2 tabuľku (binárny feature × binárny label):
+
+```
+V = sqrt(χ² / n)
+```
+
+**Vplyv `correct = FALSE`:** Yatesova korekcia (default `TRUE`) zmenšuje chi-squared štatistiku pri malých počtoch. Pri n = 235k je to redundantné. Vypnutím dostávame čisté `χ²`.
+
+**Prečo Cramér V a nie chi-square p-value:** Pri veľkom n bude p-value extrémne malá aj pre triviálne efekty. Cramér V meria **veľkosť efektu**, nie štatistickú významnosť.
+
+### VIF — Variance Inflation Factor
+
+```
+VIF(xᵢ) = 1 / (1 − R²ᵢ)
+```
+
+kde `R²ᵢ` je z regresie `xᵢ ~ všetky ostatné features`.
+
+**Intuícia:**
+- `R² = 0` → ostatné features `xᵢ` neuhádnu, VIF = 1.
+- `R² = 0.9` → VIF = 10.
+- `R² = 0.99` → VIF = 100.
+- `R² = 0.999` → VIF = 1000.
+
+**Vplyv klasifikácie pásem:**
+- `< 5` → bezpečné,
+- `5–10` → opatrnosť,
+- `> 10` → silná kolinearita,
+- `> 100` → patologická redundancia.
+
+V Lexical poole vidíme VIF > 1000 pre dĺžkové features. Toto je dôvod, prečo Scenár 2 používa **ridge** namiesto obyčajnej LR.
+
+### Skewness (Fisher–Pearson type 2)
+
+```
+skewness = (n / ((n−1)(n−2))) × Σ((xᵢ − μ) / σ)³
+```
+
+**Intuícia:**
+- `0` → symetrická distribúcia (normálna).
+- `> 0` → pravo-šikmá (dlhý chvost vpravo).
+- `< 0` → ľavo-šikmá.
+- `|skew| > 2` → silne šikmá, môže ovplyvňovať lineárne modely.
+
+**Náš výsledok:** Spojité count features sú silne pravo-šikmé. Preto v modelovaní aplikujeme `log1p`, ktorý šikmosť redukuje.
+
+### Univariate AUC
+
+```
+AUC = P(score(phishing) > score(legit))
+```
+
+Pre kontinuálny feature `x` použijeme `x` ako klasifikačné skóre. AUC je pravdepodobnosť, že náhodne vybraný phishing bod má vyššie `x` než náhodne vybraný legit.
+
+**Intuícia:**
+- `0.5` → nerozlišuje (ako náhodný hod mincou).
+- `0.7` → mierna sila.
+- `0.9` → silný klasifikátor.
+- `> 0.95` → near-leaker, prakticky rieši úlohu sám.
+
+**Vplyv `event_level = "second"`:** Pri factor `c("Legitimate", "Phishing")` je level 2 = phishing. Špecifikácia hovorí, že phishing je „pozitívna“ trieda pre AUC. Bez toho by AUC mohla byť „naopak“ pre niektoré features.
+
+### Korelácia — Pearson vs Spearman
+
+**Pearson** (default `cor()`) meria lineárny vzťah. Citlivý na outliery.
+**Spearman** je rank-based, robustný voči outlierom a monotónnym nelinearitám.
+
+**Naša voľba — Pearson:** Po štandardizácii features sú v rozumnej škále, lineárny vzťah je primerane reprezentatívny. Spearman by sme použili, ak by sme očakávali nelineárne ale monotónne vzťahy.
+
+**Vplyv `use = "pairwise.complete.obs"`:** Pre každú dvojicu features berie len riadky, kde sú obe non-NA. Alternatíva `complete.obs` by vyhodila celý riadok pri ľubovoľnom NA — strata informácie. V našom datasete nie sú missing values, takže oba režimy dajú rovnaký výsledok, ale `pairwise` je defenzívnejšia voľba.
+
+---
+
+## Dodatok 2: Rozhodnutia vyplývajúce z EDA pre modelovanie
+
+Tabuľka pre prepojenie EDA výsledkov a modelovacích rozhodnutí:
+
+| EDA zistenie | Rozhodnutie pre modelovanie |
+|---|---|
+| Lexical features sú jednotlivo slabé (SMD < 0.5 pre väčšinu) | porovnaj parametrické vs neparametrické modely (H1) |
+| Silná kolinearita (VIF > 1000) | LR-Ridge namiesto LR |
+| Pravostranná šikmosť spojitých | `log1p` pred fitovaním |
+| Rôzne škály features | center/scale pre vzdialenostné modely |
+| 6 Behavior features s univariate AUC > 0.95 | FullLite tier (vylúčené near-leakers) |
+| Triedy ~50/50 po sub-sample | žiadne class weighting |
+| Žiadne missing values | žiadna imputácia |
+| Prevažne binárne Trust features | jitter pre KNN, aby sa vyhol „too many ties“ |
+| Lexical signál v kombináciách, nie v jednom feature | RBF kernel pre SVM |
+| Korelácia v Lexical features | Scenár 3 testuje feature selection (lasso, elastic-net) |

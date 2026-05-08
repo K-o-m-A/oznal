@@ -1,6 +1,5 @@
 # EDA — príprava na obhajobu
 
-Tento dokument je hovorená, obhajobová verzia notebooku `eda.rmd`. Je písaný tak, aby sa z neho dalo pripraviť na otázky komisie aj bez toho, aby čitateľ musel detailne poznať R alebo strojové učenie. Vecné tvrdenia vychádzajú z aktuálneho `eda.rmd`, nie zo starších odstránených dokumentácií.
 
 ---
 
@@ -19,18 +18,6 @@ Z EDA vyšlo, že samotné URL features sú jednotlivo slabšie než Trust a Beh
 ---
 
 ## 1. Slovník pojmov
-
-### Phishing URL
-
-Phishing URL je odkaz, ktorý sa tvári ako legitímna služba, ale v skutočnosti smeruje na podvodnú stránku. Útočník sa snaží používateľa presvedčiť, aby zadal heslo, údaje karty alebo iné citlivé informácie.
-
-### Proxy server
-
-Proxy server stojí medzi používateľom a internetom. Keď používateľ otvorí URL, proxy vie rozhodnúť, či požiadavku pustí ďalej, alebo ju zablokuje. V našom príbehu proxy potrebuje rýchly model, ktorý vie z URL alebo ďalších signálov povedať „block“ / „allow“.
-
-### Feature / prediktor
-
-Feature je stĺpec v datasete, ktorý model používa na rozhodovanie. Napríklad `URLLength` je dĺžka URL, `NoOfSubDomain` je počet subdomén, `IsHTTPS` hovorí, či stránka používa HTTPS.
 
 ### Label
 
@@ -100,11 +87,7 @@ Najrýchlejšia je Lexical vrstva. Ak funguje dobre, proxy má lacný prvý filt
 
 ### 2.2 Prečo nestačí povedať iba „model má vysoké AUC“
 
-Proxy nerobí akademické hodnotenie skóre. V praxi musí vrátiť jednu odpoveď:
-
-- phishing → blokovať,
-- legitimate → pustiť.
-
+Proxy nerobí akademické hodnotenie skóre. V praxi musí vrátiť jednu odpoveď.
 Preto nás okrem AUC zaujíma aj threshold 0.5, teda čo sa stane pri reálnom rozhodnutí. Model môže mať dobré AUC, lebo vie prípady pekne zoradiť, ale pri prahu 0.5 môže blokovať veľa legitímnych stránok. Preto už v EDA pripravujeme metriky Sensitivity, Specificity a minSS.
 
 ---
@@ -391,147 +374,11 @@ Extrémne hodnoty v dlhých pravých chvostoch by silno ovplyvnili lineárne mod
 
 ---
 
-## 11. Časté otázky komisie
-
-### Prečo ste nepoužili všetkých 50 prediktorov?
-
-Lebo nie všetky sú vhodné ako férové vstupy. Niektoré sú identifikátory alebo texty, niektoré sú už vypočítané skóre iných systémov, niektoré sú redundantné odvodeniny. Cieľom bolo modelovať z interpretovateľných, surovejších signálov.
-
-### Prečo sú SMD a Cramérovo V dve rôzne metriky?
-
-Lebo spojité a binárne features majú inú matematiku. SMD je vhodné pre rozdiel priemerov spojitých premenných. Cramérovo V je vhodné pre asociáciu v kontingenčnej tabuľke pri binárnych premenných. Obe však dávajú čitateľnú škálu 0 až 1.
-
-### Prečo riešite minSS, keď EDA ešte netrénuje modely?
-
-EDA formuluje problém a hypotézy. Keďže deployment je block/allow pri prahu 0.5, už pri formulácii hypotéz definujeme, že neskôr nebude stačiť len AUC. minSS je spôsob, ako hodnotiť slabšiu stranu modelu.
-
-### Prečo nepoužívate class weighting?
-
-Dataset je približne vyvážený. Class weighting je užitočný pri silnom imbalance, napríklad 1 % phishing a 99 % legit. Tu by pridával ďalšie rozhodnutie bez jasnej potreby.
-
-### Nie sú near-leakery legitímne features?
-
-Môžu byť legitímne v inom deployment scenári, kde už máme stiahnutý obsah stránky. Ale v našom porovnaní modelových rodín by príliš dominovali. Preto ich neoznačujeme ako „zlé“, ale ako nevhodné pre H1 kontrast.
-
-### Prečo FullLite stále obsahuje Behavior features?
-
-Lebo nechceme porovnávať iba URL-only svet. FullLite je realistický silnejší benchmark, ktorý ukazuje, čo sa stane, keď proxy alebo pipeline má k dispozícii viac signálov, ale bez šiestich premenných, ktoré úlohu takmer vyriešia samé.
-
-### Prečo `IsHTTPS` nie je v Lexical?
-
-V praxi HTTPS reprezentuje trust/security vlastnosť spojenia. Aj keď sa textovo objaví v URL, deploymentovo nie je rovnakého typu ako počet znakov alebo subdomén. Preto ho dávame do Trust.
-
-### Čo je najväčšie riziko EDA?
-
-Najväčšie riziko je, že datasetové Behavior features môžu odrážať špecifiká datasetu, nie univerzálny internet. Preto kladieme dôraz na URL-only Lexical model ako prvú líniu a Behavior/FullLite používame opatrne.
-
----
-
 ## 12. Finálny záver EDA
 
 EDA ukazuje, že problém nie je triviálny iba na samotnom URL, ale URL obsahuje dosť signálu na zmysluplný prvý filter. Lexical features sú samostatne slabšie a korelované, čo motivuje nelineárne modely a regularizáciu. Behavior features obsahujú extrémne silné signály, preto ich musíme kontrolovať cez FullLite. Tým EDA pripravuje metodicky čistý základ pre Scenár 2, Scenár 3 a Scenár 4.
 
 ---
-
-## 13. Ústny scenár pre 15-minútovú obhajobu vo dvojici
-
-Obhajoba bude ústna. Na projektore má byť primárne Shiny aplikácia a podľa potreby otvorený Rmd kód/notebook. Preto túto časť berte ako hovorený scenár: kto čo povie, kam v Shiny/Rmd ukázať a čo určite nevynechať.
-
-### Rozdelenie dvojice
-
-**Osoba A** by mala držať príbeh problému, EDA, dát a metodických rozhodnutí. **Osoba B** by mala držať modelovanie, výsledky, Shiny demo a závery. Pri otázkach je dobré odpovedať podľa témy: dáta/preprocessing A, modely/metriky B.
-
-### Orientačný časový plán
-
-| Čas | Kto | Čo povedať | Čo mať na projektore |
-|---:|---|---|---|
-| 0:00-1:30 | A | problém phishing proxy, prečo URL-only | Shiny úvod alebo app overview |
-| 1:30-3:30 | A | dataset, Lexical/Trust/Behavior, exclusions | Rmd EDA alebo Shiny časť s feature rodinami |
-| 3:30-5:00 | A | near-leakery a FullLite | Rmd EDA near-leaker časť / tabuľka |
-| 5:00-8:30 | B | Scenár 2: modelové rodiny, minSS, víťaz SVM-RBF | Shiny výsledky modelov |
-| 8:30-10:30 | B | stručne ako fungujú modely a čo robia parametre | Shiny/Rmd model setup |
-| 10:30-12:30 | B | Scenár 3: 9-feature core, stepwise/lasso/EN | Rmd Scenario 3 výsledková tabuľka |
-| 12:30-14:00 | A alebo B | Scenár 4: surrogate strom ako vysvetlenie RF | Shiny/vizualizácia stromu |
-| 14:00-15:00 | obaja | spoločný záver, limity, čo by bol follow-up | Shiny finálny model / summary |
-
-Časy sú orientačné, nie treba ich hovoriť nahlas. Slúžia len na to, aby sa obhajoba nerozpadla na príliš dlhú EDA a nestihli sa modely.
-
-### Otváracia formulácia
-
-> Náš projekt rieši phishing detekciu v momente kliknutia na URL. Nechceli sme iba natrénovať model s vysokým AUC, ale riešiť situáciu, kde proxy musí okamžite povedať block alebo allow. Preto rozlišujeme lacný URL-only signál a drahšie trust/behavior signály.
-
-### Ako prejsť z EDA do modelov
-
-> EDA nám ukázala dve kľúčové veci. Po prvé, Lexical features sú samostatne slabšie a korelované, takže očakávame výhodu flexibilnejších modelov. Po druhé, Behavior obsahuje šesť near-leakerov, ktoré by celý Full model spravili príliš ľahký. Preto používame FullLite.
-
-### Ako ukazovať Shiny počas ústnej obhajoby
-
-Pri Shiny nie je cieľ preklikať všetko. Treba ho použiť ako živý dôkaz, že výsledky nie sú len text v dokumente:
-
-- ukázať, že aplikácia pracuje s rovnakým datasetom/modelmi,
-- ukázať výsledkovú tabuľku alebo winner showcase,
-- ukázať prípadne predikciu na URL/features,
-- ukázať surrogate strom alebo model summary, ak je dostupný.
-
-Dobrá veta:
-
-> Shiny aplikácia je nadstavba nad tým istým riešením: ukazuje výsledky a víťazný model interaktívne, ale metodické rozhodnutia sú v Rmd notebookoch.
-
-### Čo nehovoriť príliš dlho
-
-Nezachádzať do každého chunku kódu. Pri 15 minútach stačí povedať:
-
-- prečo sme čistili features,
-- prečo máme tiery,
-- prečo minSS,
-- ktorý model vyhral a prečo,
-- čo ukázal Scenár 3,
-- čo vysvetľuje surrogate strom.
-
-Detail chunkov a funkcií si nechať ako odpoveď na otázky alebo ukázať v Rmd, ak sa komisia spýta.
-
----
-
-## 14. Detailné vysvetlenie jednotlivých rozhodnutí
-
-### 14.1 Prečo nezačať rovno modelovaním
-
-Ak by sme rovno fitovali modely, mohli by sme získať vysoké čísla, ale nevedeli by sme, prečo. EDA pred modelovaním je dôležitá z troch dôvodov:
-
-1. identifikuje problematické features,
-2. navrhuje preprocessing,
-3. pomáha formulovať hypotézy tak, aby boli testovateľné.
-
-Bez EDA by napríklad nebolo jasné, prečo FullLite existuje. Mohlo by to vyzerať ako účelové odstraňovanie silných features. EDA ukazuje, že to nie je účelové, ale metodicky nutné pre H1.
-
-### 14.2 Prečo odstránenie skóre nie je strata informácie
-
-Áno, odstránením skóre pravdepodobne znížime maximálny výkon. Ale cieľ projektu nie je dosiahnuť najvyšší možný výkon za každú cenu. Cieľom je porovnať modely na features, ktoré reprezentujú merateľné vlastnosti URL alebo stránky.
-
-Ak by sme nechali `URLSimilarityIndex`, komisia by sa oprávnene mohla opýtať:
-
-> Nie je váš model dobrý len preto, že dataset už obsahuje iný phishing scoring?
-
-Odstránením tejto skupiny sa tejto námietke vyhneme.
-
-### 14.3 Prečo redundantné ratios škodia najmä interpretácii
-
-Pomerové features môžu byť prediktívne, ale sú odvodené. Ak model dostane počet písmen, dĺžku URL aj pomer písmen, dostáva rovnakú informáciu vo viacerých podobách. Pri lineárnych modeloch to spôsobuje:
-
-- nestabilné koeficienty,
-- nafúknutú dôležitosť jednej rodiny signálov,
-- ťažšie vysvetlenie, prečo model používa práve pomer a nie počet.
-
-Preto je čistejšie nechať základné counts a dĺžku.
-
-### 14.4 Prečo neodstraňujeme všetku kolinearitu
-
-Kolinearita sama o sebe nie je vždy dôvod vyhodiť features. Pri Lexical dĺžkovom klastri by sme mohli odstrániť napríklad `NoOfLettersInURL`, ale prišli by sme o potenciálne užitočný signál. Namiesto toho:
-
-- v Scenári 2 používame ridge,
-- v Scenári 3 necháme feature-selection metódy rozhodnúť, čo ostane.
-
-To je lepšie než ručne odstrániť veľa stĺpcov už v EDA.
 
 ### 14.5 Prečo je FullLite lepší názov než „clean full“
 
@@ -556,24 +403,6 @@ Celý EDA príbeh sa dá povedať ako logický reťazec:
 Ak sa pri obhajobe stratíte, vráťte sa k tomuto reťazcu.
 
 ---
-
-## 16. Silné a slabé stránky EDA
-
-### Silné stránky
-
-- EDA je naviazaná na reálny deployment scenár.
-- Feature tiery majú praktické odôvodnenie.
-- Exclusions sú explicitné a vysvetlené.
-- Near-leaker analýza predchádza nefér interpretácii modelov.
-- Preprocessing v modelovaní vyplýva z nameraných vlastností dát.
-
-### Slabé stránky
-
-- Dataset je verejný a nemusí presne reprezentovať budúci firemný traffic.
-- Behavior near-leakery môžu byť datasetovo špecifické.
-- EDA nemeria kauzalitu, iba asociácie.
-- Lexical/Trust/Behavior rozdelenie je naše rozhodnutie, nie univerzálny štandard.
-
 ### Ako slabé stránky priznať
 
 Dobrá formulácia:
@@ -594,17 +423,6 @@ Dobrá formulácia:
 | Prečo ridge neskôr? | VIF ukazuje extrémnu kolinearitu. |
 | Prečo log1p? | Count-features majú dlhé pravé chvosty. |
 | Prečo FullLite? | Silnejší benchmark bez triviálnych near-leakerov. |
-
----
-
-## 18. Jednovetové pointy na zapamätanie
-
-- **EDA nebola iba popis dát, ale návrh experimentu.**
-- **Lexical je najlacnejší, ale najťažší tier.**
-- **Trust a Behavior majú silnejšie samostatné signály.**
-- **Near-leakery by spravili Full tier príliš ľahký.**
-- **FullLite existuje preto, aby H1 nebola zničená saturáciou.**
-- **Ridge, log transformácia a škálovanie nie sú náhodné — vyplývajú z EDA.**
 
 ---
 
@@ -660,44 +478,120 @@ Najdôležitejšie je, že EDA vytvorila férový experimentálny dizajn: vyčis
 
 ---
 
-## 20. Checklist pred obhajobou EDA
+## 22. Hlbšie základy pojmov
 
-Pred obhajobou si treba vedieť odpovedať:
+Táto časť poskytuje detailnejšie vysvetlenie pojmov, ktoré sa v EDA objavujú. Slúži najmä na to, aby sme pri obhajobe vedeli odpovedať na „čo presne meriate?“ alebo „prečo táto metrika a nie iná?“
 
-- Viem jednou vetou vysvetliť reálny proxy scenár?
-- Viem vysvetliť rozdiel Lexical / Trust / Behavior?
-- Viem povedať, prečo `IsHTTPS` nie je Lexical?
-- Viem vymenovať tri skupiny odstránených features?
-- Viem vysvetliť near-leaker bez toho, aby to znelo ako manipulácia?
-- Viem vysvetliť, prečo FullLite existuje?
-- Viem vysvetliť, prečo Lexical očakáva nelineárne modely?
-- Viem povedať, ako EDA odôvodňuje Scenár 2?
-- Viem povedať, ako EDA odôvodňuje Scenár 3?
+### 22.1 Klasifikácia vs regresia
 
----
+V tomto projekte ide o **binárnu klasifikáciu** — model rozhoduje medzi dvoma triedami (Phishing/Legitimate). Regresia by predpovedala spojitú hodnotu (napr. „pravdepodobnosť 0.73“). Vždy keď model vracia pravdepodobnosť, my ju klasifikačne premieňame na block/allow rozhodnutie cez prah (default 0.5).
 
-## 21. Ak komisia tlačí na metodiku
+### 22.2 Prahy a operačný bod
 
-### Ak sa pýtajú na štatistickú prísnosť
+Každý klasifikátor, ktorý vracia pravdepodobnosť, potrebuje **prah** na finálne rozhodnutie. Pri prahu 0.5 model povie phishing, ak `P(phishing) ≥ 0.5`. Ak by sme prah zmenili na 0.3, model by chytil viac phishingu (vyššia Sensitivity), ale aj viac legit by zablokoval (nižšia Specificity).
 
-Povedať:
+Operačný bod je dvojica `(Sensitivity, Specificity)` pri konkrétnom prahu. AUC zhrňuje výkon naprieč všetkými prahmi, ale deployment beží pri jednom konkrétnom.
 
-> EDA používame primárne na návrh experimentu, nie na finálne inferenčné testovanie. Finálne hypotézy sa overujú v modelovacích scenároch na hold-out/test metrikách.
+### 22.3 Prečo SMD a Cramérovo V dávajú zmysel ako EDA metriky
 
-### Ak sa pýtajú na generalizáciu
+**SMD (Standardised Mean Difference).** Pre spojité features porovná stred phishing triedy a stred legit triedy v jednotkách priemernej smerodajnej odchýlky:
 
-Povedať:
+```
+SMD = |μ_phishing − μ_legit| / sqrt((σ²_phishing + σ²_legit) / 2)
+```
 
-> Generalizácia mimo datasetu by vyžadovala externý validačný dataset alebo produkčný traffic. V rámci zadania transparentne oddeľujeme train/test a interpretujeme výsledky ako datasetovo podložené, nie univerzálnu pravdu o celom internete.
+Je to bezrozmerná veličina:
+- SMD < 0.1 → veľmi slabý efekt,
+- SMD ≈ 0.5 → stredný,
+- SMD > 0.8 → silný,
+- SMD > 2 → veľmi silný (rozdielne distribúcie).
 
-### Ak sa pýtajú na causalitu
+**Cramérovo V.** Pre binárne features je SMD degenerované. Cramérovo V je založené na chi-squared štatistike kontingenčnej tabuľky:
 
-Povedať:
+```
+V = sqrt(χ² / (n × (min(rows, cols) − 1)))
+```
 
-> Netvrdíme kauzalitu. Tvrdíme prediktívnu použiteľnosť features v danom datasete a deploymentovo motivované delenie signálov.
+Je tiež na škále 0–1, takže sa dá vizuálne porovnať so SMD bez prevodov.
 
-### Ak sa pýtajú na alternatívne delenie tierov
+**Prečo dve metriky a nie jedna univerzálna.** Mutual information by mohlo fungovať pre oba typy, ale je menej intuitívne (je to entropia v bitoch/natoch). SMD a Cramér V sú **interpretovateľné rovnako: vyššie = silnejší rozdiel medzi triedami**, takže výsledné grafy vedia komisii bez vysvetľovania ukázať, ktoré features oddeľujú triedy.
 
-Povedať:
+### 22.4 VIF — Variance Inflation Factor
 
-> Alternatívne delenia sú možné. Naše delenie je obhájiteľné podľa okamihu dostupnosti signálu v proxy pipeline. Preto je relevantné pre náš reálny scenár.
+VIF pre feature `xᵢ`:
+
+```
+VIF(xᵢ) = 1 / (1 − R²ᵢ)
+```
+
+kde `R²ᵢ` je koeficient determinácie z regresie `xᵢ` na všetkých ostatných features. Intuitívne: ak ostatné features dokážu `xᵢ` lineárne uhádnuť (vysoké R²), VIF je veľké.
+
+- VIF = 1 → feature je úplne nezávislý.
+- VIF < 5 → bezpečné.
+- 5 ≤ VIF < 10 → mierna kolinearita, opatrnosť.
+- VIF ≥ 10 → silná kolinearita.
+- VIF > 100 → patologická redundancia.
+
+V našom Lexical poole VIF presahuje 1000 pre `URLLength` a `NoOfLettersInURL` — to znamená, že tieto features nesú prakticky tú istú informáciu. Pre logistickú regresiu to je problém, lebo koeficienty môžu medzi nimi ľubovoľne migrovať.
+
+### 22.5 Skewness a prečo `log1p`
+
+Skewness = miera asymetrie distribúcie. Spojité count features (počet znakov, písmen, sub-domén) majú **pravostrannú šikmosť** — väčšina URL má malé hodnoty, pár ich má extrémne veľké.
+
+Pre lineárne modely je problém, že:
+- pár extrémov nadmerne zaváži koeficient,
+- vzdialenostné modely (KNN, SVM) preceňujú vzdialenosti k extrémom.
+
+`log1p(x) = log(1 + x)` rieši:
+- redukuje pravý chvost (rastúce hodnoty rastú pomalšie po log transformácii),
+- pre `x = 0` vracia `log(1) = 0` (na rozdiel od `log(0) = −∞`),
+- monotónna transformácia — poradie hodnôt sa nezmení (preto stromom nepomáha, ale ani neškodí).
+
+### 22.6 Standardizácia (centering + scaling)
+
+Po `log1p` transformujeme každý feature ako:
+```
+x_std = (x − mean(x_train)) / sd(x_train)
+```
+
+Výsledok: všetky features majú priemer 0 a SD 1. Toto je nutné pre:
+- **vzdialenostné modely** (KNN, SVM) — bez toho by feature s veľkou škálou dominoval,
+- **regularizované modely** (ridge, lasso) — penalizácia `λ × β²` predpokladá, že koeficienty sú porovnateľné.
+
+Stromové modely standardizáciu nepotrebujú, lebo splity sú monotónne invariantné.
+
+**Dôležité:** Standardizujeme **podľa train statistík** a aplikujeme rovnaké hodnoty na test set. Inak by sme cez test mean/sd „prelievali“ informáciu z testu do trénovacieho preprocessingu (data leakage).
+
+### 22.7 Univariate AUC ako test silných features
+
+Pre kontinuálny feature `x` a binárny label `y` definujeme univariate AUC ako AUC, keď použijeme `x` priamo ako klasifikačné skóre. Geometricky: ak zoradíme všetky URL podľa `x` zostupne, koľko phishingových sa skutočne nachádza v hornej časti?
+
+AUC = 0.5 → feature nie je informatívny.
+AUC = 1.0 → feature dokonale oddeľuje triedy.
+AUC > 0.95 → feature je tak silný, že samostatne klasifikuje skoro perfektne — **near-leaker**.
+
+Šesť Behavior features prekročilo prah 0.95. Preto v Scenári 2 a 3 zavádzame FullLite tier bez týchto features.
+
+### 22.8 Train/test split a CV
+
+**Hold-out split** (80/20) — 80 % dát na trénovanie, 20 % nedotknutých na finálne hodnotenie. Hold-out je dôležitý, lebo poskytuje **nezávislú** mieru kvality, ktorá nebola použitá pri žiadnom rozhodnutí počas tréningu.
+
+**Cross-validation** (10-fold) — tréningovú časť rozdelí na 10 kúskov. Postupne 9 použije na tréning a 1 na validáciu, otáča to a spriemeruje výsledky. Slúži na:
+- odhad variability výkonu (SD per fold),
+- výber hyperparametrov (CV chyba na rôznych nastaveniach),
+- detekciu overfittingu (rozdiel medzi tréning a CV chybou).
+
+**Stratifikácia** — split rešpektuje pomer tried, takže každý fold má aj phishing aj legit približne v rovnakom pomere ako celok.
+
+### 22.9 Class imbalance a prečo sa nás (skoro) netýka
+
+Imbalance znamená, že jedna trieda dominuje (napr. 99 % legit, 1 % phishing). V takom prípade modely majú tendenciu predikovať väčšinovú triedu pre všetko a metriky ako accuracy sú zavádzajúce. Riešenie: class weighting, oversampling (SMOTE), undersampling.
+
+Náš dataset má pomer približne 57 % phishing : 43 % legit (po stratifikovanom subsamplingu sme to vyrovnali na 50 : 50). Class imbalance teda nie je primárny problém a nepotrebujeme špeciálne techniky. To zjednodušuje porovnanie modelov.
+
+### 22.10 Leakage — dva typy
+
+1. **Target leakage** (najnebezpečnejší). Feature obsahuje informáciu, ktorá sa odvodzuje z labelu, alebo v reálnom čase nie je dostupná. Napríklad `URLSimilarityIndex` je výstup iného phishing detektora — keby sme ho nechali, model by sa učil dôverovať cudziemu skóre.
+2. **Train/test leakage.** Ak preprocessing používa štatistiky z testu (napr. `mean(all_data)` namiesto `mean(train)`), test sa „pretiekol“ do tréningu. Naše štandardizácie používajú výlučne train statistics.
+
+Near-leaker nie je úplne leakage v zmysle target leakage, ale je tak silný, že prakticky úlohu vyrieši sám. Preto ho izolujeme do FullLite, kde ostáva pomocný, ale nedominuje.

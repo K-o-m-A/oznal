@@ -753,3 +753,102 @@ d1_full <- tibble(
 - Medzihodnoty = nestabilný výber
 
 **Sortovanie podľa `score = sum`** — robust core (10+10+10 = 30) hore, never-selected (0+0+0 = 0) dole.
+
+---
+
+## Dodatok: Ako fungujú feature-selection metódy a vplyv hyperparametrov
+
+Tento dodatok rozširuje chunky `stepwise-helper`, `lasso-helper` a kontext, v ktorom sa `cv.glmnet` volá. Cieľom je vysvetliť matematický princíp každej metódy a ako sa zmena hyperparametra prejaví na výsledku.
+
+### Bidirectional Stepwise (`MASS::stepAIC`)
+
+**Princíp.** Vždy keď sa volá `stepAIC`, algoritmus drží aktuálnu množinu features `S` a v každom kroku zváži všetky možné jednofeature zmeny:
+- pridať feature, ktorý nie je v `S`,
+- odobrať feature, ktorý je v `S`.
+
+Pre každú zmenu spočíta AIC nového modelu. Vyberie tú zmenu, ktorá AIC najviac zníži. Skončí, keď žiadna zmena AIC nezníži.
+
+**AIC vzorec:**
+```
+AIC = 2k − 2 × log L
+```
+kde `k` = počet parametrov, `log L` = log-likelihood. Trest 2 za každý feature je jemnejší než BIC (`log(n)` za feature).
+
+**Vplyv `direction`:**
+- `"forward"` → začína od null modelu, len pridáva. Pri kolinearite môže nesprávne začleniť dva korelované features bez šance ich neskôr dropnúť.
+- `"backward"` → začína od full modelu, len odoberá. Pri kolinearite je prvý drop veľmi citlivý na náhodný výber.
+- `"both"` (naša voľba) → bidirectional, opraví skoré chyby. Štandard pre praktické nasadenie.
+
+**Vplyv kritéria (AIC vs BIC):**
+- `AIC = 2k − 2 log L` — mierny trest, prijíma slabšie features ak zlepšia fit.
+- `BIC = log(n) × k − 2 log L` — pri n = 24000 je `log(n) ≈ 10`, takže BIC trestá komplexitu päťkrát silnejšie. Vybral by ~6–7 features namiesto 9.
+
+**Vplyv `glm.control(maxit = 100)`:** Default je 25. Pri silnej separácii v Lexical/FullLite GLM nekonverguje za 25 iterácií a vyhadzuje warning. Zvýšenie na 100 dovolí konvergenciu (alebo aspoň stabilný stav, kde sa ešte rozumne odhadnú koeficienty).
+
+**Vplyv `keep` callbacku:** `keep = step_keep` neovplyvňuje výber, len loguje p-hodnoty pre post-hoc audit. Bez neho by sme nevideli, či sa features počas AIC cesty javia stabilne.
+
+### Lasso (`cv.glmnet`, `alpha = 1`)
+
+**Princíp.** L1-regularizovaná logistická regresia:
+```
+minimalizuj: −log L(β) + λ × Σ|βᵢ|
+```
+
+L1 norma má geometricky kontúry v tvare diamantov. Optimum sa často trafí do rohu diamantu, kde sú niektoré koeficienty presne nula. **To je prirodzený sparsity mechanizmus lasso.**
+
+**Vplyv `alpha`:**
+- `alpha = 1` (naša voľba) → čistý lasso, maximum sparsity.
+- `alpha = 0` → ridge, žiadna sparsity.
+- `alpha = 0.5` → elastic-net, kompromis.
+
+**Vplyv `lambda`:** Sila penalizácie.
+- `lambda = 0` → bez penalizácie, klasická LR, žiadne nuly.
+- `lambda → ∞` → všetky koeficienty nula, model = intercept.
+- Optimum: hľadáme cez interné CV.
+
+**Vplyv `lambda.1se` vs `lambda.min`:**
+- `lambda.min` — najlepšia CV chyba. Tendencia nechať viac features.
+- `lambda.1se` (naša voľba) — najväčšia λ, ktorá je do 1 SE od minima. Konzervatívnejšie, menší model. **Štandardná voľba pre deployment, kde uprednostňujeme jednoduchosť.**
+
+**Vplyv `nfolds = 5`:** Default `cv.glmnet` je 10. Pri 24k tréningových bodoch je 5 dostatočne presné a 2× rýchlejšie. Vplyv: výber `lambda.1se` môže byť o trochu šumný, ale support typicky stabilný.
+
+**Vplyv `lambda.min.ratio = 1e-3`:** `cv.glmnet` skúša `lambda` od `lambda.max` (najmenšie λ, kde sú všetky koeficienty 0) po `lambda.min = lambda.max × ratio`. Default `ratio = 1e-2`. My používame `1e-3`, čo dá širšiu lambda cestu — viac kandidátov v oblasti silnej penalizácie, kde feature selection je rozlíšiteľnejšia.
+
+**Vplyv `type.measure = "deviance"`:** CV metrika. Default pre binomial. Alternatíva `"auc"` by mohla viesť k mierne odlišnému `lambda.1se`, ale deviance je štandardnejšia voľba.
+
+### Elastic-Net (`cv.glmnet`, `alpha = 0.5`)
+
+**Princíp.** Kombinácia L1 a L2:
+```
+penalty = λ × (alpha × Σ|βᵢ| + (1 − alpha) × ½ × Σβᵢ²)
+```
+
+L1 zložka robí sparsity (môže nulovať koeficienty), L2 zložka stabilizuje korelované features. Pri korelovaných features lasso má tendenciu vybrať jeden a vynulovať ostatné; elastic-net rozdelí váhy medzi všetkých členov skupiny.
+
+**Vplyv `alpha`:**
+- `alpha = 0.1` → takmer ridge, žiadna sparsity.
+- `alpha = 0.5` (naša voľba) → reprezentatívny stred.
+- `alpha = 0.9` → takmer lasso s malou stabilizáciou.
+
+**Prečo presne 0.5:** Stred medzi lasso (1) a ridge (0). Komisia môže vidieť, čo elastic-net pridáva. Ladiť `alpha` cez CV by zaujímavé bolo, ale Scenár 3 ho fixuje pre porovnateľnosť (rovnako ako Scenár 2 fixuje hyperparametre modelov).
+
+### Porovnanie troch metód v jednej tabuľke
+
+| Aspekt | Stepwise | Lasso | Elastic-Net |
+|---|---|---|---|
+| Typ | Wrapper | Embedded | Embedded |
+| Kritérium výberu | AIC | L1 penalizácia | L1 + L2 penalizácia |
+| Hyperparameter | `direction`, AIC | `lambda` | `lambda`, `alpha` |
+| Sparsity | algoritmická | natívna (nuly) | natívna ale slabšia |
+| Stabilita pri korelácii | menšia | menšia (vyberá jeden) | väčšia (drží skupinu) |
+| Náš výsledok | 9 z 13 (Lexical) | 9 z 13 (Lexical) | 10 z 13 (Lexical) |
+
+### Prečo `1 - predict(...)` v `predict_glm_phishing`
+
+V Scenári 3 sme nastavili `factor(label, levels = c(1, 0), labels = c("Phishing", "Legitimate"))`. „Phishing“ je **prvý level**. `glm`/`glmnet` v default mode predikujú pravdepodobnosť **druhej** úrovne (legitimate). Preto `1 − predict(...)` vráti `P(Phishing)`, čo je to, čo chceme pre AUC s `event_level = "first"`.
+
+Ak by sme to nezohľadnili, AUC by bola „naopak“ (1 − AUC, čo by vyzeralo ako veľmi zlý model).
+
+### Prečo CV-glmnet a nie manuálny grid search
+
+`cv.glmnet` je optimalizovaný v C cez warm-start algoritmus: pre dané `alpha` fituje celú lambda-cestu naraz, kde každý nasledujúci `lambda` štartuje z koeficientov predchádzajúceho. To je oveľa rýchlejšie než `expand.grid + caret::train`. Pre Scenár 3, kde vnútorne robíme aj per-fold fit cez 10 fold-ov, je tento speed-up kritický.
