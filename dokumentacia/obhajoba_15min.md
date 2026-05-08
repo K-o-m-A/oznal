@@ -1,4 +1,4 @@
-# Obhajoba — 15 minútový hovorený text
+# Obhajoba - 15 minútový hovorený text
 
 Tento dokument je súvislý hovorený scenár pre 15 minútovú obhajobu. Je písaný tak, aby sa dal čítať priamo a aby obsah dával zmysel aj bez vizuálnych podkladov. Časové orientačné body sú v hraniciach jednotlivých sekcií. Predpokladáme, že obhajobu vedieme vo dvojici a striedame sa v sekciách (poznamenané pri každej časti).
 
@@ -7,92 +7,113 @@ Tento dokument je súvislý hovorený scenár pre 15 minútovú obhajobu. Je pí
 ## 1. Úvod a dataset (cca 0:00 – 1:30, osoba A)
 
 Dobrý deň. Náš projekt sa zaoberá detekciou phishingových URL adries. Použili sme verejne dostupný dataset **PhiUSIIL Phishing URL Dataset**, ktorý obsahuje približne 235 tisíc riadkov a 50 prediktorov. Každý riadok reprezentuje jednu URL alebo stránku a label hovorí, či ide o phishing, alebo o legitímnu adresu.
+Triedy sú v datasete približne vyvážené.
 
-Triedy sú v datasete približne vyvážené. To znamená, že nemusíme riešiť class imbalance, váženie tried ani SMOTE. Vyhli sme sa tak ďalšej vrstve metodických rozhodnutí, ktoré by skomplikovali porovnanie modelov. Zároveň v datasete nie sú chýbajúce hodnoty, takže nemusíme imputovať a žiadny model nie je porovnávaný po inom doplnení dát ako iný.
+Najprv sme sa pýtali otázku, ktorá nemá v datasete priamu odpoveď: **kedy sa k hodnote daného feature dostaneme?** Z toho vyplynulo že musíme features rozdeliť do troch rodín, ktoré odzrkadľuje deployment náklady.
 
-Z týchto 50 prediktorov sme však nepoužili všetky priamo. Niektoré sú identifikátory, niektoré sú už vypočítané skóre iných systémov a niektoré sú redundantné. To, čo sme s dátami spravili pred modelovaním, je veľká časť hodnoty našej EDA — a to je aj dôvod, prečo o tom hovoríme hneď na začiatku.
+Prvá rodina je **Lexical**. Sú to features získané priamo z textu URL adresy - dĺžka URL, počet číslic, počet subdomén, počet špeciálnych znakov a podobne. Tieto features máme okamžite, ešte pred načítaním stránky. Sú teda najlacnejšie a v reálnom proxy nasadení ich vieme rychlo vyhodnotiť.
 
----
+Druhá rodina je **Trust**. Patrí sem `IsHTTPS`, prítomnosť titulu, doménové a obsahové flagy ako `Bank`, `Pay`, `Crypto`. Tieto features už vyžadujú nejakú znalosť o doméne alebo metadátach. Mimochodom, `IsHTTPS` sme zámerne nezaradili medzi Lexical, hoci textovo je v URL - v praxi je to bezpečnostná vlastnosť spojenia, a nepredpokladáme že použitie prehliadača, ktorý neblokoval priame pripojenie na http stránku.
 
-## 2. Rozdelenie features do rodín (cca 1:30 – 3:00, osoba A)
-
-Najprv sme sa pýtali otázku, ktorá nemá v datasete priamu odpoveď: **kedy je daný feature reálne dostupný v deployment scenári?** Z toho vyplynulo naše delenie do troch rodín, ktoré nie je arbitrárne, ale odzrkadľuje deployment náklady.
-
-Prvá rodina je **Lexical**. Sú to features získané priamo z textu URL adresy — dĺžka URL, počet číslic, počet subdomén, počet špeciálnych znakov, dĺžka TLD a podobne. Tieto features máme okamžite, ešte pred načítaním stránky. Sú teda najlacnejšie a v reálnom proxy nasadení ich vieme spočítať za pár mikrosekúnd.
-
-Druhá rodina je **Trust**. Patrí sem `IsHTTPS`, prítomnosť titulu, doménové a obsahové flagy ako `Bank`, `Pay`, `Crypto`. Tieto features už vyžadujú nejakú znalosť o doméne alebo metadátach. Mimochodom, `IsHTTPS` sme zámerne nezaradili medzi Lexical, hoci textovo je v URL — v praxi je to bezpečnostná vlastnosť spojenia, nie čistý lexikálny počet.
-
-Tretia rodina je **Behavior**. Tu sú features odvodené z obsahu stránky — počet iframe-ov, hidden fields, externých referencií, JavaScript a CSS súborov. Tieto features sú najsilnejšie, ale aj najdrahšie: predpokladajú, že stránku už máme stiahnutú a sparsovanú.
+Tretia rodina je **Behavior**. Tu sú features odvodené z obsahu stránky - počet iframe-ov, hidden fields, externých referencií, JavaScript a CSS súborov. Tieto features sú najsilnejšie, ale aj najdrahšie: predpokladajú, že stránku už máme stiahnutú a sparsovanú.
 
 Toto delenie nám umožňuje pýtať sa nielen „aký je najlepší model“, ale „aký je najlepší model, ak proxy musí rozhodnúť hneď, len z URL stringu“.
 
----
 
-## 3. Manuálne odstránenie features (cca 3:00 – 4:30, osoba A)
+Z týchto 50 prediktorov sme však nepoužili všetky priamo a časť z nich sme ručne odtránili na základe pozorvania dát. Niektoré sú sú už vypočítané skóre iných systémov, iné reprezuntujú samotný link či odménu a niektoré sú redundantné. 
 
-Z 50 prediktorov sme po EDA odstránili 10. Robíme to vedome a vieme každú skupinu odôvodniť.
+Z 50 prediktorov sme po analýze datasetu odstránili 10 v štyroch skupinách:
 
-Po prvé, **identifikátory** ako `FILENAME`, `URL`, `Domain`, `TLD` a `Title` nie sú numerické features. Z nich sú už odvodené počty a dĺžky, takže surový text ako prediktor nepotrebujeme.
+- **identifikátory** (`FILENAME`, `URL`, `Domain`, `TLD`, `Title`) - surový text, počty a dĺžky z nich už máme odvodené;
+- **vypočítané skóre** (`URLSimilarityIndex`, `TLDLegitimateProb`, `URLCharProb`) - výstupy iných phishing detektorov; nechceli sme byť meta-klasifikátor nad cudzím skóre;
+- **redundantná binárka** `HasObfuscation` - duplikuje `NoOfObfuscatedChar > 0`;
+- **pomerové features** (`LetterRatioInURL`, `DegitRatioInURL`, `ObfuscationRatio`) - algebraicky odvodené od counts a dĺžky URL, pridávajú kolinearitu.
 
-Po druhé, **vypočítané skóre** ako `URLSimilarityIndex`, `TLDLegitimateProb`, `URLCharProb` a podobné. Tieto stĺpce nie sú surové merania, ale výstupy iných phishing detektorov alebo expertných pravidiel. Keby sme ich nechali, model by sa učil dôverovať cudziemu skóre. Komisia by sa potom oprávnene mohla pýtať, či nie sme len meta-klasifikátor nad hotovým skóre. Tomu sme sa chceli vyhnúť.
-
-Po tretie, **redundantná binárka** `HasObfuscation`. Tá hovorí len, či `NoOfObfuscatedChar` je väčšie ako nula. Keď máme presný počet, binárka nepridáva nič nové.
-
-Po štvrté, **pomerové features** ako `LetterRatioInURL`, `DegitRatioInURL` a `ObfuscationRatio`. Tieto sú algebraicky odvodené od counts a dĺžky URL. Pre lineárne modely to spôsobuje kolinearitu, pre stromy to umelo posilňuje rovnakú rodinu signálov.
-
-Po týchto exclusions ostáva 40 prediktorov: 13 Lexical, 7 Trust a 20 Behavior. Tento stav je východiskom pre EDA aj pre všetky tri scenáre.
+Ostáva 40 prediktorov: 13 Lexical, 7 Trust a 20 Behavior.
 
 ---
 
-## 4. Reálny scenár a hypotézy (cca 4:30 – 6:30, osoba A)
+## 4. Reálny scenár a hypotézy
 
-Predstavme si reálnu situáciu. Používateľ klikne na URL v e-maile, chate alebo vyhľadávači. Korporátny proxy server musí veľmi rýchlo, ešte pred načítaním stránky, povedať „block“ alebo „allow“. Najlacnejší signál je samotný text URL. Ak Lexical-only model funguje dobre, máme rýchly prvý filter. Ak nestačí, treba siahnuť po drahších Trust alebo Behavior signáloch.
+Na základe datasetu sme si teda stanovili reálny scenár, ktorý chceme modelovať.
+Používateľ klikne na URL v e-maile. Korporátny proxy server musí veľmi rýchlo, ešte pred načítaním stránky, povedať či stránku blokovať alebo nie. 
+Najlacnejší signál je samotný text URL. Ak Lexical-only model funguje dobre, máme rýchly prvý filter. Ak nestačí, treba siahnuť po drahších kombinovaných Trust alebo Behavior signáloch.
 
-Z tohto scenára plynú dve veci, ktoré opakovane spomíname.
 
-Prvá: nehodnotíme len AUC. AUC je threshold-free metrika, hovorí, ako dobre model zoradí phishing nad legit. Lenže proxy nerobí ranking, robí binárne rozhodnutie pri prahu 0.5. Preto pozeráme aj **Sensitivity** (koľko phishingu chytíme), **Specificity** (koľko legit pustíme) a najmä **minSS** — minimum z týchto dvoch. Model so Sensitivity 0.99 a Specificity 0.40 nie je dobrý proxy filter.
+Prvá: nehodnotíme len AUC. AUC je threshold-free metrika, hovorí, ako dobre model zoradí phishing nad legit. Lenže proxy nerobí ranking, robí binárne rozhodnutie pri prahu 0.5. Preto pozeráme aj **Sensitivity** (koľko phishingu chytíme), **Specificity** (koľko legit pustíme) a najmä **minSS** - minimum z týchto dvoch. Model so Sensitivity 0.99 a Specificity 0.40 nie je dobrý proxy filter.
 
 Druhá: rozdeľujeme problém na dve hypotézy.
 
-**H1** patrí do Scenára 2: rozdiel medzi parametrickými a neparametrickými modelmi je závislý od feature tieru. Najväčší rozdiel očakávame na Lexical, lebo URL features sú samostatne slabé a signál je v ich kombináciách. Na FullLite, kde sú silné Trust a Behavior features, by sa mal rozdiel zmenšiť. Kritérium: na Lexical Δ minSS aspoň 0.10, a tento gap musí byť väčší ako gap na FullLite.
+**H1** patrí do Scenára 2: rozdiel medzi parametrickými a neparametrickými modelmi je závislý od feature tieru. Najväčší rozdiel očakávame na Lexical, lebo URL features sú samostatne slabé a signál je v ich kombináciách. Na FullLite, kde sú silné Trust a Behavior features, by sa mal rozdiel zmenšiť. Konkrétne kritériá rozoberieme pri Scenári 2.
 
 **H2** patrí do Scenára 3: na Lexical poole existuje aspoň jedna feature-selection metóda, ktorá vyrobí kompaktný použiteľný URL filter. Konkrétne: aspoň 31 % redukcia (najviac 9 z 13 features), AUC nad 0.95 a operačný bod Sensitivity nad 0.94 a Specificity nad 0.75 pri prahu 0.5.
 
 ---
 
-## 5. Čo ukázala EDA (cca 6:30 – 9:00, osoba A končí, osoba B preberá)
+## 5. Čo ukázala EDA 
 
 EDA potvrdila tri kľúčové očakávania, na ktorých postavíme všetky tri scenáre.
 
-**Prvé zistenie: Lexical features sú samostatne slabé.** Pre spojité features sme merali Standardised Mean Difference, pre binárne Cramérovo V. Obe sú normalizované do škály 0 až 1, takže výsledky sa dajú vizuálne porovnať. Ukázalo sa, že najsilnejšie samostatné signály patria do Trust a Behavior rodiny — `HasSocialNet`, `HasCopyrightInfo`, `IsHTTPS`. Lexical features majú stredné až slabé samostatné efekty. To znamená, že URL signál nie je v jednom prepínači, ale v kombinácii znakov. To je presne situácia, kde flexibilnejšie nelineárne modely mávajú výhodu.
+**Prvé zistenie: Lexical features sú samostatne slabé.** Pre spojité features sme merali Standardised Mean Difference, pre binárne Cramérovo V. Obe sú normalizované do škály 0 až 1, takže výsledky sa dajú vizuálne porovnať. Ukázalo sa, že najsilnejšie samostatné signály patria do Trust a Behavior rodiny - `HasSocialNet`, `HasCopyrightInfo`, `IsHTTPS`. Lexical features majú stredné až slabé samostatné efekty. To znamená, že URL signál nie je v jednom prepínači, ale v kombinácii znakov. To je presne situácia, kde flexibilnejšie nelineárne modely mávajú výhodu.
 
-**Druhé zistenie: Lexical features sú silne kolineárne.** Spočítali sme VIF — Variance Inflation Factor. Pre dĺžkové premenné ako `URLLength` a `NoOfLettersInURL` sme namerali VIF nad 1000. To je patologická redundancia. Pre obyčajnú logistickú regresiu by to znamenalo nestabilné koeficienty, ktoré pri minimálnej zmene dát skáču z jednej feature na druhú. Preto v Scenári 2 používame **ridge regularizáciu** ako stabilizačný zásah, nie ako trik na výkon.
+**Druhé zistenie: Lexical features sú silne kolineárne.** Spočítali sme VIF - Variance Inflation Factor. Pre dĺžkové premenné ako `URLLength` a `NoOfLettersInURL` sme namerali VIF nad 1000. To je patologická redundancia. Pre obyčajnú logistickú regresiu by to znamenalo nestabilné koeficienty, ktoré pri minimálnej zmene dát skáču z jednej feature na druhú. Preto v Scenári 2 používame **ridge regularizáciu** ako stabilizačný zásah, nie ako trik na výkon.
 
-**Tretie zistenie: existujú near-leaker features.** V Behavior rodine sme našli šesť features, ktoré samostatne dosahujú univariate AUC nad 0.95 — napríklad `LineOfCode`, `NoOfExternalRef`, `NoOfImage`, `NoOfJS`, `NoOfCSS`. Inými slovami, jeden takýto stĺpec sám klasifikuje takmer perfektne. Pravdepodobné vysvetlenie je jednoduché: legitímne stránky sú často zložitejšie, majú viac kódu, viac obrázkov a referencií, zatiaľ čo phishingové stránky sú typicky jednoduché napodobeniny. Keby sme tieto features nechali vo Full tieri, všetky modely by saturovali pri AUC blízko 1.0 a rozdiel medzi rodinami by zmizol nie preto, že modely sú rovnako dobré, ale preto, že úloha by bola triviálna.
+**Tretie zistenie: existujú near-leaker features.** V Behavior rodine sme našli šesť features, ktoré samostatne dosahujú univariate AUC nad 0.95 - napríklad `LineOfCode`, `NoOfExternalRef`, `NoOfImage`, `NoOfJS`, `NoOfCSS`. Inými slovami, jeden takýto stĺpec sám klasifikuje takmer perfektne. Pravdepodobné vysvetlenie je jednoduché: legitímne stránky sú často zložitejšie, majú viac kódu, viac obrázkov a referencií, zatiaľ čo phishingové stránky sú typicky jednoduché napodobeniny. Keby sme tieto features nechali vo Full tieri, všetky modely by saturovali pri AUC blízko 1.0 a rozdiel medzi rodinami by zmizol nie preto, že modely sú rovnako dobré, ale preto, že úloha by bola triviálna.
 
 Preto sme zaviedli **FullLite tier**: Lexical plus Trust plus Behavior bez šiestich near-leakerov. FullLite má 34 features a stále silný signál, ale úloha už nie je triviálna a H1 gradient sa dá čítať.
 
-EDA tým pádom nie je len opis dát. Je to návrh experimentu: motivuje ridge, motivuje `log1p` transformáciu pre dlhé pravé chvosty count features, motivuje štandardizáciu pre vzdialenostné modely a motivuje FullLite namiesto Full.
+---
+
+## 6. Scenár 2 - porovnanie modelových rodín (cca 9:00 – 11:30, osoba B)
+
+**Hypotéza H1 (pripomenutie).** Rozdiel medzi parametrickými a neparametrickými modelmi závisí od feature tieru. Najväčší rozdiel očakávame na Lexical, lebo URL features sú samostatne slabé a signál je v ich kombináciách. Na FullLite, kde sú silné Trust a Behavior features, by sa mal rozdiel zmenšiť.
+
+Aby bola H1 potvrdená, musia platiť tri kritériá súčasne:
+
+- **C1 - veľkosť rozdielu na Lexical.** Δ minSS medzi najlepším neparametrickým a najlepším parametrickým modelom musí byť aspoň **0.10**. Prah 0.10 je deploymentovo významný - rozdiel 10 percentuálnych bodov v tom, koľko phishingu chytíme alebo koľko legit URL pustíme, je v praxi citeľný.
+- **C2 - gradient cez tiery.** „Gap“ znamená jednoducho **o koľko je najlepší neparametrický model lepší než najlepší parametrický** na danom tieri. Spočítame ho na Lexical a na FullLite. Kritérium hovorí, že tento náskok má byť **väčší na Lexical než na FullLite** - teda neparametrické modely majú výraznejšie ťahať na slabom URL signáli, a keď dostanú silnejšie Trust a Behavior features, parametrické ich majú dobehnúť. Bez tohto kritéria by sme len ukázali, že neparametrické modely sú celkovo lepšie - H1 ale tvrdí niečo silnejšie, totiž že ich výhoda **závisí od tieru**.
+- **C3 - sanity check cez AUC.** Δ AUC na Lexical musí byť aspoň **0.02**. Je to kontrola, že rozdiel existuje nielen v operating pointe pri 0.5 prahu (minSS), ale aj v poradí skóre. Ak by C1 platilo a C3 nie, rozdiel by mohol byť iba kalibračný artefakt. C3 je vedľajšie - C1 a C2 sú hlavné kritériá.
+
+**Experimentálny dizajn.** Porovnali sme tri parametrické modely - Logistic Regression Ridge, LDA, Naive Bayes - a tri neparametrické - Random Forest, SVM-RBF, KNN. Každý model sme pustili na rovnaké štyri tiery: Lexical, Trust, Behavior bez near-leakerov a FullLite. Stratifikovaný 30-tisícový subsample, 80-20 split, hyperparametre fixné a konvenčné, lebo cieľom je férové porovnanie rodín, nie leaderboard tuning.
+
+**Prečo 10-fold cross-validation.** Tréningovú časť rozdelíme na 10 stratifikovaných foldov, každý model fitujeme 10-krát (na 9, validujeme na 10.) a spriemerujeme. Konkrétne nám to dalo:
+
+1. **10 odhadov namiesto jedného** - vieme rozlíšiť skutočný rozdiel medzi modelmi od šumu jedného splitu (priemer + smerodajná odchýlka cez foldy). To je dôležité najmä preto, že **viaceré modely majú AUC veľmi blízko 1.0** - rozdiely medzi nimi sú malé a bez 10 čísel by sa nedali odlíšiť od náhodného kolísania jedného splitu.
+2. **Férové párované porovnanie** - všetkých 6 modelov zdieľa rovnaké fold indexy, takže rozdiely sa počítajú na tých istých validačných setoch fold-by-fold; oddelí sa variabilita modelu od variability splitu. Pri vysokých AUC, kde sú absolútne rozdiely tesné, je párovanie kritické - bez neho by šum dominoval.
+
+Pôvodne sme chceli AUC ako hlavnú metriku - je to štandardná voľba a krásne sa porovnáva medzi modelmi. Pri pohľade na výsledky sme však zistili, že **AUC vie byť pri našej úlohe klamlivá**. AUC meria, ako dobre model **zoradí** phishing nad legit cez všetky možné prahy, ale neovorí nič o tom, ako sa správa pri konkrétnom prahu, ktorý reálne použijeme - v našom prípade 0.5.
+
+**Prečo prah 0.5.** Po prvé, je to **prirodzený default** - model vráti pravdepodobnosť phishingu medzi 0 a 1, a 0.5 znamená „phishing je pravdepodobnejší než legit“. Po druhé, **triedy v datasete sú približne vyvážené** (~50/50), takže 0.5 zodpovedá apriori rovnováhe a nie je potrebné ho posúvať kvôli class imbalance. Po tretie, je to **deployment-realistická voľba** - produkčný proxy bez explicitnej kalibrácie prahu používa default 0.5. Keby sme prah ladili pre každý model zvlášť, miešali by sme dve veci: kvalitu modelu a kvalitu kalibrácie. Cieľ Scenára 2 je porovnanie modelových rodín, preto držíme prah jednotný.
+
+Keby triedy **neboli vyvážené** - napríklad pri reálnom traffic-u, kde phishing tvorí len malé percento URL - 0.5 by ako default už nestačil. Modely trénované na nevyváženom datasete by predikovali pravdepodobnosti posunuté smerom k majoritnej triede a pri 0.5 by Sensitivity prudko klesla. V takom prípade by sa prah musel kalibrovať buď podľa apriori distribúcie (napr. posun na pomer tried), alebo cez ROC/PR krivku na validačnom sete s ohľadom na náklady false positive vs false negative. To je samostatná úloha, ktorá by patrila pred deployment, ale nie do porovnania modelových rodín.
+
+Preto sme pridali dve metriky, ktoré priamo zodpovedajú tomu, čo proxy reálne robí:
+
+- **Sensitivity** = `TP / (TP + FN)` -  aký podiel phishingu sme **chytili**
+- **Specificity** = `TN / (TN + FP)` -  aký podiel legit traffic-u sme **správne pustili**
+
+A nakoniec **minSS** = minimum z týchto dvoch. minSS je low-bar metrika: zachytáva najslabšiu z dvoch zložiek. Model so Sensitivity 0.99 a Specificity 0.40 má minSS = 0.40 - bez ohľadu na to, ako pekne vyzerá AUC, ako binárny filter zlyhal. Práve preto je C1 (kritérium pre H1) postavené nad minSS, nie nad AUC.
+
+
+**Logistic Regression Ridge.** Sensitivity ~0.92, Specificity ~0.72. Chytí väčšinu phishingu, ale blokuje aj približne 28 % legitímnych URL. Ako proxy filter by spôsoboval výrazné množstvo false positives - na firemnom traffic-u by to znamenalo blokáciu množstva neškodných stránok. Lineárna hranica jednoducho nestačí na URL signál, kde rozhoduje kombinácia znakov.
+
+**LDA.** Operating point pri 0.5 je nevyvážený - Sensitivity vysoká (cez 0.9), Specificity výrazne nižšia. Model síce phishing rozpoznáva, ale za cenu blokovania veľkého počtu legit URL. Pri prahu 0.5 nie je dobre kalibrovaný a ako binárny filter prakticky nepoužiteľný.
+
+**Naive Bayes.** Sensitivity skoro 1.0, Specificity dramaticky nízka. Model takmer všetko označuje za phishing - to nie je bug, ale priamy dôsledok zlomeného predpokladu nezávislosti: `URLLength`, `NoOfLettersInURL` a `NoOfDegitsInURL` sú silne korelované, NB ten istý signál opakovane započíta a posunie pravdepodobnosť phishingu k 1. Pre detekciu nepoužiteľný, ale priortine aj tak slúžil na  ukazanie, akú cenu má ignorovanie korelácií.
+
+**Random Forest.** Sensitivity vysoká, ale Specificity pri 0.5 výrazne slabšia než SVM. RF zachytáva nelineárne interakcie cez ensemble stromov, no jeho hlasovacia pravdepodobnosť nie je natívne kalibrovaná na 0.5 - phishingový hlas má tendenciu vyhrávať, takže model pustí menej phishingu, ale zase blokuje viac legit. S threshold tuningom by sa pravdepodobne približoval SVM, ale H1 porovnáva všetky modely pri rovnakom prahu.
+
+**SVM-RBF.** Sensitivity aj Specificity blízko 0.98, minSS ~0.98 - najefektívnejší model na zachytávanie phishingu z URL stringu. Chytí takmer všetok phishing a zároveň takmer nikdy nezablokuje legit URL. SVM hľadá medzi triedami ulicu s maximálnym voľným okolím; RBF kernel umožňuje, aby bola nelineárna - okolo každého support vectora je gaussovský zvon a model rozhoduje podľa toho, či nový bod padne do oblasti, kde dominujú phishingové alebo legit zvony. Pri Lexical signáli, kde phishing nemá jeden definujúci atribút, ale kombináciu znakov (dlhá URL + veľa číslic + špeciálne znaky + veľa subdomén), je RBF prirodzená voľba. Pri 0.5 prahu funguje symetricky a nepotrebuje threshold recalibration.
+
+**KNN.** Sensitivity aj Specificity porovnateľné so SVM, takže ako klasifikátor je rovnako efektívny. Problém je pri inferencii - pre každú novú URL musí spočítať vzdialenosť ku všetkým 24-tisícom trénovacích bodov. Pre proxy s vysokým provozom je to praktická prekážka - kvalita áno, deployment cena nie.
+
+**Celkové zhodnotenie.** Tri parametrické modely (LR-Ridge, LDA, NB) na Lexical zlyhávajú v Specificity - Sensitivity majú vysokú, ale za cenu nadmernej blokácie legit URL. Všetky majú lineárny alebo aditívny tvar a phishing signál v kombináciách znakov nezachytia. Tri neparametrické modely (RF, SVM-RBF, KNN) Sensitivity aj Specificity vyvažujú lepšie, ale RF má kalibračný problém pri 0.5 (Specificity zaostáva) a KNN je drahý pri inferencii. SVM-RBF jediný drží **obe metriky vysoko súčasne** a po natrénovaní je to fixný malý model - kvalita zachytenia phishingu aj deploymentová praktickosť.
+
+**Záver Scenára 2.** H1 je potvrdená: na Lexical tieri je gap v minSS približne 0.30 medzi najlepším neparametrickým modelom (SVM-RBF, ~0.98) a najlepším parametrickým (~0.69), výrazne nad prahom 0.10. Na FullLite tento gap klesá takmer na nulu - keď modely dostanú silné Trust a Behavior features, parametrické aj neparametrické saturujú a rozdiel mizne. Deploymentový víťaz pre URL-only proxy je **SVM-RBF na Lexical tieri**.
 
 ---
 
-## 6. Scenár 2 — porovnanie modelových rodín (cca 9:00 – 11:30, osoba B)
-
-V Scenári 2 sme porovnali tri parametrické modely — Logistic Regression Ridge, LDA a Naive Bayes — a tri neparametrické — Random Forest, SVM-RBF a KNN. Každý model sme pustili na rovnaké štyri tiery: Lexical, Trust, Behavior bez near-leakerov a FullLite. Použili sme stratifikovaný 30-tisícový subsample, 80-20 split a 10-fold CV. Hyperparametre sme držali fixné a konvenčné, lebo cieľom je férové porovnanie rodín, nie leaderboard tuning.
-
-**H1 sa potvrdila.** Na Lexical tieri je rozdiel v minSS približne 0.30 medzi najlepším neparametrickým a najlepším parametrickým modelom — výrazne nad našim prahom 0.10. Na FullLite tento rozdiel klesá takmer na nulu. To je presne gradient, ktorý hypotéza predpovedala.
-
-Deploymentový víťaz na Lexical je **SVM-RBF**. Má vysokú Sensitivity aj vysokú Specificity pri prahu 0.5. Vysvetlím prečo.
-
-SVM-RBF hľadá medzi triedami ulicu s maximálnym voľným okolím. RBF kernel umožňuje, aby táto ulica bola nelineárna — predstavme si, že okolo každého support vectora je gaussovský zvon a model rozhoduje podľa toho, či nový bod padne do oblasti, kde dominujú phishingové zvony alebo legit. Parametre `C` a `sigma` riadia, ako prísne sa trestajú tréningové chyby a ako lokálne zvony pôsobia.
-
-Pri Lexical signáli, kde phishing nemá jeden definujúci atribút, ale kombináciu znakov — dlhá URL plus veľa číslic plus podivné špeciálne znaky plus veľa subdomén — je RBF prirodzená voľba. Random Forest je tiež silný, ale jeho hlasovacia pravdepodobnosť pri 0.5 nie je tak dobre kalibrovaná. Pri Lexical má RF dobré AUC, ale slabšiu Specificity. KNN dosahuje porovnateľnú kvalitu ako SVM, ale pri inferencii musí pre každú novú URL spočítať vzdialenosť ku všetkým 24-tisícom trénovacích bodov. Pre proxy s vysokým provozom je to praktická prekážka.
-
-Z parametrických modelov LR-Ridge dosahuje Sensitivity okolo 0.92, ale Specificity len 0.72 — model chytí phishing, ale blokuje veľa legit URL. LDA má dobré AUC, ale slabú kalibráciu pri 0.5. Naive Bayes zaujímavo dopadol nevyvážene — Sensitivity skoro 1, Specificity dramaticky nízka. To nie je bug, je to interpretovateľný dôsledok zlomeného predpokladu nezávislosti: dĺžka URL, počet písmen a počet číslic spolu úzko súvisia, takže NB ten istý signál opakovane započíta.
-
----
-
-## 7. Scenár 3 — feature selection (cca 11:30 – 13:00, osoba B)
+## 7. Scenár 3 - feature selection (cca 11:30 – 13:00, osoba B)
 
 Scenár 3 sa pýta inú otázku: dokážeme z 13 lexikálnych features vybrať menšiu podmnožinu, ktorá si zachová kvalitu? Cieľom je kompaktný, ľahko nasaditeľný URL filter ako alternatíva k SVM, ktorý je síce kvalitatívne najlepší, ale interpretačne ťažší.
 
@@ -104,17 +125,17 @@ Stepwise vybral 9 features z 13 a prešiel všetky tri prahy s pohodlnou rezervo
 
 Toto jadro tvoria: `URLLength`, `NoOfLettersInURL`, `NoOfDegitsInURL`, `NoOfOtherSpecialCharsInURL`, `NoOfSubDomain`, `NoOfQMarkInURL`, `CharContinuationRate`, `TLDLength` a `IsDomainIP`.
 
-Elastic-net je blízko, ale neprešiel — nie preto, že je zlý, ale preto, že podľa teórie pri korelovaných features drží skupinu spolu, čo zvyšuje stabilitu, ale znižuje sparsity. Toto očakávané správanie sme priznali.
+Elastic-net je blízko, ale neprešiel - nie preto, že je zlý, ale preto, že podľa teórie pri korelovaných features drží skupinu spolu, čo zvyšuje stabilitu, ale znižuje sparsity. Toto očakávané správanie sme priznali.
 
 ---
 
-## 8. Scenár 4 — vizualizácia rozhodovania (cca 13:00 – 14:00, osoba B)
+## 8. Scenár 4 - vizualizácia rozhodovania (cca 13:00 – 14:00, osoba B)
 
-Scenár 4 dopĺňa interpretovateľnosť. Random Forest je presný, ale je to ensemble 300 stromov, ktorý sa nedá vizualizovať jedným diagramom. Preto sme natrénovali **surrogate strom**. Cieľová premenná tohto stromu nie je skutočný label, ale **predikcia Random Forest**. Strom sa teda neučí klasifikovať phishing — učí sa **napodobniť RF**.
+Scenár 4 dopĺňa interpretovateľnosť. Random Forest je presný, ale je to ensemble 300 stromov, ktorý sa nedá vizualizovať jedným diagramom. Preto sme natrénovali **surrogate strom**. Cieľová premenná tohto stromu nie je skutočný label, ale **predikcia Random Forest**. Strom sa teda neučí klasifikovať phishing - učí sa **napodobniť RF**.
 
 Meriame fidelity, teda zhodu stromu s RF. Pri cape do 15 listov, aby strom bol čitateľný, dosahujeme fidelity okolo 0.94 na Lexical a okolo 0.97 na FullLite. Strom nie je náhrada za RF; je to vizualizačný nástroj. Tree AUC je nižší než RF AUC, čo otvorene priznávame.
 
-Na Lexical má root split `NoOfOtherSpecialCharsInURL`, čo prekvapivo súhlasí aj s top variable importance v RF. To je dobrý cross-check — vizualizácia naozaj zachytáva to, čo RF považuje za dôležité.
+Na Lexical má root split `NoOfOtherSpecialCharsInURL`, čo prekvapivo súhlasí aj s top variable importance v RF. To je dobrý cross-check - vizualizácia naozaj zachytáva to, čo RF považuje za dôležité.
 
 ---
 

@@ -236,44 +236,47 @@ Nie je cieľom dať všetkým modelom identický preprocessing za každú cenu. 
 
 ### 6.1 Logistic Regression s ridge
 
-Logistická regresia modeluje pravdepodobnosť phishingu ako funkciu lineárnej kombinácie features. V Lexical dátach máme silnú kolinearitu, preto používame ridge.
+**Ako funguje.** Logistická regresia modeluje pravdepodobnosť phishingu ako sigmoidu z lineárnej kombinácie features: `P(phishing) = σ(β₀ + β₁x₁ + … + βₚxₚ)`. Učí sa váhy `βᵢ` maximalizáciou log-likelihood. Ridge varianta pridá pokutu `λ × Σβᵢ²`, ktorá optimalizátor núti držať váhy malé.
 
-Nastavenie:
+**Nastavenie.**
 
-- `alpha = 0`,
+- `alpha = 0` (čistý ridge, bez L1 zložky),
 - `lambda = 0.01`.
 
-Prečo nie obyčajná LR:
+**Ako parametre menia model.**
 
-> VIF v Lexical features je extrémne vysoké. Obyčajná LR by mala nestabilné koeficienty a výsledky by mohli závisieť od drobných zmien splitu.
+- `alpha`: 0 = čistý ridge (drží všetky features, len ich váhy stláča); 1 = lasso (vyhadzuje features na nulu — feature selection); medzi tým je elastic net.
+- `lambda`: väčšie `lambda` viac stláča koeficienty — model je stabilnejší, ale môže underfittovať. Menšie `lambda` sa blíži obyčajnej LR — pri kolinearite hrozia nestabilné koeficienty.
 
-Prečo nie lasso:
-
-> Lasso robí feature selection, čo je téma Scenára 3. V Scenári 2 chceme porovnať modelové rodiny pri fixnom predictor poole, nie meniť počet features.
-
-Prečo netunujeme lambda:
-
-> Tuning lambdy by z LR spravil ďalší optimalizačný problém a sťažil porovnanie medzi tiermi. `lambda = 0.01` je malý stabilizačný zásah, nie agresívne preformovanie modelu.
+**Prečo ridge namiesto obyčajnej LR.** EDA ukázala v Lexical extrémnu kolinearitu (`URLLength`, `NoOfLettersInURL`, `NoOfDegitsInURL` sa pohybujú spolu, VIF > 1000). Obyčajná LR by mala (1) **nestabilné koeficienty** — váha by raz padla na `URLLength`, inokedy na `NoOfLettersInURL`, znamienka by sa medzi foldami menili; (2) **nedôveryhodné porovnanie** — nevedeli by sme, či je rozdiel oproti LDA/RF skutočný, alebo iba kolísanie LR. Ridge rozdelí váhu medzi korelované features rovnomerne. `lambda = 0.01` je minimálna stabilizácia, nie performance trik.
 
 ### 6.2 LDA
 
-LDA predpokladá, že triedy majú približne normálne rozdelenie a spoločnú kovariančnú maticu. Po `log1p` a standardizácii je to rozumný parametrický baseline.
+**Ako funguje.** Linear Discriminant Analysis predpokladá, že features v každej triede majú približne normálne rozdelenie a triedy zdieľajú spoločnú kovariančnú maticu. Z týchto predpokladov odvodí lineárnu rozhodovaciu hranicu medzi triedami pomocou Bayesovho pravidla.
 
-Prečo nie QDA:
+**Nastavenie.** Bez explicitných hyperparametrov — `caret::train(method = "lda")` len odhadne priemery tried a spoločnú kovariančnú maticu z dát.
 
-QDA by mala samostatnú kovariančnú maticu pre každú triedu. Pri korelovaných features je citlivejšia a menej stabilná. LDA je jednoduchší baseline.
+**Ako parametre menia model.** LDA má fixnú formu — meniť možno iba preprocessing (či transformovať features, či štandardizovať). Po `log1p` a štandardizácii sú features bližšie k normálnemu rozdeleniu, čo sedí LDA predpokladom.
+
+**Prečo nie QDA.** QDA by mala samostatnú kovariančnú maticu pre každú triedu (kvadratická hranica). Pri korelovaných features je citlivejšia a menej stabilná. LDA je jednoduchší a robustnejší baseline.
 
 ### 6.3 Naive Bayes
 
-Naive Bayes predpokladá podmienenú nezávislosť features. EDA ukázala, že hlavne Lexical features nezávislé nie sú. Preto NB nečakáme ako víťaza, ale je užitočný baseline: ukáže, aká je cena zlomeného predpokladu.
+**Ako funguje.** NB aplikuje Bayesovu vetu s **predpokladom podmienenej nezávislosti** features dané triedou: `P(trieda | x) ∝ P(trieda) × Π P(xᵢ | trieda)`. Každú feature modeluje samostatne, jej príspevky sa nasobia. S `usekernel = TRUE` modeluje `P(xᵢ | trieda)` neparametrickým kernel density estimátorom; bez neho predpokladá Gaussian.
 
-Používame:
+**Nastavenie.**
 
 - `usekernel = TRUE`,
-- `fL = 1`,
+- `fL = 1` (Laplace smoothing),
 - `adjust = 1`.
 
-Kernel density verzia je flexibilnejšia než čistý Gaussian NB. Laplace smoothing pomáha pri nulových alebo riedkych kombináciách.
+**Ako parametre menia model.**
+
+- `usekernel`: TRUE = flexibilnejší (KDE pre každú feature, nepredpokladá Gaussian); FALSE = čistý Gaussian NB, citlivejší na nesplnenú normalitu.
+- `fL` (Laplace): 0 = bez smoothingu, model padne na nulu pri nepozorovaných kombináciách; vyššie hodnoty silnejšie vyhladzujú.
+- `adjust`: násobok šírky kernelu pri `usekernel = TRUE`. Vyššie = hladšie odhady hustoty, nižšie = ostrejšie ale šumnejšie.
+
+**Prečo ho vôbec mať.** EDA ukázala, že najmä Lexical features nezávislé nie sú, takže NB nečakáme ako víťaza. Je to baseline ukazujúci, **akú cenu má zlomený predpoklad nezávislosti** — keď NB výrazne zaostane, je to dôkaz, že interakcie medzi features sú dôležité.
 
 ---
 
@@ -281,57 +284,52 @@ Kernel density verzia je flexibilnejšia než čistý Gaussian NB. Laplace smoot
 
 ### 7.1 Random Forest
 
-Random Forest je súbor 300 stromov. Každý strom sa učí z bootstrap vzorky a pri splitoch vidí iba náhodnú podmnožinu features.
+**Ako funguje.** RF je ensemble rozhodovacích stromov. Každý strom sa učí z **bootstrap vzorky** dát (sampling s nahradením) a pri každom splite vidí iba náhodnú podmnožinu `mtry` features. Predikcia: každý strom hlasuje, RF vráti priemer pravdepodobností. Náhodnosť (bootstrap + random feature subset) zabezpečí, že stromy sú dekorelovené, takže priemer má nižšiu varianciu než jeden strom.
 
-Nastavenie:
+**Nastavenie.**
 
 - `ntree = 300`,
 - `mtry = floor(sqrt(p))`.
 
-Prečo `sqrt(p)`:
+**Ako parametre menia model.**
 
-Je to klasická heuristika pre classification Random Forest. Zabezpečuje, že stromy nie sú všetky rovnaké a model vie využívať rôzne kombinácie features.
+- `ntree`: viac stromov = stabilnejšie predikcie, ale dlhší tréning. Po istej hranici (~stovky) zlepšenie saturuje.
+- `mtry`: menšie = stromy vidia menej features → väčšia diverzita, ale jednotlivé stromy sú slabšie. Väčšie = stromy sú silnejšie, ale podobnejšie (vyššia korelácia → menšia výhoda priemerovania). `sqrt(p)` je klasická heuristika pre klasifikáciu.
+- Hĺbka stromov (default neorezáva): hlbšie = väčší fit na tréning; v RF sa overfit kompenzuje cez ensemble, preto sa stromy bežne pestujú do plnej hĺbky.
 
-Prečo 300 stromov:
-
-Je to kompromis medzi stabilitou a časom. Viac stromov by zvyčajne zlepšovalo výsledok len málo, ale zvýšilo čas tréningu.
+**Prečo bez preprocessingu.** RF rozhoduje podľa prahov na jednotlivých features (`x < threshold`), takže monotónne transformácie (log, štandardizácia) prahy nemenia. RF nechávame na surových dátach (Recept B).
 
 ### 7.2 SVM-RBF
 
-SVM-RBF hľadá nelineárnu hranicu medzi triedami. RBF kernel je vhodný pre situácie, kde triedy nejde oddeliť jednou priamkou alebo rovinou.
+**Ako funguje.** SVM hľadá rozhodovaciu hranicu, ktorá maximalizuje **margin** (vzdialenosť medzi hranicou a najbližšími bodmi tried). RBF (Gaussovský) kernel `K(x, x') = exp(-σ‖x − x'‖²)` meria podobnosť celých vektorov; hranica je tvarovaná podľa hustoty support vektorov v okolí. Výsledok je hladká nelineárna hranica v pôvodnom priestore.
 
-Nastavenie:
+**Nastavenie.**
 
 - `C = 1`,
 - `sigma = 0.1`.
 
-Prečo RBF:
+**Ako parametre menia model.**
 
-Lexical signál pravdepodobne vzniká kombináciou znakov URL. RBF vie modelovať hladké interakcie medzi týmito znakmi.
+- `C` (soft-margin penalizácia): malé `C` = mäkký margin, model toleruje viac chýb na tréningu, hranica je hladšia (vyšší bias, nižšia variancia). Veľké `C` = tvrdý margin, model sa snaží klasifikovať tréning bez chyby (riziko overfitu).
+- `sigma` (šírka RBF kernelu): malé `sigma` = široký kernel, hladká globálna hranica (môže underfittovať). Veľké `sigma` = úzky kernel, hranica sa silno prispôsobí lokálnym bodom (riziko overfitu).
 
-Prečo je SVM vhodné pre Lexical:
-
-Po standardizácii features vie SVM efektívne využiť vzdialenosť a podobnosť URL. Výsledky ukazujú, že práve na Lexical tieri je veľmi silné.
+**Prečo RBF a nie lineárne SVM.** Lineárne SVM by hľadalo rovinu v priestore features — správa sa podobne ako LR. Na Lexical to nestačí: (1) **phishing signál je interakcia, nie suma** — URL je podozrivá až vtedy, keď je *zároveň* dlhá, má veľa číslic, špeciálnych znakov a subdomén; lineárny model interakcie nezachytí, RBF cez podobnosť celých vektorov áno. (2) **Korelované features** — pri VIF > 1000 by lineárne SVM trpelo nestabilitou váh ako LR; RBF váhy jednotlivým features nepriraďuje. Empiricky: na Lexical má SVM-RBF výrazne vyššiu Sensitivity aj Specificity než LR-Ridge a LDA. Na FullLite, kde Behavior features dávajú silný lineárny signál, sa rozdiel zmenšuje. `C = 1`, `sigma = 0.1` sú rozumné defaulty pre štandardizované features.
 
 ### 7.3 KNN
 
-KNN rozhoduje podľa 25 najbližších tréningových príkladov.
+**Ako funguje.** KNN nemá tréningovú fázu v klasickom zmysle — uloží si všetky tréningové body. Pri novej URL spočíta euklidovskú vzdialenosť ku všetkým tréningovým bodom, vyberie `k` najbližších a hlasuje (alebo priemeruje pravdepodobnosti).
 
-Nastavenie:
+**Nastavenie.**
 
 - `k = 25`.
 
-Prečo 25:
+**Ako parametre menia model.**
 
-Menšie k by bolo citlivejšie na šum. Väčšie k by viac vyhladzovalo lokálne rozdiely. 25 je rozumný kompromis.
+- `k`: malé `k` (napr. 1–3) = veľmi lokálne rozhodnutie, citlivé na šum a outliery (vysoká variancia). Veľké `k` = vyhladenie lokálnych rozdielov, hranica sa blíži globálnemu majoritnému hlasovaniu (vysoký bias). 25 je rozumný kompromis pri 24k tréningových bodoch.
+- Metrika vzdialenosti: euklidovská vyžaduje **štandardizáciu**, inak feature s väčšou škálou dominuje.
+- Jitter (špeciálne pre Trust tier): Trust má iba 7 prevažne binárnych features → veľa identických riadkov vytvára ties. Malý Gaussian jitter rozbije zhody bez zmeny významu dát.
 
-Prečo jitter v Trust tieri:
-
-Trust má iba 7 prevažne binárnych features. Veľa riadkov môže mať rovnaké súradnice, čo vytvára ties. Malý Gaussian jitter rozbije úplné zhody bez toho, aby zmenil význam dát.
-
-Nevýhoda KNN:
-
-KNN je drahý pri inferencii. Pri každom novom URL musí porovnávať vzdialenosť k tréningovým vzorkám. Pre proxy je to horšie než model, ktorý po natrénovaní rozhoduje rýchlejšie.
+**Nevýhoda pri deploye.** KNN je drahý pri inferencii — každá nová URL si vyžaduje výpočet vzdialeností ku všetkým tréningovým bodom. Pre produkčný proxy je to horšie než model, ktorý po natrénovaní rozhoduje rýchlejšie (LR, LDA, RF, SVM).
 
 ---
 
@@ -525,10 +523,6 @@ Niektoré modely, najmä Random Forest, by sa zlepšili. Ale porovnanie by už n
 
 XGBoost by bol ďalší silný neparametrický/boosting model, ale nebol potrebný pre test H1. Zadanie a dizajn porovnávajú reprezentatívne rodiny; RF, SVM-RBF a KNN pokrývajú tri rôzne typy neparametrického správania.
 
-### Keby sme použili neural network
-
-Neurónová sieť by zvýšila komplexitu a nároky na tuning. Pri tabuľkových dátach a cieľoch projektu je SVM/RF/KNN sada primeranejšia a obhájiteľnejšia.
-
 ---
 
 ## 12. Časté otázky komisie
@@ -540,22 +534,6 @@ Lebo proxy musí reálne rozhodnúť pri prahu 0.5. AUC je dobré na ranking, al
 ### Prečo je LDA s dobrým AUC stále problematická?
 
 LDA môže dobre zoradiť prípady, ale zle kalibrovať pravdepodobnosti. Pri prahu 0.5 potom blokuje príliš veľa legitímnych URL. V deployment-e je threshold správanie dôležité.
-
-### Prečo Naive Bayes dopadol tak nevyvážene?
-
-Lebo predpokladá nezávislosť features. Lexical features sú silno korelované: dĺžka URL, počet písmen a počet číslic spolu súvisia. NB potom môže opakovane započítať podobný signál.
-
-### Prečo Random Forest nie je deployment víťaz, keď má dobré AUC?
-
-Na Lexical tieri má pri 0.5 prahu slabšiu Specificity než SVM. Mohol by sa zlepšiť threshold tuningom, ale bez neho nie je tak vyvážený.
-
-### Prečo SVM-RBF vyhráva?
-
-Lebo na Lexical tieri kombinuje vysokú AUC, vysokú Sensitivity a vysokú Specificity pri prahu 0.5. Zároveň je praktickejší než KNN pri inferencii.
-
-### Prečo KNN nie je víťaz?
-
-KNN má dobré metriky, ale každá nová predikcia potrebuje porovnanie s tréningovými bodmi. Pre proxy s veľkým trafficom je to nevýhoda.
 
 ### Prečo Scenár 4 používa RF a nie SVM, keď SVM vyhráva?
 
