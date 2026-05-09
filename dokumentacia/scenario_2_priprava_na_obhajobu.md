@@ -325,7 +325,13 @@ Nie je cieľom dať všetkým modelom identický preprocessing za každú cenu. 
 
 **Ako parametre menia model.**
 
-- `k`: malé `k` (napr. 1–3) = veľmi lokálne rozhodnutie, citlivé na šum a outliery (vysoká variancia). Veľké `k` = vyhladenie lokálnych rozdielov, hranica sa blíži globálnemu majoritnému hlasovaniu (vysoký bias). 25 je rozumný kompromis pri 24k tréningových bodoch.
+- `k`: malé `k` (napr. 1–3) = veľmi lokálne rozhodnutie, citlivé na šum a outliery (vysoká variancia). Veľké `k` = vyhladenie lokálnych rozdielov, hranica sa blíži globálnemu majoritnému hlasovaniu (vysoký bias).
+
+**Prečo presne `k = 25`.** Pre náš tréning s 24 000 bodmi (≈12k Phishing, ≈12k Legitimate) je 25 kompromis z troch dôvodov:
+
+1. **Dosť veľké, aby sa náhodný šum vypriemeroval.** Pri `k = 1` jeden mislabeled tréningový bod priamo prevráti predikciu pre celé okolie. Pri `k = 25` musí byť aspoň 13 z 25 najbližších bodov patrickej triedy — jednotlivé chybne označené body sú prebité majoritou. Z teórie kNN sa štandardne odporúča `k ≥ 5` práve preto, aby majoritný hlas nebol citlivý na 1–2 outlierov.
+2. **Dosť malé, aby hranica zostala detailná.** Pri `k → ∞` všetky body dostanú tú istú predikciu (apriori pomer tried). Pri `k = 25` sa pozeráme do **veľmi lokálneho okolia** — spomedzi 24 000 bodov je 25 zhruba 0.1 %. Hranica medzi triedami si tak zachová tvar a nespriemeruje sa do globálneho šumu.
+3. **Heuristika √N je horný odhad.** Klasická literatúra odporúča `k ≈ √N`, čo by pre nás bolo `√24000 ≈ 155`. To je v praxi často priveľa — privedie to k vyhladzovaniu lokálnych zhlukov, ktoré sú pri phishing URL relevantné (napr. malá skupina podobne formátovaných phishing URLs). `k = 25` leží medzi minimom (5) a `√N` heuristikou a empiricky funguje pre stredne veľké binárne klasifikačné úlohy. Tunovať `k` cez celý grid by sa dalo, ale Scenár 2 fixuje hyperparametre, takže volíme rozumný default.
 - Metrika vzdialenosti: euklidovská vyžaduje **štandardizáciu**, inak feature s väčšou škálou dominuje.
 - Jitter (špeciálne pre Trust tier): Trust má iba 7 prevažne binárnych features → veľa identických riadkov vytvára ties. Malý Gaussian jitter rozbije zhody bez zmeny významu dát.
 
@@ -408,100 +414,93 @@ Random Forest je tiež silný, ale pri 0.5 prahu nie je tak vyvážený. LDA a L
 
 ### 9.1 Čo požadoval Scenár 4
 
-Scenár 4 žiada vizualizovať rozhodovanie modelu pomocou heatmap alebo stromov a porovnať vizualizáciu s podkladovým modelom. My sme zvolili stromový prístup.
+Zadanie Scenára 4 žiada **vizualizovať rozhodovanie modelu** pomocou heatmap alebo stromov a porovnať vizualizáciu s podkladovým modelom. Cieľom je interpretovateľnosť: nielen merať, ako presne model klasifikuje, ale aj ukázať, **podľa čoho rozhoduje**. My sme zvolili stromový prístup pomocou tzv. **surrogate stromu**.
 
 ### 9.2 Prečo nie heatmap
 
-Heatmapa korelácií alebo klastrovania ukazuje vzťahy medzi features, ale neukazuje správanie konkrétneho modelu. Scenár 4 chceme interpretovať ako porovnanie vizualizácie s modelom. Preto surrogate strom dáva väčší zmysel: priamo sa učí napodobniť Random Forest.
+Heatmapa korelácií alebo klastrovania ukazuje vzťahy **medzi features navzájom** — napríklad že `URLLength` a `NoOfLettersInURL` sú silne korelované. Neukazuje však, čo s tým robí konkrétny model. Inak povedané: heatmapa hovorí o dátach, nie o modeli. Pre Scenár 4 potrebujeme niečo, čo hovorí o **správaní modelu**, a to surrogate strom robí priamo — učí sa napodobniť Random Forest, takže jeho štruktúra zodpovedá rozhodovacej logike RF.
 
 ### 9.3 Prečo Random Forest ako teacher
 
-Random Forest je presný, ale neprehľadný. Má 300 stromov, ktoré hlasujú. Komisia alebo používateľ nevie jednoducho vidieť „pravidlo“, podľa ktorého RF rozhoduje. Surrogate strom je zjednodušený študent, ktorý sa učí predikcie RF.
+Vybrali sme RF, lebo je presný, ale **neprehľadný**: skladá sa z 300 stromov, ktoré nezávisle hlasujú a predikcia je priemer hlasov. Žiadny jeden strom nie je „ten“ rozhodovací — každý vidí inú bootstrap vzorku a inú podmnožinu features. Pri pohľade na ensemble nie je možné jednoducho povedať, „RF rozhoduje takto“. Preto potrebujeme zjednodušeného **študenta**, ktorý sa od RF naučí, aký výstup pri akom vstupe má dať. SVM-RBF by sme tiež mohli vziať ako teacher, ale jeho rozhodovacia hranica leží v kernel priestore, ktorý sa stromom napodobňuje horšie. RF je stromový ensemble, takže prirodzene sa dá aproximovať jedným stromom.
 
 ### 9.4 Ako surrogate funguje
 
-Normálny model sa učí:
+Kľúčový rozdiel oproti normálnemu trénovaniu:
 
-> features → skutočný label.
+- **Normálny model** sa učí: `features → skutočný label` (phishing/legit z datasetu).
+- **Surrogate strom** sa učí: `features → predikcia Random Forest` (čo RF povedal pre daný riadok).
 
-Surrogate strom sa učí:
+Konkrétny postup:
 
-> features → predikcia Random Forest.
+1. Natrénujeme RF na tréningových dátach so skutočnými labelmi.
+2. Necháme RF predikovať na celom tréningovom sete — každý riadok teraz má dva labely: skutočný a RF predikciu.
+3. Natrénujeme `rpart` strom, kde **target je RF predikcia**, nie skutočný label.
+4. Strom sa teda neučí klasifikovať phishing — učí sa **kopírovať odpovede RF**.
 
-Potom meriame fidelity, teda koľko testovacích prípadov má strom rovnakú odpoveď ako RF.
+**Fidelity** = podiel testovacích prípadov, kde strom dáva rovnakú odpoveď ako RF. Ak je fidelity 0.94, strom v 94 % prípadov reprodukuje RF rozhodnutie. Tree AUC oproti skutočnému labelu je vedľajšie — strom nie je náhrada RF, len jeho čitateľný portrét.
 
 ### 9.5 Prečo Lexical a FullLite
 
-Používame dva tiery:
+Surrogate trénujeme na dvoch tieroch zámerne, aby sme videli **dva rôzne typy pozorovania**:
 
-- Lexical, lebo tam je Random Forest zaujímavý a nelineárny,
-- FullLite, lebo tam očakávame vysokú fidelity ako sanity check.
+- **Lexical** — RF je tu nelineárny a využíva interakcie medzi URL counts. Surrogate strom musí túto nelinearitu aproximovať postupnosťou splitov, čo je zaujímavá ukážka „ako stromová logika rozkladá nelineárne rozhodovanie“.
+- **FullLite** — RF tu má aj silné Trust binárky (`HasSocialNet`, `IsHTTPS` atď.), ktoré sú prirodzene stromové. Očakávame **vysokú fidelity** a strom má slúžiť ako sanity check: ak by fidelity nebola vysoká aj tu, niečo by bolo zle s našou metodikou.
 
-Trust je príliš malý a binárny, Behavior je medzi týmito prípadmi a neprináša nový typ pozorovania.
+Trust samostatne je príliš malý (7 features, prevažne binárne) — strom by bol triviálny a nepriniesol nový pohľad. Behavior bez near-leakerov je kvalitatívne medzi Lexical a FullLite a nepridal by nový typ pozorovania.
 
 ### 9.6 Tuning surrogate stromu
 
-Tunujeme:
+Hyperparametre `rpart` stromu, ktoré tunujeme:
 
-- `maxdepth` od 3 do 7,
-- `cp` ako pruning parameter,
-- `minbucket` ako minimálna veľkosť listu.
+- **`maxdepth`** (3–7) — maximálna hĺbka stromu od koreňa po list. Hlbší strom = viac splitov = vyššia fidelity, ale horšia čitateľnosť.
+- **`cp`** (complexity parameter) — pruning prah. Split sa pridá iba ak zlepší fit aspoň o `cp`. Vyšší `cp` = agresívnejšie orezávanie = jednoduchší strom.
+- **`minbucket`** — minimálny počet riadkov v liste. Bránime sa pred splitom, ktorý by vyrobil mikro-list pre 2-3 riadky.
 
-Hľadáme vysokú fidelity, ale zároveň čitateľnosť. Hlboký strom môže lepšie kopírovať RF, ale pri ústnom vysvetľovaní na projektore je nepoužiteľný.
+Hľadáme **najvyššiu fidelity pri zachovaní čitateľnosti**. Hlboký strom môže RF lepšie kopírovať, ale pri ústnom vysvetľovaní na projektore je nepoužiteľný — komisia by sa stratila vo vetvách.
 
 ### 9.7 Prečo cap <= 15 listov
 
-Strom s 37 listami môže mať vyššiu fidelity, ale človek ho nevie rýchlo pochopiť. Obhajobová vizualizácia má byť vysvetľujúca, nie iba numericky najlepšia. Preto vyberáme najlepší strom s najviac 15 listami.
+Po tuningu sme mali kandidátske stromy s rôznymi počtami listov. Strom s 37 listami mal vyššiu fidelity, ale **človek ho nevie naraz pochopiť**. Pri obhajobe potrebujeme strom, ktorý vieme prejsť za 30 sekúnd a ukázať „toto je root, toto je druhý split, takto sa dospelo k phishing predikcii“. Empirické pravidlo z literatúry hovorí, že 10–15 listov je hranica zrozumiteľnosti. Preto sme z tuned kandidátov vybrali **najlepšieho s najviac 15 listami**.
+
+Vedome obetujeme nejakú fidelity v prospech čitateľnosti — to je hlavné rozhodnutie Scenára 4. Numericky najlepší surrogate by bol pre obhajobu nepoužiteľný.
 
 ### 9.8 Výsledok pre Lexical
 
-Lexical surrogate má root split na `NoOfOtherSpecialCharsInURL < 3`. To znamená, že počet špeciálnych znakov je prvý veľký signál, ktorým sa dá približiť rozhodovanie RF.
+**Root split:** `NoOfOtherSpecialCharsInURL < 3`. To znamená, že najsilnejším jediným signálom, ktorým strom napodobňuje RF, je **počet ostatných špeciálnych znakov v URL**. Phishing URL majú typicky viac neobvyklých znakov (`%`, `=`, `&`, lomítka v zvláštnych pozíciách), legit URL majú týchto znakov málo.
 
-Ďalšie dôležité features:
+Ďalšie features, ktoré sa objavia v horných vrstvách stromu:
 
-- `NoOfDegitsInURL`,
-- `NoOfSubDomain`,
-- `TLDLength`,
-- `CharContinuationRate`,
-- `URLLength`,
-- `NoOfLettersInURL`.
+- `NoOfDegitsInURL` — počet číslic,
+- `NoOfSubDomain` — počet subdomén (phishing často reťazí subdomény typu `login.bank.security.evil.com`),
+- `TLDLength` — dĺžka TLD (legit `.com`/`.sk` vs phishing dlhé alebo neobvyklé TLD),
+- `CharContinuationRate` — miera, ako sa rovnaké znaky reťazia,
+- `URLLength`, `NoOfLettersInURL` — celkové počty.
 
-Tree AUC je nižšie než RF AUC, takže strom nie je náhrada RF. Je to skôr okno do jeho logiky.
+**Fidelity ~0.94**, Tree AUC výrazne nižšie než RF AUC. Strom **nie je náhrada RF**, je to **okno do jeho logiky** — ukazuje, ktoré features RF používa najviac a v akom poradí.
 
 ### 9.9 Výsledok pre FullLite
 
-FullLite surrogate má root `HasSocialNet = 1`. V horných vrstvách dominujú Trust binárky:
+**Root split:** `HasSocialNet = 1`. Keď má model k dispozícii Trust a Behavior features, nemusí sa pretĺkať cez zložité URL counts — postačí mu jediný silný binárny signál. Phishing stránky typicky **nemajú odkazy na sociálne siete** (legit firmy ich majú v päte stránky).
 
-- `HasCopyrightInfo`,
-- `HasDescription`,
-- `IsHTTPS`,
-- `HasSubmitButton`.
+V horných vrstvách dominujú **Trust binárky**:
 
-To dáva zmysel: keď má model silnejšie Trust/Behavior signály, nemusí sa spoliehať iba na zložité URL counts.
+- `HasCopyrightInfo` — phishing obvykle nemá copyright,
+- `HasDescription` — meta-description je častejšia na legit,
+- `IsHTTPS` — bezpečnostná vlastnosť spojenia,
+- `HasSubmitButton` — phishing často má submit button (zachytávanie credentials).
+
+**Fidelity ~0.97** — vyššia než na Lexical. Dáva to zmysel: stromová logika presne sedí na binárne Trust features, takže napodobnenie RF je jednoduchšie. To je **sanity check** — keby surrogate aj tu zlyhal, niečo je systematicky pokazené.
 
 ### 9.10 Variable importance cross-check
 
-Používame `randomForest::varImpPlot`, aby sme overili, či root split surrogate stromu je zároveň feature, ktorý RF považuje za dôležitý. Ak áno, strom nie je iba nezávislý jednoduchý model, ale naozaj zachytáva dôležitú časť RF logiky.
+Riziko surrogate prístupu: strom sa môže nezávisle „uchýliť“ k inej feature než RF — môže byť čitateľný, ale **logiku RF nezachytí**. Preto robíme cross-check pomocou `randomForest::varImpPlot`:
 
----
+1. Vytiahneme z RF zoznam features podľa **mean decrease in Gini** (RF interná dôležitosť feature).
+2. Porovnáme s root splitom a hornými splitmi surrogate stromu.
+3. Ak sa zhodujú, strom naozaj zachytáva to, čo RF považuje za dôležité.
 
-## 10. Obmedzenia a férové priznania
-
-### 10.1 SVM hyperparametre nie sú rozsiahlo tunované
-
-Používame fixné `C = 1`, `sigma = 0.1`. Rozsiahly grid search by bol drahý a zmenil by dôraz práce. Cieľom Scenára 2 je porovnať rodiny modelov, nie maximalizovať leaderboard.
-
-### 10.2 RF threshold by sa dal kalibrovať
-
-Random Forest by pravdepodobne vedel zlepšiť Specificity posunom threshold-u. Ale H1 porovnáva modely pri rovnakom 0.5 prahu, lebo proxy deployment má jednotný operačný bod.
-
-### 10.3 Surrogate strom nie je plná interpretácia RF
-
-Jeden strom nevie zachytiť všetky interakcie 300 stromov. Na Lexical vidno rozdiel medzi Tree AUC a RF AUC. Preto hovoríme, že surrogate je vizualizácia, nie náhrada.
-
-### 10.4 Subsample môže mať variabilitu
-
-Používame fixný seed a stratifikáciu. Výsledky sú reprodukovateľné v rámci notebooku. Pri inom subsample by čísla mohli mierne kolísať, ale veľkosť Lexical gapu je dosť veľká, aby hlavný záver nebol krehký.
+Pre Lexical: `NoOfOtherSpecialCharsInURL` je v top 3 RF importance **a** zároveň root surrogate stromu. Pre FullLite: `HasSocialNet` je v top RF importance **a** root stromu. Cross-check teda potvrdzuje, že surrogate nie je iba ľubovoľný jednoduchý model, ale skutočne reprezentuje rozhodovanie RF.
 
 ---
 
@@ -522,38 +521,6 @@ Niektoré modely, najmä Random Forest, by sa zlepšili. Ale porovnanie by už n
 ### Keby sme použili XGBoost
 
 XGBoost by bol ďalší silný neparametrický/boosting model, ale nebol potrebný pre test H1. Zadanie a dizajn porovnávajú reprezentatívne rodiny; RF, SVM-RBF a KNN pokrývajú tri rôzne typy neparametrického správania.
-
----
-
-## 12. Časté otázky komisie
-
-### Prečo hodnotíte championov podľa minSS a nie podľa AUC?
-
-Lebo proxy musí reálne rozhodnúť pri prahu 0.5. AUC je dobré na ranking, ale nezaručuje, že threshold 0.5 bude použiteľný. minSS penalizuje model, ktorý zlyhá na jednej strane.
-
-### Prečo je LDA s dobrým AUC stále problematická?
-
-LDA môže dobre zoradiť prípady, ale zle kalibrovať pravdepodobnosti. Pri prahu 0.5 potom blokuje príliš veľa legitímnych URL. V deployment-e je threshold správanie dôležité.
-
-### Prečo Scenár 4 používa RF a nie SVM, keď SVM vyhráva?
-
-Scenár 4 je o vizualizácii rozhodovacej logiky. RF je stromový ensemble a dá sa prirodzene aproximovať jedným surrogate stromom. SVM-RBF má rozhodovaciu hranicu v kernel priestore, ktorú je ťažšie vysvetliť jedným bežným stromovým diagramom.
-
-### Prečo surrogate strom trénujete na predikciách RF, nie na labeloch?
-
-Lebo cieľom nie je vytvoriť nový model, ale vysvetliť RF. Ak by sme strom trénovali na labeloch, bol by to samostatný CART model, nie vizualizácia RF správania.
-
-### Prečo neukazujete všetky tiery v Scenári 4?
-
-Lexical a FullLite reprezentujú dva dôležité extrémy: slabší URL-only signál a silný kombinovaný signál. Trust je príliš jednoduchý, Behavior nepridáva zásadne nový príbeh.
-
----
-
-## 13. Finálny záver Scenára 2 a 4
-
-Scenár 2 potvrdzuje H1: neparametrické modely majú najväčšiu výhodu na Lexical URL-only úlohe a táto výhoda mizne na silnejšom FullLite tieri. To presne zodpovedá EDA: slabšie individuálne URL features vyžadujú model, ktorý vie zachytiť ich kombinácie. Najlepší praktický kandidát je SVM-RBF na Lexical tieri.
-
-Scenár 4 dopĺňa interpretovateľnosť: Random Forest je presný, ale nepriehľadný, preto ho aproximujeme jedným surrogate stromom. Strom ukazuje hlavné rozhodovacie vzory RF, ale zároveň priznávame, že nedokáže nahradiť celý 300-stromový ensemble.
 
 ---
 
@@ -655,34 +622,6 @@ Krátka ústna verzia:
 
 ---
 
-## 15. Tier-by-tier hlboká interpretácia
-
-### 15.1 Lexical ako hlavný test schopnosti modelu
-
-Lexical je najzaujímavejší, lebo:
-
-- je najlacnejší,
-- má slabšie samostatné features,
-- obsahuje kolinearitu,
-- potrebuje interakcie.
-
-Ak by neparametrické modely mali byť niekde lepšie, je to práve tu. Výsledok to potvrdzuje.
-
-### 15.2 Trust ako jednoduchý binárny priestor
-
-Trust obsahuje málo features a veľa z nich sú binárne. Pri takom priestore nemá neparametrický model taký veľký priestor na objavovanie komplexných hraníc. Preto rozdiel modelových rodín nie je dramatický.
-
-### 15.3 Behavior bez near-leakerov
-
-Behavior je kompromis. Stále je obsahový a silnejší než Lexical, ale po odstránení near-leakerov už nie je triviálny. Je dobrý na overenie, či H1 nie je iba artefakt Lexical.
-
-### 15.4 FullLite ako koncový bod gradientu
-
-FullLite má dosť silný signál, aby aj parametrické modely fungovali veľmi dobre. Keď rozdiel medzi rodinami zmizne, nie je to problém, ale potvrdenie H1 gradientu:
-
-> Flexibilita modelu je najdôležitejšia, keď je feature tier slabší.
-
----
 
 ## 16. Preprocessing obhajoba do hĺbky
 
@@ -992,322 +931,5 @@ Povedať:
 Povedať:
 
 > SVM je kvalitný kandidát, ale menej interpretovateľný. Preto máme separátny Scenár 4, ktorý ukazuje vysvetliteľnosť na RF cez surrogate. V praxi by sa dali doplniť SHAP alebo permutation importance pre SVM.
+prečo sm
 
----
-
-## 27. Checklist pred obhajobou Scenára 2
-
-- Viem vysvetliť H1 bez matematických symbolov?
-- Viem vysvetliť minSS na príklade?
-- Viem povedať, prečo Lexical je najdôležitejší?
-- Viem odôvodniť 30k subsample?
-- Viem odôvodniť dva preprocessing recepty?
-- Viem odôvodniť každý zo šiestich modelov?
-- Viem vysvetliť, prečo SVM vyhral?
-- Viem vysvetliť, prečo RF nie je víťaz pri 0.5?
-- Viem vysvetliť, čo surrogate strom robí a nerobí?
-- Viem priznať limity bez paniky?
-
----
-
-## 28. Hlboké základy modelov pre obhajobu
-
-Táto časť je doplnková teoretická vrstva pre situácie, keď komisia chce vidieť, že rozumieme **prečo modely fungujú tak, ako fungujú**, nielen **že sme ich pustili**. Pre každý model uvádzame: princíp, čo presne sa „učí“, na čom je citlivý, a najmä — ako sa zmena hyperparametra prejaví na rozhodovacej hranici, výkone na trénovacích dátach a generalizácii. Pre SVM-RBF je samostatná detailná sekcia 29.
-
-### 28.1 Logistic Regression Ridge — princíp a hyperparametre
-
-**Princíp.** Logistická regresia priraďuje každému feature váhu (koeficient). Pre nový vstup spočíta vážený súčet `z = β₀ + β₁x₁ + β₂x₂ + …` a tento súčet pretlačí cez sigmoidálnu funkciu `σ(z) = 1 / (1 + e^(-z))`, ktorá ho premení na pravdepodobnosť medzi 0 a 1. Učenie znamená nájsť také váhy, aby pre phishing prípady bol `σ(z)` čo najbližšie k 1 a pre legitímne k 0. Optimalizuje sa **maximum-likelihood** — váhy, ktoré maximalizujú pravdepodobnosť pozorovaných dát.
-
-**Ridge zložka.** Ridge pridáva k optimalizovanej funkcii pokutu `λ × Σβᵢ²`. Pokuta penalizuje veľké váhy. Optimalizátor preto musí robiť kompromis: dobrý fit verzus malé váhy. Pri silnej kolinearite (čo je náš prípad — VIF > 1000 v Lexical) ridge zaručí, že váhy sa rozdelia približne rovnomerne medzi korelované features, namiesto aby sa skoro celá zhodila na jeden, ktorý sa pri novej dávke dát môže zmeniť o veľa.
-
-**Vplyv `lambda` (λ).**
-- `λ = 0` → klasická logistická regresia bez penalizácie. Pri kolinearite koeficienty „vybuchujú“ a sú nestabilné medzi splitmi.
-- `λ veľmi malé (napr. 0.001)` → minimálna stabilizácia, ale stále môže byť citlivá.
-- `λ = 0.01` (naša voľba) → mierne stiahnutie veľkých koeficientov, model je stabilný, fit zostáva kvalitný.
-- `λ veľké (napr. 10)` → koeficienty sú stiahnuté blízko k nule, model sa približuje konštantnej predikcii. AUC klesá, model „podfituje“.
-
-**Vplyv `alpha`.** `alpha` v `glmnet` je mixing parameter medzi L2 a L1 penalizáciou.
-- `alpha = 0` (čistý ridge) — drží všetky features, len ich váhy stláča.
-- `alpha = 0.5` (elastic-net) — kombinuje stláčanie s feature selection.
-- `alpha = 1` (čistý lasso) — niektoré koeficienty hodí presne na nulu.
-
-V Scenári 2 zámerne **nemeníme alpha**, lebo nechceme robiť feature selection (to je úloha Scenára 3). Chceme len stabilizáciu pri fixnom predictor poole.
-
-**Prečo presne LR-Ridge a nie obyčajná LR.** EDA nám ukázala, že `URLLength`, `NoOfLettersInURL`, `NoOfDegitsInURL` a podobné spojité dĺžkové features sú silno korelované. Obyčajná logistická regresia by pri takejto kolinearite produkovala koeficienty, ktoré sa pri minimálnom pohybe v dátach výrazne menia. To by Scenár 2 spravilo nedôveryhodným, lebo by sme nevedeli, či rozdiel medzi modelmi je skutočný alebo iba náhodný posun koeficientov LR. Ridge tento problém technicky odstráni a nepridáva žiadnu pridanú interpretačnú vrstvu.
-
-### 28.2 LDA — princíp a hyperparametre
-
-**Princíp.** LDA (Linear Discriminant Analysis) si predstavuje každú triedu ako mnohorozmerný **gaussovský oblak** s vlastným priemerom a spoločnou kovariančnou maticou. Hľadá lineárnu hranicu, ktorá najlepšie oddeľuje stredy oblakov vzhľadom na to, ako sú „rozčapené“. Po fitnutí má model dva priemery (jeden pre Phishing, jeden pre Legitimate) a jednu kovariančnú maticu. Predikcia novej URL spočíva v tom, kam je „bližšie“ — meraná Mahalanobisovou vzdialenosťou — a doplní sa to o prior pravdepodobnosti tried.
-
-**Učené parametre.** Priemer každej triedy a spoločná kovariančná matica. Žiadny tuning hyperparameter v zmysle SVM-`C`.
-
-**Vplyv volieb.**
-- **Prior.** Ak vynútime iný prior než tried-relatívnu frekvenciu, hranica sa posunie smerom k triede s nižším priorom (model je „prísnejší“ k nej). My držíme default `pi = empirický pomer tried`.
-- **Predpoklad spoločnej kovariancie.** Keby sme prešli na **QDA**, každá trieda by dostala vlastnú kovarianciu. To je flexibilnejšie, ale pri korelovaných features s veľkým počtom dimenzií veľmi nestabilné. Pri 13 Lexical features by QDA odhadovala 2×13×13 parametrov vs LDA 13×13.
-- **Standardizácia.** Predpoklad gaussovských tried je citlivý na šikmé features. Preto musíme aplikovať `log1p` + `center/scale`, inak by LDA bola úplne mimo, čo aj historicky pri prvom pokuse bez log transformácie ukazovala.
-
-**Prečo LDA, keď nie je víťaz.** LDA je klasický parametrický baseline. Pri obhajobe je dôležitá ako kontrast: ukazuje, čo zvládne jednoduchý lineárny model s gaussovským predpokladom. Ak by LDA vyhrala, znamenalo by to, že tu žiaden interakčný signál nie je. To, že LDA dosiahne dobré AUC, ale slabú Specificity pri 0.5, je informatívny výsledok — model vie zoradiť, ale nevie kalibrovať pre reálne rozhodovanie.
-
-### 28.3 Naive Bayes — princíp a hyperparametre
-
-**Princíp.** Naive Bayes pre každú triedu odhadne, akú má distribúciu každý feature samostatne (`P(xᵢ | Phishing)` a `P(xᵢ | Legitimate)`). Pri predikcii všetky tieto pravdepodobnosti **vynásobí** a aplikuje Bayesov vzorec:
-
-```
-P(Phishing | x) ∝ P(Phishing) × ∏ P(xᵢ | Phishing)
-```
-
-„Naive“ predpoklad je, že features sú **podmienene nezávislé** — t.j. po zafixovaní triedy nie sú medzi sebou nijako previazané. Toto v reálnych dátach skoro nikdy neplatí.
-
-**Vplyv `usekernel`.**
-- `FALSE` → Gaussian NB. Každú spojitú feature aproximuje jediným gaussom (jeden priemer + jedna SD pre triedu). Rýchle, ale ak má feature dve módy alebo dlhý chvost, rozdelenie sedí zle.
-- `TRUE` → kernel-density NB. Distribúciu odhadne neparametricky (ako vyhladený histogram). Flexibilnejšie pre nesymetrické features, čo je presne náš prípad. Cena je vyššia výpočtová náročnosť.
-
-**Vplyv `fL` (Laplace smoothing).** Pre kategoriálne features (binárky) `fL = 1` znamená, že keď v tréningu nikto z triedy nemal `IsDomainIP = 1`, NB napriek tomu nepriradí pravdepodobnosti nulu — pripočíta jednu „pseudo-pozorovanie“. Bez toho by jediný neviditeľný kombinačný stav vynuloval celé násobenie a znehodnotil predikciu. `fL = 0` by znamenalo nekorigované MLE odhady.
-
-**Vplyv `adjust`.** Multiplikátor šírky kernelu. `adjust = 1` je default. Väčšie hodnoty kernel viac vyhladzujú (rozdelenie je „rozliatejšie“), menšie ho robia detailnejšie a zubatejšie.
-
-**Prečo NB, keď predpoklad neplatí.** EDA ukázala silné korelácie v Lexical poole. NB ich nedokáže reflektovať, lebo predpokladá nezávislosť. Keď ho na takom poole pustíme, započíta podobný signál (dĺžka, počet písmen, počet znakov) viackrát ako keby to bolo niečo nezávislé. Výsledok: skoro celý dataset zatlačí smerom k phishingu. To je presne to, čo vidíme v testoch — Sensitivity skoro 1, Specificity dramaticky nízka. Tento výsledok nie je bug, je **interpretovateľný dôsledok zlomeného predpokladu** a do obhajoby patrí ako kontrolný experiment.
-
-### 28.4 Random Forest — princíp a hyperparametre
-
-**Princíp.** RF natrénuje veľa rozhodovacích stromov a finálnu predikciu robí hlasovanie (alebo priemer pravdepodobností). Každý strom je trénovaný na **bootstrap vzorke** (náhodný výber s opakovaním z trénovacích dát) a pri každom splite vidí iba **náhodnú podmnožinu features** veľkosti `mtry`. Tieto dve nezávislosti zaručia, že stromy sú odlišné a ich chyby sa pri hlasovaní spriemerujú.
-
-**Vplyv `ntree`.**
-- Malé `ntree` (napr. 10) → hlasovanie je nestabilné, výsledok kolíše medzi behmi.
-- Stredné `ntree` (50–200) → výsledok začína byť stabilný, ale ešte sa zlepšuje.
-- `ntree = 300` (naša voľba) → zóna saturácie pre náš dataset, ďalší strom mení AUC iba o desatinky percenta.
-- Veľmi veľké `ntree` (1000+) → marginálne zlepšenie, lineárny nárast času, žiadna nová informácia.
-
-Dôležité: **`ntree` neovplyvňuje overfitting** v klasickom zmysle. Veľa stromov len zníži variancu hlasovania.
-
-**Vplyv `mtry`.** Toto je hlavný regularizačný hyperparameter RF.
-- `mtry = p` (všetky features) → každý strom je takmer identický, pretože vždy si zvolí ten najlepší globálny split. Stromy sú silne korelované, RF stráca diverzitu, hlasovanie nie je viac „inteligentné“ než jeden strom.
-- `mtry = √p` (default pre klasifikáciu, naša voľba) → kompromis. Pri Lexical (13 features) `mtry = 3`, pri FullLite (34 features) `mtry = 5`. Dosť na to, aby mal každý strom z čoho vyberať silný feature, a dosť na to, aby boli stromy odlišné.
-- `mtry = 1` → každý strom vidí len jeden feature pri každom splite. Stromy sú extrémne odlišné, ale tiež extrémne slabé. Variancia hlasovania je nízka, ale bias jednotlivých stromov je vysoký.
-
-**Vplyv hĺbky stromov (`maxnodes`, `nodesize`).** V `randomForest` výsledné stromy idú do veľmi hlbokej hĺbky (v default mode bez pruning-u). To je zámerné — preto RF potrebuje hlasovanie na zníženie variance. Ak by sme nasilu hĺbku obmedzili, jednotlivé stromy by boli slabšie a strácali by sa interakcie.
-
-**Prečo RF.** Pri Lexical signáli je rozhodovacia logika kombinatorická („dlhá URL **A** veľa číslic **A** veľa subdomén“). Stromy zachytávajú interakcie prirodzene, lebo každý split rozdelí priestor na osi jedného feature, a v ďalších úrovniach sa na túto časť priestoru aplikuje ďalší split iného feature. Bagging + náhodný `mtry` znížia varianciu týchto interakcií.
-
-### 28.5 KNN — princíp a hyperparametre
-
-**Princíp.** KNN sa neučí explicitnú rozhodovaciu hranicu. Pri predikcii novej URL spočíta vzdialenosť k všetkým tréningovým bodom, vyberie `k` najbližších a hlasuje. „Hranica“ vzniká implicitne podľa toho, kde sa hlasovanie prevažuje.
-
-**Vplyv `k`.**
-- `k = 1` → predikcia je trieda jediného najbližšieho suseda. Extrémna citlivosť na šum, model si pamätá každý outlier.
-- `k = 5` → hladšie, ale stále lokálne.
-- `k = 25` (naša voľba) → kompromis. Lokálne susedstvo rozhoduje, ale šum jedného alebo dvoch bodov nepreklopí výsledok.
-- `k = 100+` → veľmi vyhladené, model „zabúda“ na lokálne rozdiely a preferuje globálnu väčšinu.
-
-**Vplyv škálovania features.** KNN je skoro vždy závislý od distance metriky. Ak by sme nedali `log1p` + `center/scale`, feature s najväčším rozsahom (napr. `URLLength` 0–500) by úplne dominoval vzdialenosť, ostatné by boli ignorované. Naše scaling preto nie je kozmetika.
-
-**Vplyv jitteru.** Pri Trust tieri máme 7 prevažne binárnych features. Veľa URL má úplne identický feature vektor → KNN má „too many ties“ a `caret::knn3` padne. Jitter so SD `1e-3` rozbije ties bez toho, aby reálne zmenil susedstvá (binárky stále budú blízko 0 alebo 1).
-
-**Vplyv distance metriky.** Default je Euclidean. Mohli by sme použiť Manhattan, Mahalanobis, kosinusovú podobnosť — každá by dala iné susedstvá. Pri štandardizovaných číselných features je Euclidean rozumný default a nemá zmysel ho meniť bez konkrétneho dôvodu.
-
-**Nevýhoda KNN pri inferencii.** Po natrénovaní KNN nemá kompaktnú reprezentáciu — celý tréningový set musí byť v pamäti a každá nová predikcia vyžaduje výpočet vzdialenosti k 24k bodom. Pre proxy s vysokým provozom je to praktická prekážka.
-
-### 28.6 Surrogate `rpart` strom — princíp a hyperparametre
-
-**Princíp.** CART strom rekurzívne delí priestor binárnymi splitmi tvaru `xᵢ < t`. Pri každom uzle vyberie ten split, ktorý najviac zníži Gini impurity (alebo entrópiu). V Scenári 4 sa tento strom učí **cieľovú premennú = predikcie RF**, nie pôvodné labely. Preto nehovorí „čo je phishing“, ale „ako rozhoduje RF“.
-
-**Vplyv `maxdepth`.**
-- `maxdepth = 3` → strom má najviac 8 listov. Veľmi čitateľný, ale málokedy stačí na zachytenie 300-stromového RF.
-- `maxdepth = 5` → 32 listov, dobrý kompromis pre vizualizáciu.
-- `maxdepth = 7` (max v gridi) → 128 listov, lepšia fidelity, ale strom už nie je čitateľný na projektore.
-
-**Vplyv `cp` (complexity parameter).** Pruning prag — split sa povolí len ak zníži chybu o aspoň `cp`-násobok pôvodnej chyby.
-- `cp = 1e-2` → silne prerezáva, malé stromy.
-- `cp = 1e-3` → stredné prerezávanie.
-- `cp = 1e-4` → minimálne prerezávanie, strom rastie skoro do `maxdepth`.
-
-**Vplyv `minbucket`.** Minimálny počet pozorovaní v liste. Veľké hodnoty (napr. 100) bránia tomu, aby strom robil rozhodnutia na základe pár outlierov; malé (napr. 10) povolia veľmi špecifické pravidlá.
-
-**Vplyv cap `≤ 15 listov`.** Tento cap nemá metodický pôvod, je čisto **vizualizačný**. Strom s 30+ listami môže mať vyššiu fidelity, ale na projektore ho nikto neprečíta. Zámerne obetujeme nejaký bod fidelity, aby vizualizácia fungovala.
-
----
-
-## 29. SVM-RBF — detailná hĺbková obhajoba
-
-Toto je najdôležitejšia časť pre obhajobu, lebo SVM-RBF je deployment víťaz Scenára 2 a komisia sa pravdepodobne najviac pýta práve naň.
-
-### 29.1 Základná intuícia bez matematiky
-
-SVM (Support Vector Machine) hľadá medzi triedami **najširšiu možnú „uličku“**. V dvoch dimenziách si to predstavte ako čiaru, ktorá rozdeľuje phishing a legit body, ale nie hocijakú — tú, okolo ktorej je z oboch strán **maximálne voľné okolie**. Body, ktoré tesne dotýkajú túto uličku, sa volajú **support vectors** a iba tieto body určujú kde čiara leží. Ostatné body sú nepodstatné.
-
-V realite však triedy nie sú lineárne oddeliteľné jednou čiarou. Preto SVM používa **kernel trick** — body sa „virtuálne“ premietnu do priestoru s viac dimenziami, kde sú lineárne oddeliteľné. RBF (Radial Basis Function) kernel je špecifická voľba, ktorá zodpovedá premietnutiu do nekonečno-rozmerného priestoru, kde sa hranica skladá z **gaussovských kopcov** okolo support vectors.
-
-Laická obhajobová formulácia:
-
-> SVM-RBF si pred každý phishing support vector v okolí postaví guľový „výbuch“, ktorý hovorí: tu je phishing. To isté pre legit. Tieto výbuchy sa skladajú a tvoria zakrivenú hranicu, ktorá obtiaha komplikované zhluky bodov.
-
-### 29.2 Matematický základ pre prípadnú techničku otázku
-
-Optimalizačný problém pre SVM klasifikáciu (v duálnej forme so soft-margin):
-
-```
-maximalizuj:  Σαᵢ - ½ ΣᵢΣⱼ αᵢαⱼ yᵢyⱼ K(xᵢ, xⱼ)
-podmienky:    0 ≤ αᵢ ≤ C,   Σαᵢyᵢ = 0
-```
-
-kde:
-- `αᵢ` sú Lagrangeove násobky pre každý tréningový bod,
-- `yᵢ ∈ {−1, +1}` je label,
-- `K(xᵢ, xⱼ)` je **kernel funkcia**,
-- `C` je regularizačný parameter (margin vs chyby).
-
-Pre RBF kernel:
-
-```
-K(xᵢ, xⱼ) = exp(−σ × ‖xᵢ − xⱼ‖²)
-```
-
-kde `σ` (v `kernlab` sa nazýva `sigma`, v iných knižniciach `gamma`) je inverzná „šírka“ gaussovského zvonca okolo bodu. Pri obhajobe nemusíte recitovať tento vzorec, ale je dobré vedieť, že:
-
-- kernel meria **podobnosť** dvoch bodov,
-- veľká vzdialenosť → podobnosť padá k nule,
-- `sigma` riadi, **ako rýchlo** podobnosť padá.
-
-### 29.3 Hyperparameter `C` — soft-margin a tolerancia chýb
-
-`C` je penalizácia za to, že tréningový bod leží na zlej strane hranice alebo vnútri uličky.
-
-| `C` | Čo sa stane | Riziko |
-|---|---|---|
-| `C → 0` | Model toleruje skoro všetky chyby. Hranica je veľmi hladká, široká ulička. | **Underfitting** — model nezachytí ani jasné rozdiely. |
-| `C = 0.1` | Mäkký margin, model dovolí veľa chýb. | Nízky výkon na komplexnejších problémoch. |
-| `C = 1` (naša voľba) | Štandardný kompromis. Dovolí pár chýb, ale tlačí na čisté oddelenie. | Pri dobre škálovaných dátach je to overený default. |
-| `C = 10` | Tvrdý margin. Model tlačí na takmer perfektné oddelenie. Hranica sa kriví okolo outlierov. | **Overfitting** — model zapamätáva šum. |
-| `C → ∞` | Hard-margin SVM. Žiadna chyba na tréningu nie je dovolená. Existuje len ak sú dáta lineárne oddeliteľné v kernelovom priestore. | Extrémny overfitting alebo neexistencia riešenia. |
-
-**Geometrická intuícia.** Predstavte si, že SVM kreslí cestu medzi dvoma hradbami bodov. `C` určuje, ako veľmi sa cesta smie ohýbať okolo jednotlivých bodov. Pri nízkom `C` je cesta širokou diaľnicou, ktorá ignoruje pár áut; pri vysokom `C` je úzkym chodníčkom, ktorý sa kľukatí, aby obtiahol každý bod.
-
-**Prečo `C = 1` u nás.** Pri štandardizovaných features (`center/scale`) sú typické vzdialenosti medzi bodmi rádovo `1`. `C = 1` znamená, že chyba veľkosti jednej smerodajnej odchýlky je trestaná porovnateľne s margin objective. Je to **konvenčný štartovací bod** pred ladením, a pretože sa nám pri tomto nastavení podarilo prejsť cez všetky H1 prahy s veľkou rezervou, neexistovala metodicky čistá motivácia tunovať ďalej (tunovanie len `C` by zvýhodnilo SVM oproti ostatným modelom, ktorých hyperparametre sme tiež držali fixné).
-
-### 29.4 Hyperparameter `sigma` — šírka kernelu
-
-`sigma` riadi, **ako lokálne** rozhoduje SVM. Je to inverzia šírky gaussovského kernelu — väčšia `sigma` znamená **užší** kernel (vplyv bodu rýchlejšie padá so vzdialenosťou).
-
-| `sigma` | Čo sa stane | Riziko |
-|---|---|---|
-| `sigma → 0` | Kernel je veľmi široký, každý bod ovplyvňuje takmer celý priestor. Hranica je takmer lineárna. | **Underfitting.** Pri lineárne neoddeliteľných dátach nemá kernel trik žiaden zmysel. |
-| `sigma = 0.01` | Široký kernel, hladká globálna hranica. | Pri komplexných hraniciach môže podfitovať. |
-| `sigma = 0.1` (naša voľba) | Stredne lokálny kernel. Vie sa kriviť, ale nie okolo každého bodu. | Pri 1/p ≈ 1/13 ≈ 0.077 (default `gamma` v sklearn pre `p = 13`) je 0.1 rozumne blízko. |
-| `sigma = 1` | Úzky kernel. Hranica sa kriví okolo malých zhlukov. | Začínajúci overfitting. |
-| `sigma → ∞` | Každý support vector vplýva iba na seba. Hranica je tisíce malých „bublín“ okolo trénovacích bodov. | **Extrémny overfitting** — model si zapamätá presne tréning a generalizuje zle. |
-
-**Geometrická intuícia.** Každý support vector je „lampa“, ktorej svetlo dopadá na okolie. `sigma` určuje, ako ďaleko lampa svieti.
-- Široký kernel (malé `sigma`) → susedné lampy sa prelínajú, krajinu osvetľuje plynulé svetlo, hranica je mäkký záhyb.
-- Úzky kernel (veľké `sigma`) → každá lampa svieti len blízko seba, krajina je rozdrobená na ostrôvky svetla, hranica je hrboľatá.
-
-**Vzťah `C` a `sigma`.** Sú v interakcii:
-- vysoké `C` + vysoké `sigma` → extrémny overfitting (model si zapamätá tréning úplne presne),
-- nízke `C` + nízke `sigma` → underfitting (skoro lineárna hladká hranica),
-- vyvážené stredné hodnoty → dobrá generalizácia.
-
-Pri Lexical po `log1p + center/scale` má `(C=1, sigma=0.1)` empiricky výborný výkon, lebo features sú normalizované na jednotkovú škálu a 13-rozmerný priestor nie je nadmerne riedky.
-
-### 29.5 Prečo presne RBF a nie iný kernel
-
-`kernlab` ponúka aj `linear`, `polynomial`, `tanh` (sigmoid), `laplacedot`, `besseldot` a iné kernely. Prečo RBF:
-
-1. **Univerzálnosť.** RBF s vhodnou `sigma` dokáže aproximovať takmer ľubovoľnú spojitú funkciu (univerzálny aproximátor). Polynomiálny kernel je obmedzený stupňom `d`.
-2. **Lokalita.** RBF je „lokálny“ — bod ovplyvňuje iba blízke okolie. Pre URL phishing dáva zmysel: dva URL s podobnými lexikálnymi znakmi sa správajú podobne, vzdialené URL sú prakticky nezávislé.
-3. **Default v praxi.** RBF je default pre väčšinu SVM implementácií, lebo je robustný a nemá veľa hyperparametrov (iba `sigma`).
-4. **Kompatibilita s `log1p + scale`.** Po našom preprocessingu sú vzdialenosti v rozumnej škále, čo je presne to, čo RBF potrebuje.
-
-Linear kernel by bol ekvivalentom logistickej regresie — predpokladá lineárnu hranicu. EDA nám práve hovorí, že lineárna hranica nestačí.
-
-Polynomial kernel by bol možný, ale mení tri hyperparametre (`degree`, `scale`, `offset`) a nemá lokalitu. Pre tabulárne dáta sa používa zriedkavo.
-
-### 29.6 Prečo SVM-RBF vyhráva práve na Lexical
-
-Tento argument je obhajobové jadro. Lexical signál má štyri vlastnosti, ktoré SVM-RBF zvláda lepšie než iné modely:
-
-1. **Slabé jednotkové signály.** EDA: žiadny Lexical feature samostatne nemá veľmi vysokú SMD. Logistická regresia, ktorá hľadá lineárnu kombináciu, nemá dosť silných „lineárnych smerov“.
-2. **Bohatý kombinatorický signál.** Phishing nemá jeden definujúci atribút; má kombinácie (dlhá URL + veľa číslic + podivné špeciálne znaky). RBF kernel zachytáva interakcie implicitne cez podobnosť bodov v originálnom priestore.
-3. **Korelované features.** Ridge regularizácia stabilizuje LR, ale stále hľadá lineárnu hranicu. SVM s RBF nepotrebuje rozkladať váhy medzi korelovanými features — iba meria podobnosť celých vektorov.
-4. **Stredná dimenzionalita.** 13 features po štandardizácii nie je príliš málo (RBF by sa stratil v 1D) ani príliš veľa (curse of dimensionality), je to ideálny rozsah pre RBF.
-
-Random Forest má podobné výhody (interakcie), ale jeho hlasovacia pravdepodobnosť pri prahu 0.5 nie je tak dobre kalibrovaná ako rozhodovacia funkcia SVM. KNN je tiež podobnostný model, ale je inferenčne drahý.
-
-### 29.7 Slabiny SVM-RBF, ktoré priznávame
-
-1. **Interpretovateľnosť.** SVM-RBF nemá explicitné koeficienty per feature. Variable importance sa robí post-hoc cez permutation importance alebo SHAP, čo sme v projekte nerobili. Preto Scenár 4 vysvetľuje RF, nie SVM.
-2. **Kalibrácia pravdepodobností.** Default Platt scaling v `kernlab` dáva rozumné, ale nie ideálne pravdepodobnosti. Pri 0.5 prahu nám to v Lexical nevadí, ale v iných deployment scenároch by sme mali kalibráciu overiť.
-3. **Výpočtová náročnosť trénovania.** O(n²)–O(n³) je dôvod, prečo používame 30k subsample a nie celý 235k dataset. Inferencia je rýchlejšia (proporčná počtu support vectors).
-4. **Tuning hyperparametrov je drahý.** Grid search nad `(C, sigma)` × CV by bol výpočtovo extrémne náročný. Preto držíme fixné rozumné defaulty.
-
-Obhajobová veta:
-
-> SVM-RBF je deployment kandidát, ale nie interpretačný kandidát. Tento rozdiel akceptujeme a v Scenári 4 vysvetľujeme RF, ktorý je síce o trochu slabší pri 0.5, ale prirodzene stromový.
-
-### 29.8 Čo by sa stalo, keby sme zmenili `(C, sigma)`
-
-| Zmena | Predpokladaný efekt |
-|---|---|
-| `C = 0.1, sigma = 0.1` | Mäkší margin, hladšia hranica. AUC by mierne kleslo, Sensitivity/Specificity by sa priblížili k LR-Ridge výsledkom. |
-| `C = 10, sigma = 0.1` | Tvrdší margin, model si bude pamätať detaily. Train AUC blízko 1, test AUC pravdepodobne mierne klesne. Risk overfitting na konkrétnu sub-vzorku. |
-| `C = 1, sigma = 1` | Úzky kernel, hranica sa rozpadne na lokálne ostrovy. Test Specificity klesne, lebo legit body v okolí phishingových sa preklopia. |
-| `C = 1, sigma = 0.01` | Široký kernel, takmer lineárna hranica. Výsledok blízko SVM-Linear / LR. |
-| `C = 100, sigma = 10` | Patologický overfitting — train accuracy ≈ 1, test accuracy ≈ random. |
-
-Tento prehľad je dobré mať v hlave: ak sa komisia opýta „čo keby ste zvýšili sigma?“, viete povedať konkrétny smer dopadu, nie len „bolo by to iné“.
-
-### 29.9 Ako vysvetliť SVM-RBF za 30 sekúnd
-
-> SVM-RBF kreslí medzi triedami uličku s čo najväčšou rezervou. Lineárnu uličku by často nenašiel, preto používa RBF kernel — predstaví si, že okolo každého trénovacieho bodu je gaussovský zvon a rozhoduje sa podľa toho, či nový bod padne do oblasti, kde dominujú phishingové zvony alebo legitímne. Parameter `C` riadi, ako prísne má model trestať tréningové chyby; parameter `sigma` určuje, ako lokálne tieto zvony pôsobia. Pre Lexical signál, kde phishing nemá jeden definujúci atribút ale kombináciu znakov, je RBF prirodzená voľba a vyhráva s najlepším operačným bodom pri 0.5.
-
----
-
-## 30. Detailné odôvodnenie výberu modelov pre H1
-
-H1 nie je „nájsť najlepší model“, ale **otestovať, či je rozdiel medzi rodinami modelov závislý od tieru**. Aby tento test dával zmysel, výber modelov musí spĺňať tri vlastnosti:
-
-1. **Reprezentatívnosť rodín.** Každá strana (parametrická vs neparametrická) musí mať modely, ktoré reprezentujú jej typický prístup, nie marginálne varianty.
-2. **Diverzita vnútri rodiny.** Tri parametrické modely musia byť dosť odlišné, aby keby vyhrali rovnako, vedeli sme, že rodina je obmedzená — nielen jeden konkrétny model.
-3. **Férovosť.** Žiadny model nesmie byť nasadený s extrémne vyladenými parametrami a iný s defaultmi; všetky majú konvenčné, EDA-podložené nastavenia.
-
-### Parametrická rodina — prečo presne LR + LDA + NB
-
-- **Logistic Regression (Ridge).** Najpoužívanejší klasifikátor v praxi. Učí sa lineárnu kombináciu features. Ridge rieši kolinearitu, ktorú v Scenári 2 nemôžeme ignorovať, ale neeviuje feature selection.
-- **LDA.** Klasický generatívny model s gaussovským predpokladom. Má iné teoretické pozadie než LR (modeluje `P(x|y)` namiesto `P(y|x)`), ale výsledná hranica je tiež lineárna. Dôležitá ako kontrast: ak by LR a LDA dopadli rovnako, vieme, že lineárna hranica nestačí; ak by jeden vyhral, ide o vlastnosť konkrétneho modelu.
-- **Naive Bayes.** Simulácia „čo sa stane, keď zlomíme nezávislostný predpoklad“. Bez NB by parametrická rodina vyzerala ako dvojica s dobrým AUC, len rozdielnou kalibráciou. NB pridáva „cenu zlomeného predpokladu“ a komisia vidí, že parametrické modely nie sú homogénna skupina.
-
-### Neparametrická rodina — prečo presne RF + SVM-RBF + KNN
-
-- **Random Forest.** Stromový ensemble, najpopulárnejší neparametrický model pre tabulárne dáta. Implicitne zachytáva interakcie, robustný voči preprocessingu.
-- **SVM-RBF.** Geometricky-kernelový prístup. Úplne iná matematika než RF — RF rozdeľuje priestor osovými splitmi, SVM ho premietne do kernel priestoru a hľadá maximálny margin. Ak by oba vyhrali, vieme, že neparametrické modely sú robustne lepšie. Ak by jeden výrazne vyhral, mali by sme objasňovať prečo.
-- **KNN.** Najjednoduchší neparametrický model bez explicitnej rozhodovacej hranice. Cash test: ak ani KNN, ktorý sa „neučí“ nič okrem uloženia trénovacích bodov, neprehrá s parametrickými, je to silný argument pre H1.
-
-### Modely, ktoré sme zámerne nezahrnuli a prečo
-
-- **XGBoost / LightGBM.** Bol by silný neparametrický model, ale do H1 nepridáva nový typ argumentu — RF už pokrýva stromový boosting/bagging svet. Pridanie by len rozriedilo porovnanie. Je to legitimný follow-up.
-- **Neural network (MLP).** Tabelárne dáta majú zvyčajne lepšie výsledky s gradient boostingom alebo SVM. NN by vyžadoval ladenie architektúry, čo nie je v scope projektu.
-- **QDA.** Mohol byť tretí parametrický baseline, ale pri korelovaných features je nestabilný a NB pokrýva „naivný“ koniec parametrickej škály lepšie.
-- **Logistic regression bez regularizácie.** EDA-vylúčená zo zoznamu kvôli VIF > 1000.
-- **SVM-Linear.** V kerneli by spadol blízko k LR. Nepridáva metodicky novú informáciu.
-
----
-
-## 31. Detailné odôvodnenie hyperparametrov v Scenári 2
-
-Tabuľka, ktorú mám pripravenú pre prípadnú detailnú otázku:
-
-| Model | Parameter | Hodnota | Odôvodnenie | Aký by bol efekt zmeny |
-|---|---|---|---|---|
-| LR-Ridge | `alpha` | 0 | Čistý ridge, nie feature selection. | `alpha = 1` by hodil features, čo nepatrí do Scenára 2. |
-| LR-Ridge | `lambda` | 0.01 | Mierne stiahnutie pri VIF > 1000. | `0` → nestabilita; `1` → underfitting, AUC klesá. |
-| LDA | (žiadny tuning) | — | LDA nemá hlavný hyperparameter. | Iné prior alebo QDA by zmenili hranicu/stabilitu. |
-| NB | `usekernel` | TRUE | Lexical features nie sú gaussovské. | FALSE → ešte horší fit pre šikmé features. |
-| NB | `fL` | 1 | Laplace smoothing pre 0-počty. | 0 → riziko zero-probability v test sete. |
-| NB | `adjust` | 1 | Default kernel bandwidth multiplikátor. | >1 vyhladí, <1 zaostrí. |
-| RF | `ntree` | 300 | Saturácia AUC pre náš dataset. | Menej → variabilita; viac → marginálny zisk. |
-| RF | `mtry` | sqrt(p) | Klasifikačná heuristika. | Vyššie → korelované stromy; nižšie → slabé stromy. |
-| SVM-RBF | `C` | 1 | Štandardný kompromis pre štandardizované features. | Vyššie → overfitting; nižšie → underfitting. |
-| SVM-RBF | `sigma` | 0.1 | Blízko 1/p ≈ 0.077, dobrý lokálnosť/hladkosť mix. | Vyššie → patchy hranica; nižšie → skoro lineárna. |
-| KNN | `k` | 25 | Stabilný kompromis. | <10 → šum; >50 → vyhladenie reálnych rozdielov. |
-| KNN | `jitter sd` | 1e-3 | Rozbije ties bez zmeny zmyslu. | Väčšie → mení binárne hodnoty; menšie → ties zostanú. |
-| Surrogate | `maxdepth` | 3–7 | Spektrum čitateľnosti. | <3 → triviálne; >7 → na projektore nečitateľné. |
-| Surrogate | `cp` | 1e-4..1e-2 | Rôzne sily prerezávania. | Vyššie → menšie stromy; nižšie → väčšie. |
-| Surrogate | leaves cap | 15 | Vizualizačné kritérium. | Bez capu → fidelity vyššie, čitateľnosť nižšia. |
