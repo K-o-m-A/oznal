@@ -502,6 +502,72 @@ Riziko surrogate prístupu: strom sa môže nezávisle „uchýliť“ k inej fe
 
 Pre Lexical: `NoOfOtherSpecialCharsInURL` je v top 3 RF importance **a** zároveň root surrogate stromu. Pre FullLite: `HasSocialNet` je v top RF importance **a** root stromu. Cross-check teda potvrdzuje, že surrogate nie je iba ľubovoľný jednoduchý model, ale skutočne reprezentuje rozhodovanie RF.
 
+### 9.11 Čo je najdôležitejšie obhájiť v Scenári 4
+
+Scenár 4 môže pôsobiť mätúco, lebo v Scenári 2 ako deploymentový víťaz vychádza SVM-RBF, ale v Scenári 4 vysvetľujeme Random Forest. Treba to povedať otvorene:
+
+> SVM-RBF je náš najlepší URL-only deployment kandidát podľa operačných metrík, ale nie je najlepší kandidát na jednoduchú vizualizáciu rozhodovania. RF je o niečo slabší pri prahu 0.5, ale je stromový ensemble, takže jeho rozhodovanie sa dá prirodzene aproximovať jedným čitateľným stromom.
+
+Rozdiel medzi Scenárom 2 a 4:
+
+| Scenár | Primárna otázka | Primárna metrika | Výstup |
+|---|---|---|---|
+| Scenár 2 | Ktorá modelová rodina funguje najlepšie na tieroch? | `minSS`, AUC, Sens/Spec | SVM-RBF ako najlepší Lexical deployment kandidát |
+| Scenár 4 | Dá sa správanie komplexného modelu vysvetliť zrozumiteľne? | fidelity surrogate stromu voči RF | čitateľný strom ako portrét RF logiky |
+
+Tým pádom Scenár 4 **nemení víťaza zo Scenára 2**. Je to interpretačný doplnok: ukazuje, aké pravidlá používa silný stromový model, nie že tento strom máme nasadiť namiesto SVM.
+
+### 9.12 Fidelity vs accuracy — najčastejšia pasca
+
+Pri surrogate strome sa komisia môže opýtať, prečo riešime fidelity namiesto accuracy. Krátka odpoveď:
+
+> Lebo surrogate strom sa neučí ground-truth label, ale predikcie RF. Jeho úloha nie je byť najlepší klasifikátor, ale čo najvernejšie napodobniť RF tak, aby sa dal nakresliť a vysvetliť.
+
+Preto sú dve rôzne otázky:
+
+- **Accuracy/AUC voči skutočnému labelu:** aký dobrý klasifikátor je samotný strom.
+- **Fidelity voči RF:** ako dobre strom kopíruje rozhodnutia RF.
+
+V Scenári 4 je hlavná práve fidelity. Ak má strom vysokú fidelity, môžeme jeho splity čítať ako zjednodušený portrét RF. Ak má strom nižšiu AUC než RF, nie je to problém — práve preto ho nenazývame náhradou RF.
+
+### 9.13 Ako strom vysvetliť za 30 sekúnd
+
+Použiteľná ústna verzia:
+
+> Natrénovali sme Random Forest ako teacher model. Potom sme na jeho predikciách natrénovali jeden malý `rpart` strom. Strom teda neukazuje celú komplexitu RF, ale jeho najčitateľnejšiu aproximáciu. Na Lexical tieri začína splitom `NoOfOtherSpecialCharsInURL`, čo sedí s intuíciou phishing URL: veľa špeciálnych znakov, číslic a subdomén. Na FullLite sa root zmení na Trust signál `HasSocialNet`, čo ukazuje, že keď model dostane silnejšie stránkové/metadátové signály, nemusí sa opierať iba o komplikovanú URL štruktúru.
+
+Ak treba priznať limit:
+
+> Surrogate strom je zjednodušenie. Každý jeden strom zahodí časť RF logiky. Preto sme nastavili cap 15 listov a reportujeme fidelity — aby bolo jasné, koľko vernosti obetujeme za čitateľnosť.
+
+### 9.14 Prečo cap 15 listov nie je svojvoľný trik
+
+Cap 15 listov nie je optimalizačný trik na lepšie čísla. Je to vizualizačné pravidlo. Bez capu by vyhral väčší strom s vyššou fidelity, ale v obhajobe by bol nepoužiteľný:
+
+- veľa listov znamená veľa vetiev,
+- veľa vetiev znamená horšiu čitateľnosť,
+- horšia čitateľnosť ruší hlavný cieľ Scenára 4.
+
+Preto vyberáme najlepší strom **v rámci čitateľnosti**, nie absolútne najfidelitnejší strom. To je rovnaký trade-off ako pri každom vysvetľovacom modeli: jednoduchšie vysvetlenie niečo stratí, ale musí zostať dosť verné pôvodnému modelu.
+
+### 9.15 Najčastejšie námietky k Scenáru 4
+
+#### „Prečo nevysvetľujete SVM, keď je najlepší?“
+
+Lebo SVM-RBF nemá prirodzené pravidlá typu „ak feature < prah“. Dá sa vysvetľovať cez SHAP/permutation importance, ale to by bol iný projektový rozsah. Scenár 4 chcel heatmapy/stromy, preto je RF prirodzenejší teacher.
+
+#### „Nie je surrogate strom iba ďalší model?“
+
+Je to model, ale s iným cieľom: neučí sa pravdu z datasetu, učí sa výstupy RF. Preto ho hodnotíme cez fidelity voči RF.
+
+#### „Prečo strom nie je rovnako presný ako RF?“
+
+Pretože jeden strom nemôže zachytiť všetkých 300 stromov v ensemble. Ak by bol rovnako presný a jednoduchý, RF by sme nepotrebovali. Strom je vysvetlenie, nie náhrada.
+
+#### „Ako vieme, že surrogate naozaj vystihuje RF?“
+
+Pozeráme fidelity a robíme variable-importance cross-check. Root a horné splity stromu sa zhodujú s top RF importance features, takže strom nezachytáva náhodnú alternatívnu logiku.
+
 ---
 
 ## 11. Čo by sa stalo, keby...

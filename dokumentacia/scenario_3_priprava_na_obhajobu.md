@@ -112,7 +112,16 @@ AUC 0.95 znamená veľmi dobrú schopnosť zoradiť phishing nad legitímne URL.
 
 ### 3.3 Prečo Sens >= 0.94 a Spec >= 0.75
 
-Sensitivity musí byť vysoká, lebo phishing nechceme púšťať. Specificity prah 0.75 je nižší než Sensitivity prah, lebo URL-only filter je prvá línia a môže byť opatrnejší. Zároveň však nemôže blokovať príliš veľa legitímnych stránok.
+Sensitivity musí byť vysoká, lebo phishing nechceme púšťať: `Sens >= 0.94` znamená, že redukovaný URL-only filter má zachytiť aspoň 94 % phishingových URL. Druhá časť operating-point kritéria je `Spec >= 0.75`: aspoň 75 % legitímnych URL má prejsť ako legitímne pri default prahu 0.5. Inými slovami, povoľujeme maximálne približne 25 % false-positive blokácií v redukovanom URL-only experimente.
+
+Prečo je Specificity prah nižší než Sensitivity prah:
+
+- Scenár 3 nie je finálny výber najlepšieho produkčného modelu; ten vyšiel v Scenári 2 ako SVM-RBF s minSS približne 0.98.
+- Scenár 3 testuje inú otázku: či existuje **kompaktný 9-feature URL filter**, ktorý ešte nestratí použiteľnú kvalitu.
+- URL-only filter je najlacnejšia prvá línia. V takejto vrstve je prijateľnejšie mať opatrnejší model než pustiť phishing, ale stále musí existovať spodná hranica pre legitímne URL.
+- `0.75` preto nie je cieľová kvalita, ale minimálny floor. Výsledok výrazne nad ním je komfortný, výsledok tesne nad ním treba priznať ako hraničný.
+
+Vzťah k `minSS`: ak vyžadujeme `Sens >= 0.94` a `Spec >= 0.75`, tak implicitný minimálny `minSS` floor je `0.75`. To je menej prísne než deploymentový víťaz v Scenári 2. Preto treba v obhajobe formulovať záver presne: **Scenár 3 podporuje existenciu kompaktného použiteľného URL jadra, nie to, že každý redukovaný logistický model je lepší produkčný hard-block filter než SVM-RBF.**
 
 ---
 
@@ -205,6 +214,24 @@ Stepwise a lasso sa zhodnú na:
 Obhajobová pointa:
 
 > Keď dva algoritmicky odlišné prístupy vyberú rovnakých 9 features, je to silnejší dôkaz než keby sme sa spoliehali iba na jednu metódu.
+
+### 6.5 Ako čítať `minSS` pri H2
+
+Keďže celý projekt často používa `minSS`, je dobré mať pripravené aj čítanie Scenára 3 cez túto metriku:
+
+| Metóda | Sensitivity | Specificity | minSS | Obhajobová interpretácia |
+|---|---:|---:|---:|---|
+| Stepwise | 0.949 | 0.839 | 0.839 | komfortnejší redukovaný víťaz; prejde aj pri prísnejšom `minSS >= 0.80` |
+| Lasso | 0.941 | 0.764 | 0.764 | formálne prejde, ale je hraničné; hlavná hodnota je potvrdenie rovnakého 9-feature core |
+| Elastic-Net | 0.936 | 0.749 | 0.749 | tesne pod floorom a navyše nechá 10 features; preto H2 neprejde |
+
+Toto je dôležité, lebo pri obhajobe môže zaznieť otázka, či `0.75` nie je príliš nízko. Najlepšia odpoveď je priznať trade-off:
+
+> Áno, `0.75` je nižší floor než by som chcel pre finálny produkčný hard-block filter. Preto Scenár 3 nevyhlasujem za náhradu SVM-RBF zo Scenára 2. Používam ho ako dôkaz, že z 13 URL features existuje stabilné 9-feature jadro. Ak by sme pre H2 nastavili prísnejší `minSS >= 0.80`, prešiel by stepwise, ale lasso by bolo len podporný dôkaz stability supportu, nie samostatný deployment víťaz.
+
+Ak chceš mať ešte prísnejší naratív, môžeš povedať:
+
+> Pri produkčnom nasadení by som nepoužil samotný prah `Spec >= 0.75` ako finálne SLA. Pred nasadením by som threshold kalibroval podľa nákladov false positive vs false negative a porovnal by som ho so SVM-RBF.
 
 ---
 
@@ -382,7 +409,15 @@ Lebo stabilita nie je jediné kritérium. Elastic-net nechal 10 features a tesne
 
 ### Prečo Specificity prah iba 0.75?
 
-URL-only filter je prvá línia. Ak má byť veľmi rýchly a lacný, môže byť menej dokonalý než plný Behavior model. Ale 0.75 stále bráni tomu, aby filter blokoval väčšinu legitímnych stránok.
+URL-only filter je prvá línia a Scenár 3 testuje kompaktnosť, nie finálne SLA. `0.75` je floor pre Specificity: aspoň 3 zo 4 legit URL musia prejsť. Nie je to cieľová hodnota produkčného hard-block filtra. Preto aj interpretujeme lasso ako tesný pass a stepwise ako komfortnejší výsledok. Ak by komisia chcela prísnejší deployment floor, napríklad `minSS >= 0.80`, Scenár 3 by stále mal silný výsledok cez stepwise, ale lasso by slúžilo najmä ako potvrdenie rovnakého 9-feature jadra.
+
+### Ako vysvetliť operating point bez zbytočného zdržiavania?
+
+Stačí povedať, že operating point má dve podmienky: `Sens >= 0.94` chráni pred púšťaním phishingu a `Spec >= 0.75` chráni pred tým, aby redukovaný URL-only filter blokoval väčšinu legitímnych stránok. Prísnejšia je teda senzitívna strana, lebo false negative phishing URL je pre proxy rizikovejšie než false positive blokácia legitímnej URL.
+
+### Nie je `0.75` v rozpore s tým, že sa zameriavame na `minSS`?
+
+Nie je to rozpor, ale treba to správne pomenovať. H1 v Scenári 2 používa `minSS` ako primárnu deployment metriku pre porovnanie modelových rodín. H2 v Scenári 3 je iná otázka: kompaktnosť pri zachovaní minimálnej použiteľnej kvality. Preto má C3 explicitné prahy `Sens >= 0.94` a `Spec >= 0.75`, čo znamená implicitný `minSS >= 0.75`. Je to slabší floor než finálny deployment cieľ, ale pre redukovaný logistický URL-only filter je to obhájiteľný minimálny prah. Treba však férovo povedať, že stepwise je silnejší než lasso, lebo jeho minSS je približne 0.839.
 
 ### Prečo je lasso pass „tesne“ stále pass?
 
