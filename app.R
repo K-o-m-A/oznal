@@ -298,6 +298,20 @@ ui <- navbarPage(
             helpText("Top-right corner = ideal model (catches all phish AND ",
                      "lets all legit through). Each point is one (model, tier) ",
                      "combination at the default 0.5 threshold.")
+          ),
+          tabPanel("H1 Criteria",
+            br(),
+            h4("H1 verdikt - kritériá pre potvrdenie hypotézy"),
+            helpText("H1: rozdiel medzi parametrickými a neparametrickými ",
+                     "modelmi závisí od feature tieru. Na Lexical tieri ",
+                     "očakávame výrazný gap, ktorý sa na FullLite zatrie."),
+            br(),
+            DTOutput("h1_criteria_dt"),
+            br(),
+            helpText(strong("Poznámka: "),
+                     "gap = minSS(najlepší neparametrický) − minSS(najlepší parametrický) ",
+                     "na danom tieri. ΔAUC počítame ako rozdiel priemernej test AUC ",
+                     "medzi rodinami na Lexical.")
           )
         )
       )
@@ -1041,6 +1055,76 @@ server <- function(input, output, session) {
            subtitle = "Dotted lines = 95% target on each axis; dashed line = symmetry") +
       theme_minimal(base_size = 13)
   })
+
+  # ---- H1 criteria evaluation -------------------------------------------
+  h1_criteria <- reactive({
+    d <- results_long()
+    if (is.null(d) || !nrow(d)) return(NULL)
+
+    gap_on <- function(tier_name) {
+      tier_rows <- d %>% filter(tier == tier_name)
+      if (!nrow(tier_rows)) return(NA_real_)
+      par_rows    <- tier_rows %>% filter(family == "parametric")
+      nonpar_rows <- tier_rows %>% filter(family == "non-parametric")
+      if (!nrow(par_rows) || !nrow(nonpar_rows)) return(NA_real_)
+      max(nonpar_rows$min_ss, na.rm = TRUE) -
+        max(par_rows$min_ss, na.rm = TRUE)
+    }
+
+    auc_gap_on <- function(tier_name) {
+      tier_rows <- d %>% filter(tier == tier_name)
+      if (!nrow(tier_rows)) return(NA_real_)
+      par_rows    <- tier_rows %>% filter(family == "parametric")
+      nonpar_rows <- tier_rows %>% filter(family == "non-parametric")
+      if (!nrow(par_rows) || !nrow(nonpar_rows)) return(NA_real_)
+      mean(nonpar_rows$test_auc, na.rm = TRUE) -
+        mean(par_rows$test_auc,   na.rm = TRUE)
+    }
+
+    gap_lex      <- gap_on("Lexical")
+    gap_full     <- gap_on("FullLite")
+    auc_gap_lex  <- auc_gap_on("Lexical")
+
+    list(
+      gap_lex     = gap_lex,
+      gap_full    = gap_full,
+      auc_gap_lex = auc_gap_lex,
+      c1_pass     = isTRUE(gap_lex >= 0.10),
+      c2_pass     = isTRUE(!is.na(gap_lex) && !is.na(gap_full) &&
+                           gap_lex > gap_full),
+      c3_pass     = isTRUE(auc_gap_lex >= 0.02)
+    )
+  })
+
+  output$h1_criteria_dt <- renderDT({
+    h <- h1_criteria()
+    if (is.null(h)) return(empty_table(rv$results))
+    tibble::tibble(
+      `#`        = c("C1", "C2", "C3"),
+      Kritérium  = c(
+        "Gap v minSS (Lexical): najlepší neparametrický vs najlepší parametrický",
+        "Gradient cez tiery: gap(Lexical) > gap(FullLite)",
+        "Sanity ranking: priemerný ΔAUC medzi rodinami na Lexical"),
+      Prah       = c("Δ minSS ≥ 0.10",
+                     "gap(Lex) > gap(FullLite)",
+                     "ΔAUC ≥ 0.02"),
+      `Nameraná hodnota` = c(
+        if (is.na(h$gap_lex))    "n/a" else sprintf("%.4f", h$gap_lex),
+        if (is.na(h$gap_lex) || is.na(h$gap_full)) "n/a"
+          else sprintf("Lex %.4f vs Full %.4f", h$gap_lex, h$gap_full),
+        if (is.na(h$auc_gap_lex)) "n/a" else sprintf("%.4f", h$auc_gap_lex)),
+      Verdikt    = c(
+        if (h$c1_pass) "✓ PASS" else "✗ FAIL",
+        if (h$c2_pass) "✓ PASS" else "✗ FAIL",
+        if (h$c3_pass) "✓ PASS" else "✗ FAIL")
+    ) %>%
+      datatable(options = list(dom = "t"), rownames = FALSE) %>%
+      formatStyle("Verdikt",
+                  backgroundColor = styleEqual(c("✓ PASS", "✗ FAIL"),
+                                               c("#E8F5E9", "#FFEBEE")),
+                  fontWeight = "bold")
+  })
+
 
   # ---- Task 4: surrogate tree tab -----------------------------------------
   # Reads the cached surrogate grid produced by scenario_2.rmd S7.2
