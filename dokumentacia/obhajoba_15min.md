@@ -22,9 +22,9 @@ Z týchto 50 prediktorov sme však nepoužili všetky priamo a časť z nich sme
 Z 50 prediktorov sme po analýze datasetu odstránili 10 v štyroch skupinách:
 
 - **identifikátory** (`FILENAME`, `URL`, `Domain`, `TLD`, `Title`) - surový text, počty a dĺžky z nich už máme odvodené;
-- **vypočítané skóre** (`URLSimilarityIndex`, `TLDLegitimateProb`, `URLCharProb`) - výstupy iných phishing detektorov; nechceli sme byť meta-klasifikátor nad cudzím skóre;
-- **redundantná binárka** `HasObfuscation` - duplikuje `NoOfObfuscatedChar > 0`;
-- **pomerové features** (`LetterRatioInURL`, `DegitRatioInURL`, `ObfuscationRatio`) - algebraicky odvodené od counts a dĺžky URL, pridávajú kolinearitu.
+  - **vypočítané skóre** (`URLSimilarityIndex`, `TLDLegitimateProb`, `URLCharProb`) - výstupy iných phishing detektorov; nechceli sme byť meta-klasifikátor nad cudzím skóre;
+  - **redundantná binárka** `HasObfuscation` - duplikuje `NoOfObfuscatedChar > 0`;
+  - **pomerové features** (`LetterRatioInURL`, `DegitRatioInURL`, `ObfuscationRatio`) - algebraicky odvodené od counts a dĺžky URL, pridávajú kolinearitu.
 
 Ostáva 40 prediktorov: 13 Lexical, 7 Trust a 20 Behavior.
 
@@ -68,7 +68,7 @@ Pôvodne sme chceli AUC ako hlavnú metriku - je to štandardná voľba a krásn
 Preto sme pridali dve metriky, ktoré priamo zodpovedajú tomu, čo proxy reálne robí:
 
 - **Sensitivity** = `TP / (TP + FN)` -  aký podiel phishingu sme **chytili**
-- **Specificity** = `TN / (TN + FP)` -  aký podiel legit traffic-u sme **správne pustili**
+  - **Specificity** = `TN / (TN + FP)` -  aký podiel legit traffic-u sme **správne pustili**
 
 A nakoniec **minSS** = minimum z týchto dvoch. minSS je low-bar metrika: zachytáva najslabšiu z dvoch zložiek. Model so Sensitivity 0.99 a Specificity 0.40 má minSS = 0.40 - bez ohľadu na to, ako pekne vyzerá AUC, ako binárny filter zlyhal. Práve preto je C1 (kritérium pre H1) postavené nad minSS, nie nad AUC.
 
@@ -76,22 +76,22 @@ A nakoniec **minSS** = minimum z týchto dvoch. minSS je low-bar metrika: zachyt
 Aby bola H1 potvrdená, musia platiť tri kritériá súčasne:
 
 - **C1 - veľkosť rozdielu na Lexical.** Δ minSS medzi najlepším neparametrickým a najlepším parametrickým modelom musí byť aspoň **0.10**. Prah 0.10 je deploymentovo významný - rozdiel 10 percentuálnych bodov v tom, koľko phishingu chytíme alebo koľko legit URL pustíme, je v praxi citeľný.
-- **C2 - gradient cez tiery.** „Gap“ znamená jednoducho **o koľko je najlepší neparametrický model lepší než najlepší parametrický** na danom tieri. Spočítame ho na Lexical a na FullLite. Kritérium hovorí, že tento náskok má byť **väčší na Lexical než na FullLite** - teda neparametrické modely majú výraznejšie ťahať na slabom URL signáli, a keď dostanú silnejšie Trust a Behavior features, parametrické ich majú dobehnúť. Bez tohto kritéria by sme len ukázali, že neparametrické modely sú celkovo lepšie - H1 ale tvrdí niečo silnejšie, totiž že ich výhoda **závisí od tieru**.
-- **C3 - sanity check cez AUC.** Δ AUC na Lexical musí byť aspoň **0.02**. Je to kontrola, že rozdiel existuje nielen v operating pointe pri 0.5 prahu (minSS), ale aj v poradí skóre. Ak by C1 platilo a C3 nie, rozdiel by mohol byť iba kalibračný artefakt. C3 je vedľajšie - C1 a C2 sú hlavné kritériá.
+  - **C2 - gradient cez tiery.** „Gap“ znamená jednoducho **o koľko je najlepší neparametrický model lepší než najlepší parametrický** na danom tieri. Spočítame ho na Lexical a na FullLite. Kritérium hovorí, že tento náskok má byť **väčší na Lexical než na FullLite** - teda neparametrické modely majú výraznejšie ťahať na slabom URL signáli, a keď dostanú silnejšie Trust a Behavior features, parametrické ich majú dobehnúť. Bez tohto kritéria by sme len ukázali, že neparametrické modely sú celkovo lepšie - H1 ale tvrdí niečo silnejšie, totiž že ich výhoda **závisí od tieru**.
+  - **C3 - sanity check cez AUC.** Δ AUC na Lexical musí byť aspoň **0.02**. Je to kontrola, že rozdiel existuje nielen v operating pointe pri 0.5 prahu (minSS), ale aj v poradí skóre. Ak by C1 platilo a C3 nie, rozdiel by mohol byť iba kalibračný artefakt. C3 je vedľajšie - C1 a C2 sú hlavné kritériá.
 
 **Experimentálny dizajn.** Porovnali sme tri parametrické modely - Logistic Regression Ridge, LDA, Naive Bayes - a tri neparametrické - Random Forest, SVM-RBF, KNN. Každý model sme pustili na rovnaké štyri tiery: Lexical, Trust, Behavior bez near-leakerov a FullLite. Stratifikovaný 30-tisícový subsample, 80-20 split, hyperparametre fixné a konvenčné, lebo cieľom je férové porovnanie rodín, nie leaderboard tuning.
 
 **Prečo 10-fold cross-validation.** Tréningovú časť rozdelíme na 10 stratifikovaných foldov, každý model fitujeme 10-krát (na 9, validujeme na 10.) a spriemerujeme. Konkrétne nám to dalo:
 
 1. **10 odhadov namiesto jedného** - vieme rozlíšiť skutočný rozdiel medzi modelmi od šumu jedného splitu (priemer + smerodajná odchýlka cez foldy). To je dôležité najmä preto, že **viaceré modely majú AUC veľmi blízko 1.0** - rozdiely medzi nimi sú malé a bez 10 čísel by sa nedali odlíšiť od náhodného kolísania jedného splitu.
-2. **Férové párované porovnanie** - všetkých 6 modelov zdieľa rovnaké fold indexy, takže rozdiely sa počítajú na tých istých validačných setoch fold-by-fold; oddelí sa variabilita modelu od variability splitu. Pri vysokých AUC, kde sú absolútne rozdiely tesné, je párovanie kritické - bez neho by šum dominoval.
+   2. **Férové párované porovnanie** - všetkých 6 modelov zdieľa rovnaké fold indexy, takže rozdiely sa počítajú na tých istých validačných setoch fold-by-fold; oddelí sa variabilita modelu od variability splitu. Pri vysokých AUC, kde sú absolútne rozdiely tesné, je párovanie kritické - bez neho by šum dominoval.
 
 a
 **Prečo prah 0.5.** Po prvé, je to **prirodzený default** - model vráti pravdepodobnosť phishingu medzi 0 a 1, a 0.5 znamená „phishing je pravdepodobnejší než legit“. Po druhé, **triedy v datasete sú približne vyvážené** (~50/50), takže 0.5 zodpovedá apriori rovnováhe a nie je potrebné ho posúvať kvôli class imbalance. Po tretie, **je to štandardný operating point v phishing literatúre aj v ML knižniciach**:
 
 - **Akademická literatúra na phishing URL detekcii.** Liu et al., *„Efficient Phishing URL Detection Using Graph-based Machine Learning and Loopy Belief Propagation“* (arXiv:2501.06912, 2025) — autori cez grid search a ROC analýzu reportujú, že **optimálny prah je 0.5** pre balansovanie sensitivity/specificity. Druhým príkladom je *„Phishing Attack Detection on URLs using KNN, RF, DT with GA and K-fold Cross Validation Approach“* (IJRISS, 2024), kde KNN drží **discrimination threshold 0.50** a RF 0.48 na phishing URL klasifikácii.
-- **ML knižnice.** `caret::predict()`, `sklearn`, `glmnet`, `randomForest::predict()` — všetky používajú prah 0.5 ako default pri binárnej klasifikácii.
-- **Komerčné proxy systémy.** Zscaler vo svojej dokumentácii „Blocking the Unknown Threat with Machine Learning“ uvádza, že ich klasifikátor vracia ML score, na ktoré admin **nastavuje threshold** — defaultný operating point je nastaviteľný, ale štandardne sa používa balancovaná hodnota.
+  - **ML knižnice.** `caret::predict()`, `sklearn`, `glmnet`, `randomForest::predict()` — všetky používajú prah 0.5 ako default pri binárnej klasifikácii.
+  - **Komerčné proxy systémy.** Zscaler vo svojej dokumentácii „Blocking the Unknown Threat with Machine Learning“ uvádza, že ich klasifikátor vracia ML score, na ktoré admin **nastavuje threshold** — defaultný operating point je nastaviteľný, ale štandardne sa používa balancovaná hodnota.
 
 Keby sme prah ladili pre každý model zvlášť, miešali by sme dve veci: kvalitu modelu a kvalitu kalibrácie. Cieľ Scenára 2 je porovnanie modelových rodín, preto držíme prah jednotný.
 
@@ -112,9 +112,9 @@ Keby triedy **neboli vyvážené** - napríklad pri reálnom traffic-u, kde phis
 SVM s RBF kernelom je v phishing URL literatúre štandardná baseline. Používajú ho napríklad:
 
 - **Sahingoz et al.**, *„A novel lightweight URL phishing detection system using SVM and similarity index"*, Human-centric Computing and Information Sciences (Springer, 2018) — SVM-RBF so 6 lexikálnymi features, ~95.8% accuracy.
-- **„Phishing Detection Using Machine Learning Techniques"** (arXiv:2009.11116, 2020) — SVM-RBF dosahuje 0.9706 accuracy na phishing dataset.
-- **„A SVM-based Technique to Detect Phishing URLs"**, Information Technology Journal (2012) — jedna z prvých prác, ktoré zaviedli SVM s nelineárnym kernelom ako baseline pre URL phishing detection.
-- **„An application for predicting phishing attacks: A case of implementing a support vector machine learning model"**, Cyber Security and Applications (Elsevier, 2024).
+  - **„Phishing Detection Using Machine Learning Techniques"** (arXiv:2009.11116, 2020) — SVM-RBF dosahuje 0.9706 accuracy na phishing dataset.
+  - **„A SVM-based Technique to Detect Phishing URLs"**, Information Technology Journal (2012) — jedna z prvých prác, ktoré zaviedli SVM s nelineárnym kernelom ako baseline pre URL phishing detection.
+  - **„An application for predicting phishing attacks: A case of implementing a support vector machine learning model"**, Cyber Security and Applications (Elsevier, 2024).
 
 Náš SVM-RBF teda nie je exotická voľba — zapadá do zavedenej tradície a naše čísla (minSS ~0.98) sú konzistentné s tým, čo táto literatúra reportuje.
 

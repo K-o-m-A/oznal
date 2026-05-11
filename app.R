@@ -828,6 +828,7 @@ server <- function(input, output, session) {
         precision   = r$test_prec,
         sensitivity = r$test_sens,
         specificity = r$test_spec,
+        min_ss      = pmin(r$test_sens, r$test_spec),
         train_secs  = r$train_secs
       )
     }) %>%
@@ -881,10 +882,11 @@ server <- function(input, output, session) {
                 F1            = round(f1,          4),
                 Sensitivity   = round(sensitivity, 4),
                 Specificity   = round(specificity, 4),
+                minSS         = round(min_ss,      4),
                 `Train (s)`   = round(train_secs,  1)) %>%
       datatable(options = list(pageLength = 25, dom = "tip", scrollX = TRUE),
                 rownames = FALSE) %>%
-      formatStyle(c("Sensitivity", "Specificity"),
+      formatStyle(c("Sensitivity", "Specificity", "minSS"),
                   fontWeight = "bold",
                   backgroundColor = "#FFF7E6")
   })
@@ -898,7 +900,8 @@ server <- function(input, output, session) {
                 F1          = round(f1,          4),
                 Precision   = round(precision,   4),
                 Sensitivity = round(sensitivity, 4),
-                Specificity = round(specificity, 4)) %>%
+                Specificity = round(specificity, 4),
+                minSS       = round(min_ss,      4)) %>%
       datatable(options = list(pageLength = 25, dom = "tip"),
                 rownames = FALSE)
   })
@@ -1529,7 +1532,8 @@ server <- function(input, output, session) {
       acc  = unname(cm$overall["Accuracy"]),
       sens = unname(cm$byClass["Sensitivity"]),
       spec = unname(cm$byClass["Specificity"]),
-      f1   = unname(cm$byClass["F1"])
+      f1   = unname(cm$byClass["F1"]),
+      auc  = as.numeric(pROC::auc(rv_winner$roc_obj))
     )
   })
 
@@ -1543,6 +1547,7 @@ server <- function(input, output, session) {
           strong(label), ": ", sprintf("%.4f", value))
     }
     tagList(
+      chip("AUC",         m$auc,  "#E8F5E9"),
       chip("Accuracy",    m$acc,  "#F0F7FF"),
       chip("Sensitivity", m$sens, "#FFF7E6"),
       chip("Specificity", m$spec, "#FFF7E6"),
