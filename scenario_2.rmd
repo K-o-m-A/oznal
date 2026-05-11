@@ -1212,9 +1212,6 @@ faithful to the teacher we read the RF's own variable importance for the same te
 and compare the ordering against the tree's top few splits.
 
 ```{r task4-varimp, fig.height=5, fig.width=11}
-# base-R title() goes through utf8towcs() which chokes on em-dashes
-# in non-UTF-8 Windows locales - we keep the surrounding prose
-# em-dashes intact but use a plain hyphen in the plot titles here.
 op <- par(mfrow = c(1, 2), mar = c(4, 7, 3, 1))
 randomForest::varImpPlot(
   rf_teachers[["Lexical"]],

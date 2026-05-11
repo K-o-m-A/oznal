@@ -352,14 +352,17 @@ ui <- navbarPage(
                     min = 5, max = 30, value = 15, step = 1)
       )
     ),
-    verbatimTextOutput("task4_status"),
+    uiOutput("task4_status"),
     plotOutput("task4_tree_plot", height = "520px"),
     br(),
     h5("Selected tree vs RF (per-class agreement + deployment Sens/Spec)"),
     DTOutput("task4_metrics_dt"),
     br(),
     h5("Fidelity saturation - best (cp, minbucket) per depth"),
-    DTOutput("task4_depth_dt")
+    DTOutput("task4_depth_dt"),
+    br(),
+    h5("RF variable importance cross-check"),
+    plotOutput("task4_varimp_plot", height = "430px"),
   ),
 
   # ---- Scenario 3 tab -----------------------------------------------------
@@ -1141,21 +1144,27 @@ server <- function(input, output, session) {
     tryCatch(readRDS(path)$data, error = function(e) NULL)
   })
 
-  output$task4_status <- renderText({
+  output$task4_status <- renderUI({
     tier <- input$task4_tier
     path <- file.path(SURROGATE_DIR,
                       sprintf("surrogate_%s.rds", tolower(tier)))
     cache <- surrogate_cache()
     if (is.null(cache)) {
-      return(sprintf(paste(
-        "No cached surrogate for '%s'.",
-        "Knit scenario_2.rmd (section 7) to generate '%s';",
-        "it runs the rpart grid and writes the .rds the app reads here.",
-        sep = "\n"), tier, path))
+      return(div(
+        style = "padding:10px;background:#FFF7E6;border-left:4px solid #E0A800;border-radius:4px;margin-bottom:10px;",
+        strong(sprintf("No cached surrogate for '%s'.", tier)), br(),
+        "Knit ", code("scenario_2.rmd"), " section 8 to generate ", code(path), "."
+      ))
     }
-    n_leaves <- max(cache$results$leaves)
-    sprintf("Loaded %d grid rows for '%s'. Max leaves in grid: %d.",
-            nrow(cache$results), tier, n_leaves)
+    NULL
+  })
+
+  rf_teacher_cache <- reactive({
+    path <- file.path(SURROGATE_DIR, "rf_for_surrogate.rds")
+    if (!file.exists(path)) return(NULL)
+    cached <- tryCatch(readRDS(path), error = function(e) { force(e); NULL })
+    if (is.null(cached) || is.null(cached$by_tier)) return(NULL)
+    cached$by_tier[[input$task4_tier]]
   })
 
   # Picks the same winner scenario_2.rmd S7.4 plots: the highest-fidelity
@@ -1198,6 +1207,33 @@ server <- function(input, output, session) {
            main = sprintf("%s surrogate tree", input$task4_tier))
       text(sel$tree, use.n = TRUE, cex = 0.65)
     }
+  })
+
+  output$task4_varimp_plot <- renderPlot({
+    rf_fit <- rf_teacher_cache()
+    if (is.null(rf_fit)) {
+      plot.new()
+      title(main = "RF teacher cache not found")
+      text(0.5, 0.5,
+           "Run scenario_2.rmd section 8 to generate rf_for_surrogate.rds.",
+           cex = 0.95)
+      return()
+    }
+    if (!requireNamespace("randomForest", quietly = TRUE)) {
+      plot.new()
+      title(main = "Package 'randomForest' is not available")
+      return()
+    }
+    n_vars <- if (!is.null(rf_fit$importance)) {
+      min(10, nrow(as.matrix(rf_fit$importance)))
+    } else {
+      10
+    }
+    randomForest::varImpPlot(
+      rf_fit,
+      n.var = n_vars,
+      main = sprintf("RF variable importance - %s", input$task4_tier)
+    )
   })
 
   output$task4_metrics_dt <- renderDT({
@@ -1375,11 +1411,11 @@ server <- function(input, output, session) {
         min_p = min(p, na.rm = TRUE),
         max_p = max(p, na.rm = TRUE),
         final_p = dplyr::last(p),
-        crosses_05 = any(p > 0.05) && any(p < 0.05),
+        crosses_05 = any(p > 0.05) & any(p < 0.05),
         .groups = "drop"
       ) %>%
       arrange(desc(crosses_05), desc(max_p), predictor) %>%
-      mutate(across(c(min_p, max_p, final_p), ~ signif(.x, 3))) %>%
+      mutate(across(c(min_p, max_p, final_p), ~ sprintf("%.3f", .x))) %>%
       datatable(options = list(dom = "t", pageLength = 12),
                 rownames = FALSE)
   })
